@@ -32,9 +32,33 @@ pub enum Block {
         content: String,
         is_error: bool,
     },
+    /// An image the user sent, kept on disk (absolute path); providers read and
+    /// base64-encode it when building a request.
+    Image { media_type: String, path: String },
     /// Provider-specific block (e.g. Anthropic thinking) that must be sent back
     /// unchanged. Providers that don't understand it skip it.
     Opaque(Value),
+}
+
+/// Image formats every supported provider accepts.
+pub const IMAGE_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
+/// Larger images are not sent to the model (Anthropic's per-image limit).
+pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// The image as a `data:` URL, or `None` if the file is gone.
+pub fn image_data_url(media_type: &str, path: &str) -> Option<String> {
+    image_base64(path).map(|b64| format!("data:{media_type};base64,{b64}"))
+}
+
+pub fn image_base64(path: &str) -> Option<String> {
+    use base64::Engine;
+    let bytes = std::fs::read(path).ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// What a provider sends instead of an image whose file has disappeared.
+pub fn missing_image(path: &str) -> String {
+    format!("[image no longer available: {path}]")
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +87,9 @@ impl Block {
             Block::ToolResult { tool_use_id, content, is_error } => serde_json::json!({
                 "type": "tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error
             }),
+            Block::Image { media_type, path } => {
+                serde_json::json!({"type": "image", "media_type": media_type, "path": path})
+            }
             Block::Opaque(v) => serde_json::json!({"type": "opaque", "value": v}),
         }
     }
@@ -77,6 +104,7 @@ impl Block {
                 content: s("content")?,
                 is_error: v["is_error"].as_bool().unwrap_or(false),
             },
+            "image" => Block::Image { media_type: s("media_type")?, path: s("path")? },
             "opaque" => Block::Opaque(v["value"].clone()),
             _ => return None,
         })

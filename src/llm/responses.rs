@@ -63,6 +63,13 @@ impl<A: TokenSource> Responses<A> {
                     (Role::User, Block::Text(t)) => {
                         out.push(json!({"role": "user", "content": t}));
                     }
+                    (Role::User, Block::Image { media_type, path }) => {
+                        let part = match image_data_url(media_type, path) {
+                            Some(url) => json!({"type": "input_image", "image_url": url}),
+                            None => json!({"type": "input_text", "text": missing_image(path)}),
+                        };
+                        out.push(json!({"role": "user", "content": [part]}));
+                    }
                     (Role::Assistant, Block::Text(t)) => out.push(json!({
                         "type": "message",
                         "role": "assistant",

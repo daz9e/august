@@ -8,7 +8,10 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct Api {
     http: reqwest::Client,
+    /// `{host}/bot{token}`: method calls.
     base: String,
+    /// `{host}/file/bot{token}`: file downloads.
+    file_base: String,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +35,9 @@ impl std::fmt::Display for ApiError {
 }
 impl std::error::Error for ApiError {}
 
+/// Uploads and downloads may be large; method calls use the client's shorter timeout.
+const FILE_TIMEOUT: Duration = Duration::from_secs(300);
+
 impl Api {
     /// `TELEGRAM_API_BASE` points at a self-hosted Bot API server (or a test double).
     pub fn new(token: &str) -> Self {
@@ -39,27 +45,62 @@ impl Api {
             .ok()
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "https://api.telegram.org".into());
-        Self::with_base(format!("{}/bot{token}", host.trim_end_matches('/')))
+        Self::with_host(&host, token)
     }
 
-    pub fn with_base(base: String) -> Self {
+    pub fn with_host(host: &str, token: &str) -> Self {
+        let host = host.trim_end_matches('/');
         Self {
             http: reqwest::Client::builder()
                 .user_agent(crate::util::USER_AGENT)
                 .timeout(Duration::from_secs(60))
                 .build()
                 .expect("http client"),
-            base,
+            base: format!("{host}/bot{token}"),
+            file_base: format!("{host}/file/bot{token}"),
         }
     }
 
-    /// Calls a Bot API method; waits and retries on flood control (429).
+    /// Calls a Bot API method with JSON parameters.
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        let url = format!("{}/{method}", self.base);
+        self.request(method, || self.http.post(&url).json(&params)).await
+    }
+
+    /// Calls a Bot API method that uploads a file in `field`.
+    pub async fn upload(&self, method: &str, params: Value, field: &str, name: &str, bytes: &[u8]) -> Result<Value> {
+        let url = format!("{}/{method}", self.base);
+        self.request(method, || {
+            let mut form = reqwest::multipart::Form::new();
+            for (k, v) in params.as_object().into_iter().flatten() {
+                form = form.text(k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_string));
+            }
+            let part = reqwest::multipart::Part::bytes(bytes.to_vec()).file_name(name.to_string());
+            self.http.post(&url).timeout(FILE_TIMEOUT).multipart(form.part(field.to_string(), part))
+        })
+        .await
+    }
+
+    /// Downloads a file by its `file_id`.
+    pub async fn download(&self, file_id: &str) -> Result<Vec<u8>> {
+        let file = self.call("getFile", json!({"file_id": file_id})).await?;
+        let path = file["file_path"].as_str().context("getFile: no file_path")?;
+        let resp = self
+            .http
+            .get(format!("{}/{path}", self.file_base))
+            .timeout(FILE_TIMEOUT)
+            .send()
+            .await
+            .context("telegram: file download failed")?
+            .error_for_status()
+            .context("telegram: file download failed")?;
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// Sends a request built by `build`; waits and retries on flood control (429).
+    async fn request(&self, method: &str, build: impl Fn() -> reqwest::RequestBuilder) -> Result<Value> {
         for attempt in 0..4 {
-            let resp = self
-                .http
-                .post(format!("{}/{method}", self.base))
-                .json(&params)
+            let resp = build()
                 .send()
                 .await
                 .with_context(|| format!("telegram {method}: request failed"))?;

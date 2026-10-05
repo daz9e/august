@@ -67,6 +67,13 @@ impl Anthropic {
                     "content": content,
                     "is_error": is_error,
                 }),
+                Block::Image { media_type, path } => match image_base64(path) {
+                    Some(data) => json!({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": media_type, "data": data},
+                    }),
+                    None => json!({"type": "text", "text": missing_image(path)}),
+                },
                 Block::Opaque(v) => v.clone(),
             })
             .collect();

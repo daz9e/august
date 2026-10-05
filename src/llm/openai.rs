@@ -49,7 +49,24 @@ impl OpenAi {
                         }
                     }
                     let text = m.text();
-                    if !text.is_empty() {
+                    let images: Vec<Value> = m
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            Block::Image { media_type, path } => Some(match image_data_url(media_type, path) {
+                                Some(url) => json!({"type": "image_url", "image_url": {"url": url}}),
+                                None => json!({"type": "text", "text": missing_image(path)}),
+                            }),
+                            _ => None,
+                        })
+                        .collect();
+                    if !images.is_empty() {
+                        let mut parts = images;
+                        if !text.is_empty() {
+                            parts.insert(0, json!({"type": "text", "text": text}));
+                        }
+                        out.push(json!({"role": "user", "content": parts}));
+                    } else if !text.is_empty() {
                         out.push(json!({"role": "user", "content": text}));
                     }
                 }

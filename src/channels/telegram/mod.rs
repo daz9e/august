@@ -5,7 +5,7 @@ mod api;
 mod markdown;
 
 use super::{
-    Button, Channel, ChannelDef, ChatId, CommandSpec, Inbound, InboundKind, Limits, User,
+    Attachment, Button, Channel, ChannelDef, ChatId, CommandSpec, Inbound, InboundKind, Limits, User,
     parse_command,
 };
 use crate::channels::bus::Bus;
@@ -23,6 +23,12 @@ use std::time::Duration;
 const ID: &str = "telegram";
 /// Telegram allows 4096 chars after HTML conversion; Markdown source is kept well below.
 const MAX_LEN: usize = 3000;
+/// Bot API limits: bots download files up to 20 MB and upload up to 50 MB
+/// (photos up to 10 MB).
+const MAX_DOWNLOAD: u64 = 20 * 1024 * 1024;
+const MAX_UPLOAD: u64 = 50 * 1024 * 1024;
+const MAX_PHOTO: u64 = 10 * 1024 * 1024;
+const MAX_CAPTION: usize = 1024;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -116,13 +122,14 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
     }
 
     let m = &u["message"];
-    let (Some(chat), Some(user), Some(text)) = (
-        m["chat"]["id"].as_i64(),
-        m["from"]["id"].as_i64(),
-        m["text"].as_str(),
-    ) else {
+    let (Some(chat), Some(user)) = (m["chat"]["id"].as_i64(), m["from"]["id"].as_i64()) else {
         return Parsed::Ignore;
     };
+    let files = attachments(m);
+    let text = m["text"].as_str().or(m["caption"].as_str()).unwrap_or("");
+    if text.is_empty() && files.is_empty() {
+        return Parsed::Ignore; // stickers, service messages, ...
+    }
     if m["from"]["is_bot"].as_bool() == Some(true) {
         return Parsed::Ignore;
     }
@@ -131,7 +138,7 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
     let mention = format!("@{}", bot.username.to_ascii_lowercase());
     let mentioned = text.to_ascii_lowercase().contains(&mention);
     let replied_to_bot = m["reply_to_message"]["from"]["id"].as_i64() == Some(bot.id);
-    let command = parse_command(text, Some(&bot.username));
+    let command = files.is_empty().then(|| parse_command(text, Some(&bot.username))).flatten();
     // In groups the bot only reacts when addressed.
     if !private && !(mentioned || replied_to_bot || command.is_some()) {
         return Parsed::Ignore;
@@ -150,7 +157,7 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
             } else {
                 text.to_string()
             };
-            InboundKind::Text(cleaned.trim().to_string())
+            InboundKind::Message { text: cleaned.trim().to_string(), files }
         }
     };
     Parsed::Event(Inbound {
@@ -161,6 +168,30 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
         },
         kind,
     })
+}
+
+/// Files attached to a message: the largest size of a photo, or a document,
+/// video, audio, voice note or animation.
+fn attachments(m: &Value) -> Vec<Attachment> {
+    let file = |f: &Value, mime: Option<&str>| {
+        Some(Attachment {
+            id: f["file_id"].as_str()?.to_string(),
+            name: f["file_name"].as_str().map(str::to_string),
+            mime: f["mime_type"].as_str().or(mime).map(str::to_string),
+            size: f["file_size"].as_u64(),
+        })
+    };
+    let mut out = Vec::new();
+    if let Some(sizes) = m["photo"].as_array() {
+        let largest = sizes.iter().max_by_key(|p| p["width"].as_u64().unwrap_or(0) * p["height"].as_u64().unwrap_or(0));
+        out.extend(largest.and_then(|p| file(p, Some("image/jpeg"))));
+    }
+    for key in ["document", "video", "audio", "voice", "animation"] {
+        if m[key].is_object() {
+            out.extend(file(&m[key], None));
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------- channel
@@ -344,6 +375,35 @@ impl Channel for TelegramChannel {
             .await
             .map(|_| ())
     }
+
+    async fn download(&self, file: &Attachment) -> Result<Vec<u8>> {
+        if file.size.is_some_and(|s| s > MAX_DOWNLOAD) {
+            bail!("file is larger than the 20 MB Telegram lets bots download");
+        }
+        self.api.download(&file.id).await
+    }
+
+    async fn send_file(&self, chat: &str, path: &std::path::Path, caption: &str) -> Result<()> {
+        let bytes = tokio::fs::read(path).await.with_context(|| format!("read {}", path.display()))?;
+        let size = bytes.len() as u64;
+        if size > MAX_UPLOAD {
+            bail!("file is larger than the 50 MB Telegram lets bots upload");
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+        let mut params = json!({"chat_id": chat_id(chat)});
+        if !caption.is_empty() {
+            params["caption"] = caption.chars().take(MAX_CAPTION).collect::<String>().into();
+        }
+        let photo = matches!(crate::util::mime_for(&name), "image/jpeg" | "image/png" | "image/webp");
+        if photo && size <= MAX_PHOTO {
+            match self.api.upload("sendPhoto", params.clone(), "photo", &name, &bytes).await {
+                Ok(_) => return Ok(()),
+                // e.g. unusual dimensions: still deliver it, as a file
+                Err(e) => eprintln!("telegram: sendPhoto failed, sending as a document: {e:#}"),
+            }
+        }
+        self.api.upload("sendDocument", params, "document", &name, &bytes).await.map(|_| ())
+    }
 }
 
 // ---------------------------------------------------------------- vendor / setup
@@ -478,7 +538,7 @@ mod tests {
     #[test]
     fn private_text_and_command() {
         let Parsed::Event(e) = parse_update(&msg("private", "hi", 7), &bot(), &[7]) else { panic!() };
-        assert!(matches!(e.kind, InboundKind::Text(ref t) if t == "hi"));
+        assert!(matches!(e.kind, InboundKind::Message { ref text, .. } if text == "hi"));
         assert_eq!(e.user.name, "Ann (@ann)");
         let Parsed::Event(e) = parse_update(&msg("private", "/model x", 7), &bot(), &[7]) else { panic!() };
         assert!(matches!(e.kind, InboundKind::Command { ref name, ref args } if name == "model" && args == "x"));
@@ -494,7 +554,7 @@ mod tests {
     fn groups_need_a_mention() {
         assert!(matches!(parse_update(&msg("supergroup", "hi all", 7), &bot(), &[7]), Parsed::Ignore));
         let Parsed::Event(e) = parse_update(&msg("supergroup", "@augustbot hi", 7), &bot(), &[7]) else { panic!() };
-        assert!(matches!(e.kind, InboundKind::Text(ref t) if t == "hi"));
+        assert!(matches!(e.kind, InboundKind::Message { ref text, .. } if text == "hi"));
         assert!(matches!(parse_update(&msg("group", "/new@OtherBot", 7), &bot(), &[7]), Parsed::Ignore));
     }
 
@@ -530,7 +590,7 @@ mod tests {
                 s.write_all(resp.as_bytes()).await.unwrap();
             }
         });
-        let ch = TelegramChannel::with_api(Api::with_base(format!("http://{addr}")), vec![]);
+        let ch = TelegramChannel::with_api(Api::with_host(&format!("http://{addr}"), "T"), vec![]);
         let id = ch.send("5", "**hi**", &[]).await.unwrap();
         assert_eq!(id, "42");
         let seen = seen.lock().unwrap();

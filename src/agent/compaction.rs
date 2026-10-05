@@ -11,6 +11,8 @@ pub(super) const DEFAULT_CONTEXT_TOKENS: usize = 100_000;
 const KEEP_RECENT: usize = 8;
 /// Older tool results longer than this are cut down to a head and a tail.
 const PRUNE_OVER: usize = 2_000;
+/// Rough cost of one image in the model's context.
+const IMAGE_TOKENS: usize = 1_600;
 /// Characters of the summarised transcript sent to the model at most.
 const TRANSCRIPT_MAX: usize = 150_000;
 
@@ -24,19 +26,20 @@ impl Agent {
     pub(super) fn estimate_tokens(&self) -> usize {
         // ~3 characters per token; characters, not bytes, so Cyrillic isn't overcounted.
         let chars: usize = self.history.iter().map(|m| m.content_json().chars().count()).sum();
-        let estimate = (chars + self.system.chars().count()) / 3 + 2_000; // + tool definitions
+        let images = self.history.iter().flat_map(|m| &m.content).filter(|b| matches!(b, Block::Image { .. })).count();
+        let estimate = (chars + self.system.chars().count()) / 3 + images * IMAGE_TOKENS + 2_000; // + tool definitions
         estimate.max(self.last_input_tokens)
     }
 
     /// Frees up context when the history has grown past the limit (or `force`):
-    /// first trims old tool output, then summarises older messages.
+    /// first trims old tool output and images, then summarises older messages.
     /// Returns the estimated token count before and after, if anything changed.
     pub async fn compact(&mut self, force: bool) -> Result<Option<(usize, usize)>> {
         let before = self.estimate_tokens();
         if !force && before < self.context_limit {
             return Ok(None);
         }
-        let mut changed = self.prune_old_tool_results();
+        let mut changed = self.prune_old_blocks();
         if force || self.estimate_tokens() >= self.context_limit {
             changed |= self.summarise_old().await?;
         }
@@ -49,11 +52,17 @@ impl Agent {
         Ok(Some((before, self.estimate_tokens())))
     }
 
-    fn prune_old_tool_results(&mut self) -> bool {
+    fn prune_old_blocks(&mut self) -> bool {
         let end = self.history.len().saturating_sub(KEEP_RECENT);
         let mut changed = false;
         for m in &mut self.history[..end] {
             for b in &mut m.content {
+                // Old images stop being re-sent; the file stays in the workspace.
+                if let Block::Image { path, .. } = b {
+                    *b = Block::Text(format!("[image: {path}]"));
+                    changed = true;
+                    continue;
+                }
                 if let Block::ToolResult { content, .. } = b {
                     if content.len() > PRUNE_OVER {
                         let head: String = content.chars().take(1_200).collect();
@@ -141,6 +150,7 @@ fn transcript(msgs: &[Message]) -> String {
                 Block::ToolResult { content, is_error, .. } => {
                     lines.push(format!("[tool {} {}]", if *is_error { "error" } else { "result" }, clip(content, 600)))
                 }
+                Block::Image { path, .. } => lines.push(format!("{who}: [image {path}]")),
                 Block::Opaque(_) => {}
             }
         }

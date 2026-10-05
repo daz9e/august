@@ -58,6 +58,7 @@ pub async fn run() -> Result<()> {
         approver: Arc::new(CliApprover(stdin.clone())),
         db: db.clone(),
         origin: None,
+        files: None,
     };
     let mut agent = Agent::new(
         provider.clone(),

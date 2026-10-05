@@ -6,7 +6,7 @@ const MAX_READ: usize = 100_000;
 
 /// Resolves `p` against the workspace and rejects anything that escapes it
 /// (`..`, absolute paths elsewhere, symlinks pointing outside).
-pub(super) fn resolve(workspace: &Path, p: &str) -> Result<PathBuf> {
+pub(crate) fn resolve(workspace: &Path, p: &str) -> Result<PathBuf> {
     let joined = workspace.join(p);
     let mut normal = PathBuf::new();
     for c in joined.components() {

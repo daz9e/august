@@ -128,8 +128,19 @@ impl Agent {
         ctx: &ToolCtx,
         on_event: &mut (dyn FnMut(Event) + Send),
     ) -> Result<String> {
+        self.run_turn_with(user_text, Vec::new(), ctx, on_event).await
+    }
+
+    /// Like `run_turn`, with extra blocks (images) after the user's text.
+    pub async fn run_turn_with(
+        &mut self,
+        user_text: &str,
+        attachments: Vec<Block>,
+        ctx: &ToolCtx,
+        on_event: &mut (dyn FnMut(Event) + Send),
+    ) -> Result<String> {
         self.turn_start = self.history.len();
-        let result = self.run_turn_inner(user_text, ctx, on_event).await;
+        let result = self.run_turn_inner(user_text, attachments, ctx, on_event).await;
         match &result {
             Ok(_) => self.persist(),
             Err(_) => self.rollback_turn(),
@@ -140,11 +151,14 @@ impl Agent {
     async fn run_turn_inner(
         &mut self,
         user_text: &str,
+        attachments: Vec<Block>,
         ctx: &ToolCtx,
         on_event: &mut (dyn FnMut(Event) + Send),
     ) -> Result<String> {
         let stamp = chrono::Local::now().format("%a %Y-%m-%d %H:%M");
-        self.history.push(Message::user_text(format!("[{stamp}] {user_text}")));
+        let mut user = Message::user_text(format!("[{stamp}] {user_text}"));
+        user.content.extend(attachments);
+        self.history.push(user);
         let specs = self.tools.specs();
 
         for step in 0..MAX_STEPS {

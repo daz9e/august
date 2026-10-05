@@ -1,6 +1,7 @@
 //! Tools the agent can call, plus the approval hook for risky actions.
 
 mod fs;
+mod media;
 mod memory;
 mod search;
 mod shell;
@@ -24,12 +25,20 @@ pub trait Approver: Send + Sync {
     async fn approve(&self, action: &str) -> bool;
 }
 
+/// Delivers a file from the workspace to the chat the turn runs in.
+#[async_trait]
+pub trait FileSink: Send + Sync {
+    async fn send_file(&self, path: &std::path::Path, caption: &str) -> Result<()>;
+}
+
 pub struct ToolCtx {
     pub workspace: PathBuf,
     pub approver: Arc<dyn Approver>,
     pub db: Arc<Db>,
     /// `(channel, chat)` the turn runs in; `None` in the terminal REPL.
     pub origin: Option<(String, String)>,
+    /// Where `send_file` delivers files; `None` when there is no chat (terminal REPL).
+    pub files: Option<Arc<dyn FileSink>>,
 }
 
 #[async_trait]
@@ -53,6 +62,7 @@ impl ToolRegistry {
                 Box::new(fs::WriteFile),
                 Box::new(fs::EditFile),
                 Box::new(fs::ListDir),
+                Box::new(media::SendFile),
                 Box::new(search::Grep),
                 Box::new(search::Glob),
                 Box::new(web::WebFetch),

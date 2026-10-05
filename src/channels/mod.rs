@@ -29,9 +29,21 @@ pub struct User {
     pub name: String,
 }
 
+/// A file that came with a message; the channel downloads it on request.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    /// Vendor handle for `Channel::download`.
+    pub id: String,
+    /// Original file name, if the messenger has one (photos don't).
+    pub name: Option<String>,
+    pub mime: Option<String>,
+    pub size: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub enum InboundKind {
-    Text(String),
+    /// A message: text (or a caption) and any attached files.
+    Message { text: String, files: Vec<Attachment> },
     /// `/name args` (without the slash).
     Command { name: String, args: String },
     /// A button press; `data` is what the button was created with.
@@ -80,6 +92,10 @@ pub trait Channel: Send + Sync {
     async fn set_commands(&self, commands: &[CommandSpec]) -> Result<()>;
     /// Confirms a button press to the messenger (stops the button spinner).
     async fn ack_action(&self, action_id: &str) -> Result<()>;
+    /// Fetches the contents of an inbound attachment.
+    async fn download(&self, file: &Attachment) -> Result<Vec<u8>>;
+    /// Sends a local file; images are shown inline where the messenger can.
+    async fn send_file(&self, chat: &str, path: &std::path::Path, caption: &str) -> Result<()>;
 }
 
 #[async_trait]

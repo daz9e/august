@@ -3,6 +3,7 @@
 
 mod approval;
 mod commands;
+mod media;
 mod render;
 mod turn;
 
@@ -134,7 +135,7 @@ impl Gateway {
         eprintln!("task #{} fires in {}:{}", task.id, task.channel, task.chat);
         let id = ChatId { channel: task.channel.clone(), chat: task.chat.clone() };
         let text = format!("[Scheduled task #{} fired] {}", task.id, task.prompt);
-        self.turn(channel, id, &task.chat, &text).await
+        self.turn(channel, id, &task.chat, &text, Vec::new()).await
     }
 
     async fn handle(self: Arc<Self>, ev: Inbound) -> Result<()> {
@@ -155,8 +156,12 @@ impl Gateway {
                 }
             }
             InboundKind::Command { name, args } => self.command(&channel, &ev.chat, &name, &args).await?,
-            InboundKind::Text(text) if text.is_empty() => {}
-            InboundKind::Text(text) => self.turn(channel, ev.chat, &chat, &text).await?,
+            InboundKind::Message { text, files } if text.is_empty() && files.is_empty() => {}
+            InboundKind::Message { text, files } => {
+                let (note, images) = self.receive(&*channel, &files).await;
+                let text = [text, note].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
+                self.turn(channel, ev.chat, &chat, &text, images).await?
+            }
         }
         Ok(())
     }

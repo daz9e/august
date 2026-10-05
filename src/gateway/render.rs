@@ -1,15 +1,18 @@
 //! Turns an agent's event stream into sent and edited chat messages.
 
 use crate::channels::Channel;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// What the live message should show, in order.
 pub(super) enum Ui {
     Text(String),
     Step,
     Tool(String),
+    /// Send a file; text after it continues in a new message below.
+    File { path: PathBuf, caption: String, done: oneshot::Sender<anyhow::Result<()>> },
 }
 
 pub(super) fn tool_line(name: &str, input: &serde_json::Value) -> String {
@@ -46,6 +49,17 @@ pub(super) async fn render(channel: Arc<dyn Channel>, chat: String, mut rx: mpsc
                         sep(&mut buf);
                         buf.push_str(&line);
                         buf.push_str("\n\n");
+                    }
+                    Ui::File { path, caption, done } => {
+                        if dirty {
+                            flush(&*channel, &chat, &buf, &mut sent, limits.max_len).await;
+                        }
+                        done.send(channel.send_file(&chat, &path, &caption).await).ok();
+                        buf.clear();
+                        sent.clear();
+                        dirty = false;
+                        last = Instant::now();
+                        continue;
                     }
                 }
                 dirty = true;
