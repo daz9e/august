@@ -1,0 +1,294 @@
+//! The agent loop: model -> tools -> model ... until the model stops calling tools.
+
+mod compaction;
+mod prompt;
+mod store;
+
+pub use prompt::system_prompt;
+pub use store::SessionStore;
+use compaction::DEFAULT_CONTEXT_TOKENS;
+
+use crate::llm::{Block, LlmProvider, Message, Role, StopReason, Usage};
+use crate::tools::{ToolCtx, ToolRegistry};
+use anyhow::Result;
+use serde_json::Value;
+use std::sync::Arc;
+
+const MAX_STEPS: usize = 40;
+pub enum Event<'a> {
+    /// A fragment of the model's reply, as it streams in.
+    Text(&'a str),
+    /// A new model call starts after tool results (text from before it is complete).
+    Step,
+    ToolCall { name: &'a str, input: &'a Value },
+    ToolResult { output: &'a str, is_error: bool },
+    Usage(&'a Usage),
+    /// Older history was summarised to free up context.
+    Compacted { before: usize, after: usize },
+}
+
+pub struct Agent {
+    provider: Arc<dyn LlmProvider>,
+    tools: ToolRegistry,
+    system: String,
+    history: Vec<Message>,
+    db: Arc<dyn SessionStore>,
+    /// Which chat this is (`telegram:123`, `cli`); sessions are looked up by it.
+    chat_key: String,
+    /// Current DB session; also the conversation id sent to the provider.
+    session: String,
+    /// How many messages of `history` are already in the DB.
+    stored: usize,
+    /// Where the running turn began; a failed or cancelled turn is cut back to it.
+    turn_start: usize,
+    context_limit: usize,
+    /// Input tokens the provider reported for the latest call.
+    last_input_tokens: usize,
+    /// After a failed summary, don't retry until the history has grown to this length.
+    compact_retry_at: usize,
+}
+
+impl Agent {
+    /// Continues the chat's latest stored session, or starts one.
+    pub fn new(
+        provider: Arc<dyn LlmProvider>,
+        tools: ToolRegistry,
+        system: String,
+        db: Arc<dyn SessionStore>,
+        chat_key: &str,
+    ) -> Result<Self> {
+        let (session, history) = db.resume_session(chat_key)?;
+        let stored = history.len();
+        Ok(Self {
+            provider,
+            tools,
+            system,
+            history,
+            db,
+            chat_key: chat_key.to_string(),
+            session,
+            stored,
+            turn_start: stored,
+            context_limit: std::env::var("AUGUST_CONTEXT_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_CONTEXT_TOKENS),
+            last_input_tokens: 0,
+            compact_retry_at: 0,
+        })
+    }
+
+    pub fn set_provider(&mut self, provider: Arc<dyn LlmProvider>) {
+        self.provider = provider;
+    }
+
+    /// Starts a new conversation; the old one stays searchable.
+    pub fn reset(&mut self) -> Result<()> {
+        self.session = self.db.new_session(&self.chat_key)?;
+        self.history.clear();
+        self.stored = 0;
+        self.turn_start = 0;
+        self.last_input_tokens = 0;
+        self.compact_retry_at = 0;
+        Ok(())
+    }
+
+    /// Drops what a failed or cancelled turn added, so the history stays consistent.
+    pub fn rollback_turn(&mut self) {
+        self.history.truncate(self.turn_start);
+        // A compaction inside the turn can leave a half-finished tool exchange at the end.
+        while self.history.last().is_some_and(|m| {
+            m.tool_uses().next().is_some() || m.content.iter().any(|b| matches!(b, Block::ToolResult { .. }))
+        }) {
+            self.history.pop();
+        }
+        if self.stored > self.history.len() {
+            if self.db.replace_live(&self.session, &self.history).is_err() {
+                eprintln!("memory: could not resync the session after a rollback");
+            }
+            self.stored = self.history.len();
+        }
+    }
+
+    fn persist(&mut self) {
+        if self.stored >= self.history.len() {
+            return;
+        }
+        match self.db.append(&self.session, &self.history[self.stored..], true) {
+            Ok(()) => self.stored = self.history.len(),
+            Err(e) => eprintln!("memory: could not save the conversation: {e:#}"),
+        }
+    }
+
+    /// Runs one user turn to completion and returns the final assistant text.
+    /// History is append-only; on error the whole turn is rolled back.
+    pub async fn run_turn(
+        &mut self,
+        user_text: &str,
+        ctx: &ToolCtx,
+        on_event: &mut (dyn FnMut(Event) + Send),
+    ) -> Result<String> {
+        self.turn_start = self.history.len();
+        let result = self.run_turn_inner(user_text, ctx, on_event).await;
+        match &result {
+            Ok(_) => self.persist(),
+            Err(_) => self.rollback_turn(),
+        }
+        result
+    }
+
+    async fn run_turn_inner(
+        &mut self,
+        user_text: &str,
+        ctx: &ToolCtx,
+        on_event: &mut (dyn FnMut(Event) + Send),
+    ) -> Result<String> {
+        let stamp = chrono::Local::now().format("%a %Y-%m-%d %H:%M");
+        self.history.push(Message::user_text(format!("[{stamp}] {user_text}")));
+        let specs = self.tools.specs();
+
+        for step in 0..MAX_STEPS {
+            if step > 0 {
+                on_event(Event::Step);
+            }
+            let before = self.estimate_tokens();
+            match self.compact(false).await {
+                Ok(Some((_, after))) => on_event(Event::Compacted { before, after }),
+                Ok(None) => {}
+                Err(e) => eprintln!("context compaction failed: {e:#}"),
+            }
+            let system = self.system_now();
+            let completion = {
+                let mut on_text = |t: &str| on_event(Event::Text(t));
+                self.provider
+                    .complete_stream(&self.session, &system, &self.history, &specs, &mut on_text)
+                    .await?
+            };
+            self.last_input_tokens = (completion.usage.input_tokens + completion.usage.cache_read_tokens) as usize;
+            on_event(Event::Usage(&completion.usage));
+            let reply = completion.message;
+            self.history.push(reply.clone());
+
+            match completion.stop_reason {
+                StopReason::ToolUse if reply.tool_uses().next().is_some() => {}
+                StopReason::Refusal => return Ok("[the model refused to answer]".into()),
+                StopReason::MaxTokens => {
+                    return Ok(format!("{}\n[reply truncated at max_tokens]", reply.text()));
+                }
+                _ => return Ok(reply.text()),
+            }
+
+            // Run the requested tools concurrently; results go back in call order.
+            let calls: Vec<_> = reply.tool_uses().collect();
+            for (_, name, input) in &calls {
+                on_event(Event::ToolCall { name, input });
+            }
+            let outputs =
+                futures_util::future::join_all(calls.iter().map(|(_, name, input)| self.tools.call(name, input, ctx))).await;
+            let mut results = Vec::new();
+            for ((id, _, _), (output, is_error)) in calls.iter().zip(outputs) {
+                on_event(Event::ToolResult {
+                    output: &output,
+                    is_error,
+                });
+                results.push(Block::ToolResult {
+                    tool_use_id: id.to_string(),
+                    content: output,
+                    is_error,
+                });
+            }
+            self.history.push(Message {
+                role: Role::User,
+                content: results,
+            });
+        }
+        Ok(format!("[stopped: hit the {MAX_STEPS}-step limit]"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Db;
+    use crate::llm::{Completion, ToolSpec};
+    use async_trait::async_trait;
+
+    /// Replies "summary" to everything and records nothing else.
+    struct Fake;
+
+    #[async_trait]
+    impl LlmProvider for Fake {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        async fn complete(&self, _: &str, _: &str, _: &[Message], _: &[ToolSpec]) -> Result<Completion> {
+            Ok(Completion {
+                message: Message { role: Role::Assistant, content: vec![Block::Text("summary".into())] },
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    fn agent(db: Arc<Db>) -> Agent {
+        Agent::new(Arc::new(Fake), ToolRegistry::with_defaults(), "sys".into(), db, "test").unwrap()
+    }
+
+    fn big_history(a: &mut Agent) {
+        for i in 0..10 {
+            a.history.push(Message::user_text(format!("question {i} {}", "x".repeat(2_000))));
+            a.history.push(Message { role: Role::Assistant, content: vec![Block::Text(format!("answer {i}"))] });
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_keeps_a_valid_tail_and_persists() {
+        let db = Db::in_memory();
+        let mut a = agent(db.clone());
+        a.context_limit = 1_000;
+        big_history(&mut a);
+        let before = a.history.len();
+        let (b, after) = a.compact(false).await.unwrap().expect("compacted");
+        assert!(after < b);
+        assert!(a.history.len() < before);
+        assert_eq!(a.history[0].role, Role::User);
+        assert!(a.history[0].text().contains("[Summary of the earlier conversation]"));
+        // roles still alternate
+        assert!(a.history.windows(2).all(|w| w[0].role != w[1].role));
+        // the stored live history matches memory, so a restart resumes it
+        let resumed = agent(db);
+        assert_eq!(resumed.history.len(), a.history.len());
+    }
+
+    #[tokio::test]
+    async fn small_histories_are_left_alone() {
+        let mut a = agent(Db::in_memory());
+        a.history.push(Message::user_text("hi"));
+        assert!(a.compact(false).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn rollback_drops_dangling_tool_calls() {
+        let mut a = agent(Db::in_memory());
+        a.history.push(Message::user_text("old"));
+        a.history.push(Message { role: Role::Assistant, content: vec![Block::Text("ok".into())] });
+        a.turn_start = 2;
+        a.history.push(Message::user_text("new"));
+        a.history.push(Message {
+            role: Role::Assistant,
+            content: vec![Block::ToolUse { id: "1".into(), name: "shell".into(), input: Value::Null }],
+        });
+        a.rollback_turn();
+        assert_eq!(a.history.len(), 2);
+    }
+
+    #[test]
+    fn reset_starts_a_fresh_session() {
+        let db = Db::in_memory();
+        let mut a = agent(db.clone());
+        a.history.push(Message::user_text("hi"));
+        a.persist();
+        a.reset().unwrap();
+        assert_eq!(agent(db).history.len(), 0);
+    }
+}

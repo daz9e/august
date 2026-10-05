@@ -1,0 +1,396 @@
+//! Provider catalog: which providers exist, where their credentials come from,
+//! how to list their models and how to build them. Env vars override `~/.august`.
+
+use crate::llm::{self, LlmProvider};
+use crate::config::{self, ApiCredential, Config, Credentials};
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use serde_json::Value;
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Auth {
+    ApiKey,
+    /// API key optional, base URL required (OpenAI, OpenRouter, Ollama, ...).
+    KeyAndUrl,
+    /// Browser sign-in (ChatGPT).
+    OAuth,
+    /// Browser sign-in with the Codex CLI client (legacy ChatGPT login).
+    CodexOAuth,
+}
+
+/// One vendor: identity, how it authenticates, and how to build / list it.
+#[async_trait]
+pub trait ProviderDef: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn label(&self) -> &'static str;
+    fn auth(&self) -> Auth;
+    /// Env var that overrides the stored API key (empty if none).
+    fn key_env(&self) -> &'static str {
+        ""
+    }
+    fn default_model(&self) -> Option<&'static str> {
+        None
+    }
+    async fn build(&self, sel: &Selection) -> Result<Arc<dyn LlmProvider>>;
+    /// Models the provider offers with the given credentials.
+    async fn list_models(&self, cred: Option<&ApiCredential>) -> Result<Vec<String>>;
+}
+
+/// All providers, in menu order.
+pub fn registry() -> &'static [&'static dyn ProviderDef] {
+    static REGISTRY: [&dyn ProviderDef; 6] = [
+        &OpenCode { go: true },
+        &OpenCode { go: false },
+        &AnthropicDef,
+        &ChatGptDef,
+        &CodexDef,
+        &OpenAiDef,
+    ];
+    &REGISTRY
+}
+
+pub fn info(id: &str) -> Result<&'static dyn ProviderDef> {
+    registry().iter().copied().find(|p| p.id() == id).with_context(|| {
+        let ids: Vec<_> = registry().iter().map(|p| p.id()).collect();
+        format!("unknown provider: {id} ({})", ids.join(" | "))
+    })
+}
+
+fn env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+const OPENAI_DEFAULT_URL: &str = "https://api.openai.com/v1";
+
+/// Credential for an API-key provider: env first, then `credentials.json`.
+pub fn credential(p: &dyn ProviderDef) -> Result<Option<ApiCredential>> {
+    if p.auth() == Auth::OAuth {
+        return Ok(None);
+    }
+    let stored = config::load::<Credentials>(config::CREDENTIALS)?.remove(p.id());
+    let key = env(p.key_env()).or_else(|| stored.as_ref().map(|c| c.key.clone()));
+    let base_url = (p.auth() == Auth::KeyAndUrl).then(|| {
+        env("OPENAI_BASE_URL")
+            .or_else(|| stored.as_ref().and_then(|c| c.base_url.clone()))
+            .unwrap_or_else(|| OPENAI_DEFAULT_URL.into())
+    });
+    Ok(match (key, p.auth()) {
+        (Some(key), _) => Some(ApiCredential { key, base_url }),
+        // Local servers like Ollama need no key.
+        (None, Auth::KeyAndUrl) if stored.is_some() || env("OPENAI_BASE_URL").is_some() => {
+            Some(ApiCredential {
+                key: String::new(),
+                base_url,
+            })
+        }
+        _ => None,
+    })
+}
+
+fn require(p: &dyn ProviderDef, cred: Option<ApiCredential>) -> Result<ApiCredential> {
+    cred.with_context(|| {
+        format!(
+            "no credentials for {}: run `cargo run -- login` or set {}",
+            p.id(),
+            p.key_env()
+        )
+    })
+}
+
+/// Handle to a registered provider; `id` is exposed as a field for convenience.
+#[derive(Clone, Copy)]
+pub struct Provider {
+    pub id: &'static str,
+    pub def: &'static dyn ProviderDef,
+}
+
+impl std::ops::Deref for Provider {
+    type Target = dyn ProviderDef;
+    fn deref(&self) -> &Self::Target {
+        self.def
+    }
+}
+
+/// Active provider, model and effort: env vars, then `config.json`.
+pub struct Selection {
+    pub provider: Provider,
+    pub model: Option<String>,
+    pub effort: String,
+}
+
+pub fn selection() -> Result<Selection> {
+    let cfg: Config = config::load(config::CONFIG)?;
+    let id = env("AUGUST_PROVIDER")
+        .or(cfg.provider.clone())
+        .context("no provider configured: run `cargo run -- login`")?;
+    let def = info(&id)?;
+    let provider = Provider { id: def.id(), def };
+    // A model saved for another provider must not leak into an env-selected one.
+    let cfg_model = cfg.model.filter(|_| cfg.provider.as_deref() == Some(provider.id()));
+    Ok(Selection {
+        provider,
+        model: env("AUGUST_MODEL")
+            .or(cfg_model)
+            .or(provider.default_model().map(String::from)),
+        effort: env("AUGUST_EFFORT")
+            .or(cfg.effort)
+            .unwrap_or_else(|| "medium".into()),
+    })
+}
+
+/// Builds the active provider, wrapped with retries and the optional fallback
+/// (`AUGUST_FALLBACK` or `fallback` in `config.json`, as `provider:model`).
+pub async fn build(sel: Selection) -> Result<Arc<dyn LlmProvider>> {
+    let primary = sel.provider.def.build(&sel).await?;
+    let fallback = match fallback_selection(&sel) {
+        Ok(Some(fb)) => match fb.provider.def.build(&fb).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("fallback provider unavailable: {e:#}");
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(e) => {
+            eprintln!("bad fallback setting: {e:#}");
+            None
+        }
+    };
+    Ok(Arc::new(llm::resilient::Resilient::new(primary, fallback)))
+}
+
+fn fallback_selection(active: &Selection) -> Result<Option<Selection>> {
+    let cfg: Config = config::load(config::CONFIG)?;
+    let Some(spec) = env("AUGUST_FALLBACK").or(cfg.fallback) else {
+        return Ok(None);
+    };
+    let (id, model) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+    let def = info(id.trim())?;
+    let model = Some(model.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .or(def.default_model().map(String::from));
+    Ok(Some(Selection {
+        provider: Provider { id: def.id(), def },
+        model,
+        effort: active.effort.clone(),
+    }))
+}
+
+/// Models the provider offers with the given credentials.
+pub async fn list_models(p: &dyn ProviderDef, cred: Option<&ApiCredential>) -> Result<Vec<String>> {
+    p.list_models(cred).await
+}
+
+fn need_model(p: &dyn ProviderDef, sel: &Selection) -> Result<String> {
+    sel.model
+        .clone()
+        .with_context(|| format!("no model selected for {}: run `cargo run -- model`", p.id()))
+}
+
+fn model_ids(v: Value) -> Vec<String> {
+    v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["id"].as_str().map(String::from))
+        .collect()
+}
+
+struct OpenCode {
+    go: bool,
+}
+
+impl OpenCode {
+    fn plan(&self) -> llm::opencode::Plan {
+        if self.go {
+            llm::opencode::Plan::Go
+        } else {
+            llm::opencode::Plan::Zen
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderDef for OpenCode {
+    fn id(&self) -> &'static str {
+        if self.go { "opencode-go" } else { "opencode" }
+    }
+    fn label(&self) -> &'static str {
+        if self.go {
+            "OpenCode Go (subscription)"
+        } else {
+            "OpenCode Zen (pay as you go)"
+        }
+    }
+    fn auth(&self) -> Auth {
+        Auth::ApiKey
+    }
+    fn key_env(&self) -> &'static str {
+        "OPENCODE_API_KEY"
+    }
+    async fn build(&self, sel: &Selection) -> Result<Arc<dyn LlmProvider>> {
+        llm::opencode::provider(
+            self.plan(),
+            require(self, credential(self)?)?.key,
+            need_model(self, sel)?,
+            sel.effort.clone(),
+            env("AUGUST_API_FORMAT").map(|v| v.parse()).transpose()?,
+        )
+        .await
+    }
+    async fn list_models(&self, _cred: Option<&ApiCredential>) -> Result<Vec<String>> {
+        llm::opencode::list_models(self.plan()).await
+    }
+}
+
+struct AnthropicDef;
+
+#[async_trait]
+impl ProviderDef for AnthropicDef {
+    fn id(&self) -> &'static str {
+        "anthropic"
+    }
+    fn label(&self) -> &'static str {
+        "Anthropic (API key)"
+    }
+    fn auth(&self) -> Auth {
+        Auth::ApiKey
+    }
+    fn key_env(&self) -> &'static str {
+        "ANTHROPIC_API_KEY"
+    }
+    fn default_model(&self) -> Option<&'static str> {
+        Some("claude-opus-5-5")
+    }
+    async fn build(&self, sel: &Selection) -> Result<Arc<dyn LlmProvider>> {
+        Ok(Arc::new(llm::anthropic::Anthropic::new(
+            llm::anthropic::API_BASE,
+            require(self, credential(self)?)?.key,
+            need_model(self, sel)?,
+            sel.effort.clone(),
+        )))
+    }
+    async fn list_models(&self, cred: Option<&ApiCredential>) -> Result<Vec<String>> {
+        let c = require(self, cred.cloned())?;
+        let v: Value = crate::util::http_client()
+            .get(format!("{}/models?limit=100", llm::anthropic::API_BASE))
+            .header("x-api-key", &c.key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(model_ids(v))
+    }
+}
+
+struct ChatGptDef;
+
+#[async_trait]
+impl ProviderDef for ChatGptDef {
+    fn id(&self) -> &'static str {
+        "chatgpt"
+    }
+    fn label(&self) -> &'static str {
+        "ChatGPT Plus/Pro (sign in with browser)"
+    }
+    fn auth(&self) -> Auth {
+        Auth::OAuth
+    }
+    async fn build(&self, sel: &Selection) -> Result<Arc<dyn LlmProvider>> {
+        Ok(Arc::new(
+            llm::chatgpt::provider(sel.model.clone(), sel.effort.clone()).await?,
+        ))
+    }
+    async fn list_models(&self, _cred: Option<&ApiCredential>) -> Result<Vec<String>> {
+        llm::chatgpt::list_models(&crate::util::http_client()).await
+    }
+}
+
+struct CodexDef;
+
+#[async_trait]
+impl ProviderDef for CodexDef {
+    fn id(&self) -> &'static str {
+        "chatgpt-codex"
+    }
+    fn label(&self) -> &'static str {
+        "ChatGPT via Codex login (legacy)"
+    }
+    fn auth(&self) -> Auth {
+        Auth::CodexOAuth
+    }
+    async fn build(&self, sel: &Selection) -> Result<Arc<dyn LlmProvider>> {
+        Ok(Arc::new(
+            llm::chatgpt::codex::provider(need_model(self, sel)?, sel.effort.clone()).await?,
+        ))
+    }
+    async fn list_models(&self, _cred: Option<&ApiCredential>) -> Result<Vec<String>> {
+        llm::chatgpt::codex::list_models(&crate::util::http_client()).await
+    }
+}
+
+struct OpenAiDef;
+
+#[async_trait]
+impl ProviderDef for OpenAiDef {
+    fn id(&self) -> &'static str {
+        "openai"
+    }
+    fn label(&self) -> &'static str {
+        "OpenAI-compatible (OpenAI, OpenRouter, Ollama, ...)"
+    }
+    fn auth(&self) -> Auth {
+        Auth::KeyAndUrl
+    }
+    fn key_env(&self) -> &'static str {
+        "OPENAI_API_KEY"
+    }
+    async fn build(&self, sel: &Selection) -> Result<Arc<dyn LlmProvider>> {
+        let c = require(self, credential(self)?)?;
+        Ok(Arc::new(llm::openai::OpenAi::new(
+            c.base_url.unwrap_or_else(|| OPENAI_DEFAULT_URL.into()),
+            c.key,
+            need_model(self, sel)?,
+        )))
+    }
+    async fn list_models(&self, cred: Option<&ApiCredential>) -> Result<Vec<String>> {
+        let c = require(self, cred.cloned())?;
+        let url = c.base_url.as_deref().unwrap_or(OPENAI_DEFAULT_URL);
+        let mut req = crate::util::http_client().get(format!("{}/models", url.trim_end_matches('/')));
+        if !c.key.is_empty() {
+            req = req.bearer_auth(&c.key);
+        }
+        Ok(model_ids(req.send().await?.error_for_status()?.json().await?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Live streaming smoke test against the configured provider:
+    /// `cargo test live_stream -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_stream() {
+        let p = super::build(super::selection().unwrap()).await.unwrap();
+        let mut frags = 0;
+        let mut text = String::new();
+        let c = p
+            .complete_stream(
+                "test",
+                "Be brief.",
+                &[crate::llm::Message::user_text("Count from 1 to 5.")],
+                &[],
+                &mut |t| {
+                    frags += 1;
+                    text.push_str(t);
+                },
+            )
+            .await
+            .unwrap();
+        println!("fragments={frags} text={text:?} usage={:?}", c.usage);
+        assert_eq!(text, c.message.text());
+    }
+}

@@ -1,0 +1,7 @@
+/target
+.env
+/workspace
+.claude/
+.pi/
+.DS_Store
+.project/
