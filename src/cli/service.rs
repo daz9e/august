@@ -7,6 +7,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const LABEL: &str = "dev.august.agent";
+
+/// launchd label; `AUGUST_SERVICE_LABEL` lets tests install a separate service.
+fn label() -> String {
+    crate::util::env_or("AUGUST_SERVICE_LABEL", LABEL)
+}
 const UNIT: &str = "august.service";
 
 pub fn log_path() -> PathBuf {
@@ -30,7 +35,7 @@ fn home_dir() -> PathBuf {
 }
 
 fn plist_path() -> PathBuf {
-    home_dir().join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
+    home_dir().join("Library/LaunchAgents").join(format!("{}.plist", label()))
 }
 
 fn unit_path() -> PathBuf {
@@ -56,7 +61,7 @@ pub fn start() -> Result<()> {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>{LABEL}</string>
+  <key>Label</key><string>{label}</string>
   <key>ProgramArguments</key><array><string>{exe}</string><string>gateway</string></array>
   <key>WorkingDirectory</key><string>{dir}</string>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>{path}</string></dict>
@@ -68,6 +73,7 @@ pub fn start() -> Result<()> {
 </dict>
 </plist>
 "#,
+            label = xml(&label()),
             exe = xml(&exe.to_string_lossy()),
             dir = xml(&dir.to_string_lossy()),
             path = xml(&path),
@@ -77,10 +83,19 @@ pub fn start() -> Result<()> {
         std::fs::create_dir_all(file.parent().unwrap())?;
         std::fs::write(&file, plist)?;
         let domain = format!("gui/{}", uid()?);
-        // Reload if it is already installed.
-        Command::new("launchctl").args(["bootout", &format!("{domain}/{LABEL}")]).output().ok();
+        // Reload if it is already installed. `bootout` returns before the old job is
+        // gone, and `bootstrap` fails with "5: Input/output error" until it is.
+        let target = format!("{domain}/{}", label());
+        Command::new("launchctl").args(["bootout", &target]).output().ok();
+        for _ in 0..50 {
+            let loaded = Command::new("launchctl").args(["print", &target]).output().is_ok_and(|o| o.status.success());
+            if !loaded {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
         run(Command::new("launchctl").args(["bootstrap", &domain]).arg(&file))?;
-        run(Command::new("launchctl").args(["kickstart", &format!("{domain}/{LABEL}")]))?;
+        run(Command::new("launchctl").args(["kickstart", &target]))?;
     } else {
         let unit = format!(
             "[Unit]\nDescription=August agent\nAfter=network-online.target\nWants=network-online.target\n\n\
@@ -111,7 +126,7 @@ pub fn stop() -> Result<()> {
         if !file.exists() {
             bail!("service is not installed");
         }
-        run(Command::new("launchctl").args(["bootout", &format!("gui/{}/{LABEL}", uid()?)]))?;
+        run(Command::new("launchctl").args(["bootout", &format!("gui/{}/{}", uid()?, label())]))?;
         std::fs::remove_file(file)?;
     } else {
         let file = unit_path();
