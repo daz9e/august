@@ -237,6 +237,10 @@ impl OpenAi {
             .is_some_and(|v| v.contains("application/json"));
         if is_json {
             let resp: Value = resp.json().await?;
+            // Some proxies report failures as a 200 with an `error` object.
+            if !resp["error"].is_null() && resp["choices"].is_null() {
+                anyhow::bail!("provider error: {}", resp["error"]);
+            }
             return Ok(Self::decode_full(&resp, on_text));
         }
 

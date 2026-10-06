@@ -65,3 +65,26 @@ async fn subtasks_run_in_the_background_and_report_back() {
         assert!(tools.contains(&"shell") && !tools.contains(&"delegate_task") && !tools.contains(&"remember"), "{tools:?}");
     }
 }
+
+#[tokio::test]
+async fn failed_subtask_is_reported_to_the_chat() {
+    let llm: Llm = Box::new(|req| {
+        if is_child(req) {
+            return json!({"error": {"message": "child model exploded"}}); // not a completion
+        }
+        let last = msgs(req).last().unwrap();
+        if last["role"] == "tool" {
+            return reply_text("delegated");
+        }
+        let text = last_user(req);
+        if text.contains("[Subtask") {
+            return reply_text(&format!("relay: {}", text.replace('\n', " ")));
+        }
+        reply_tool("delegate_task", json!({"goal": "Count the stars"}))
+    });
+    let fake = Fake::start(vec![message(1, json!({"text": "count stars"}))], HashMap::new(), Some(llm)).await;
+    let _gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
+    fake.wait_for(Duration::from_secs(60), |f| f.sent_texts().iter().any(|t| t.contains("relay:"))).await;
+    let relay = fake.sent_texts().into_iter().find(|t| t.contains("relay:")).unwrap();
+    assert!(relay.contains("Subtask #1 failed: Count the stars"), "{relay}");
+}
