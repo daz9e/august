@@ -55,6 +55,8 @@ pub struct ToolCtx {
     pub review: bool,
     /// Where the background review reports what it saved.
     pub notify: Option<Arc<dyn Notifier>>,
+    /// Messages the user sends while the turn runs.
+    pub inbox: Option<Arc<crate::agent::Inbox>>,
 }
 
 #[async_trait]

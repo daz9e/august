@@ -1,10 +1,12 @@
 //! The agent loop: model -> tools -> model ... until the model stops calling tools.
 
 mod compaction;
+mod inbox;
 mod prompt;
 mod review;
 mod store;
 
+pub use inbox::Inbox;
 pub use prompt::system_prompt;
 pub use store::SessionStore;
 use compaction::DEFAULT_CONTEXT_TOKENS;
@@ -224,6 +226,15 @@ impl Agent {
         for step in 0..MAX_STEPS {
             if step > 0 {
                 on_event(Event::Step);
+                // Messages the user sent meanwhile join the tool results.
+                let news = ctx.inbox.as_ref().map(|i| i.take()).unwrap_or_default();
+                if !news.is_empty() {
+                    let stamp = chrono::Local::now().format("%a %Y-%m-%d %H:%M");
+                    let text = format!("[{stamp}] [The user sent this while you were working]\n{}", news.join("\n"));
+                    if let Some(last) = self.history.last_mut() {
+                        last.content.push(Block::Text(text));
+                    }
+                }
             }
             let before = self.estimate_tokens();
             match self.compact(false).await {

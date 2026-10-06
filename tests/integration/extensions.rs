@@ -69,13 +69,6 @@ async fn extensions_add_tools_commands_and_hooks() {
     if !have_bun() {
         return;
     }
-    let updates = vec![
-        message(1, json!({"text": "hello colour"})),
-        message(2, json!({"text": "run the forbidden thing"})),
-        message(3, json!({"text": "secret"})),
-        message(4, json!({"text": "/ping x", "entities": [{"type": "bot_command", "offset": 0, "length": 5}]})),
-        message(5, json!({"text": "/extensions", "entities": [{"type": "bot_command", "offset": 0, "length": 11}]})),
-    ];
     let pick: fn(&str) -> Value = |text| {
         if text.contains("forbidden") {
             reply_tool("shell", json!({"command": "echo forbidden"}))
@@ -83,7 +76,7 @@ async fn extensions_add_tools_commands_and_hooks() {
             reply_tool("shout", json!({"text": "hi"}))
         }
     };
-    let fake = Fake::start(updates, HashMap::new(), Some(llm(pick))).await;
+    let fake = Fake::start(vec![message(1, json!({"text": "hello colour"}))], HashMap::new(), Some(llm(pick))).await;
     let _gw = spawn_gateway_with_home(
         &fake,
         LlmSetup::Fake,
@@ -91,14 +84,16 @@ async fn extensions_add_tools_commands_and_hooks() {
         &[("extensions/demo/index.ts", DEMO), ("extensions/broken/index.ts", BROKEN)],
     );
 
-    fake.wait_for(TIMEOUT, |f| {
-        sent_any(f, "turn ended: Result: HI via telegram")
-            && sent_any(f, "blocked by an extension")
-            && sent_any(f, "intercepted")
-            && sent_any(f, "pong x")
-            && sent_any(f, "broken")
-    })
-    .await;
+    // One at a time: a message sent while a turn runs would join that turn.
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "turn ended: Result: HI via telegram")).await;
+    fake.push_updates(vec![message(2, json!({"text": "run the forbidden thing"}))]);
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "blocked by an extension")).await;
+    fake.push_updates(vec![
+        message(3, json!({"text": "secret"})),
+        message(4, json!({"text": "/ping x", "entities": [{"type": "bot_command", "offset": 0, "length": 5}]})),
+        message(5, json!({"text": "/extensions", "entities": [{"type": "bot_command", "offset": 0, "length": 11}]})),
+    ]);
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "intercepted") && sent_any(f, "pong x") && sent_any(f, "broken")).await;
 
     // The extension's tool was offered and the before_turn hook extended the prompt.
     let reqs = fake.llm_requests();

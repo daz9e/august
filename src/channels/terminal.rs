@@ -92,6 +92,7 @@ pub async fn run() -> Result<()> {
         extensions: Some(ext.clone()),
         review: true,
         notify: Some(Arc::new(TerminalNotes)),
+        inbox: None,
     };
     let mut agent = Agent::new(
         provider.clone(),

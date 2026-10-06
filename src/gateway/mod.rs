@@ -30,6 +30,8 @@ const SURFACE: &str = "The user reads your replies in a chat app that renders Ma
 
 struct Chat {
     agent: Mutex<Agent>,
+    /// Messages sent while a turn runs.
+    inbox: Arc<agent::Inbox>,
     /// Set while a turn runs; `/stop` notifies it.
     cancel: StdMutex<Option<Arc<Notify>>>,
 }
@@ -157,7 +159,7 @@ impl Gateway {
             self.db.clone(),
             &format!("{}:{}", id.channel, id.chat),
         )?;
-        let chat = Arc::new(Chat { agent: Mutex::new(agent), cancel: StdMutex::new(None) });
+        let chat = Arc::new(Chat { agent: Mutex::new(agent), inbox: Arc::default(), cancel: StdMutex::new(None) });
         chats.insert(id.clone(), chat.clone());
         Ok(chat)
     }
@@ -207,6 +209,11 @@ impl Gateway {
                     if let Some(t) = data["text"].as_str() {
                         text = t.to_string();
                     }
+                }
+                // While a turn runs, plain text goes to it instead of waiting for it to end.
+                if images.is_empty() && self.chat(&ev.chat).await?.inbox.offer(&text) {
+                    channel.send(&chat, "↪️ Got it, I'll take this into account.", &[]).await?;
+                    return Ok(());
                 }
                 self.turn(channel, ev.chat, &chat, &text, images, true).await?
             }

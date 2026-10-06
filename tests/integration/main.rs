@@ -10,5 +10,6 @@ mod memory;
 mod compaction;
 mod skills;
 mod review;
+mod inbox;
 mod usage;
 mod mcp;

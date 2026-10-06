@@ -120,6 +120,7 @@ impl Agent {
                 extensions: None,
                 review: false,
                 notify: ctx.notify.clone(),
+                inbox: None,
             },
             recorder,
             memory,

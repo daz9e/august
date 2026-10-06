@@ -9,6 +9,7 @@ use std::sync::Arc;
 pub(super) const COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("new", "Start a fresh conversation"),
     CommandSpec::new("stop", "Cancel the current task"),
+    CommandSpec::new("queue", "Run a message as its own turn after the current one"),
     CommandSpec::new("compact", "Summarise older messages to free up context"),
     CommandSpec::new("usage", "Show token usage of this conversation and today"),
     CommandSpec::new("memory", "Show what I remember about you"),
@@ -42,7 +43,7 @@ impl Gateway {
         }
     }
 
-    pub(super) async fn command(&self, channel: &Arc<dyn Channel>, id: &ChatId, name: &str, args: &str) -> Result<()> {
+    pub(super) async fn command(self: &Arc<Self>, channel: &Arc<dyn Channel>, id: &ChatId, name: &str, args: &str) -> Result<()> {
         let chat = id.chat.as_str();
         let state = self.chat(id).await?;
         let reply = match name {
@@ -61,6 +62,16 @@ impl Gateway {
                     }
                     None => "Nothing is running.".to_string(),
                 }
+            }
+            "queue" if args.is_empty() => "Usage: /queue <message>".into(),
+            "queue" => {
+                let (gw, ch, id, chat, text) = (self.clone(), channel.clone(), id.clone(), chat.to_string(), args.to_string());
+                tokio::spawn(async move {
+                    if let Err(e) = gw.turn(ch, id, &chat, &text, Vec::new(), true).await {
+                        eprintln!("gateway: {e:#}");
+                    }
+                });
+                "📋 Queued.".into()
             }
             "new" | "reset" => {
                 if let Some(n) = state.cancel.lock().unwrap().as_ref() {

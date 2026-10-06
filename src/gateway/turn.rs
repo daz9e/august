@@ -43,6 +43,8 @@ impl crate::tools::Notifier for ChatNotes {
 }
 
 impl Gateway {
+    /// Runs a turn once the chat is free, then whatever the user sent meanwhile that the
+    /// turn didn't pick up.
     pub(super) async fn turn(
         self: &Arc<Self>,
         channel: Arc<dyn Channel>,
@@ -54,7 +56,30 @@ impl Gateway {
     ) -> Result<()> {
         let state = self.chat(&id).await?;
         let mut agent = state.agent.lock().await; // turns in one chat run in order
+        state.inbox.start();
+        let (mut text, mut images) = (text.to_string(), images);
+        loop {
+            let r = self.turn_once(&state, &mut agent, channel.clone(), &id, chat, &text, images, review).await;
+            let left = state.inbox.finish();
+            if left.is_empty() {
+                return r;
+            }
+            (text, images) = (left.join("\n"), Vec::new());
+        }
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn turn_once(
+        self: &Arc<Self>,
+        state: &super::Chat,
+        agent: &mut crate::agent::Agent,
+        channel: Arc<dyn Channel>,
+        id: &ChatId,
+        chat: &str,
+        text: &str,
+        images: Vec<Block>,
+        review: bool,
+    ) -> Result<()> {
         let cancel = Arc::new(Notify::new());
         *state.cancel.lock().unwrap() = Some(cancel.clone());
         agent.set_provider(self.provider.read().unwrap().clone());
@@ -84,6 +109,7 @@ impl Gateway {
             extensions: Some(self.ext.clone()),
             review,
             notify: Some(Arc::new(ChatNotes { channel: channel.clone(), chat: chat.to_string() })),
+            inbox: Some(state.inbox.clone()),
         };
         let streamed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let streamed2 = streamed.clone();
