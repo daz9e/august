@@ -8,7 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, RwLock, RwLockReadGuard};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -21,7 +21,7 @@ const TAIL_LINES: usize = 20;
 type Waiting = Arc<StdMutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 type Tail = Arc<StdMutex<VecDeque<String>>>;
 
-/// What an extension registered while starting.
+/// What an extension has registered (sent once it started, again whenever it changes).
 #[derive(Debug, Default)]
 pub struct Manifest {
     pub tools: Vec<ToolSpec>,
@@ -33,7 +33,7 @@ pub struct Host {
     stdin: Arc<Mutex<ChildStdin>>,
     waiting: Waiting,
     next_id: AtomicU64,
-    pub manifest: Manifest,
+    manifest: Arc<RwLock<Manifest>>,
     /// Killed when the host is dropped.
     _child: Child,
 }
@@ -68,6 +68,7 @@ impl Host {
             .arg(name)
             .current_dir(entry.parent().unwrap_or(Path::new(".")))
             .env("AUGUST_WORKSPACE", crate::config::workspace().unwrap_or_default())
+            .env("AUGUST_HOME", crate::config::home())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -95,9 +96,11 @@ impl Host {
         };
 
         let waiting: Waiting = Arc::default();
-        let (ready_tx, ready_rx) = oneshot::channel::<Value>();
+        let manifest: Arc<RwLock<Manifest>> = Arc::default();
+        let (ready_tx, ready_rx) = oneshot::channel::<()>();
         {
             let (stdin, waiting, tail, name) = (stdin.clone(), waiting.clone(), tail.clone(), name.to_string());
+            let manifest = manifest.clone();
             tokio::spawn(async move {
                 let mut ready_tx = Some(ready_tx);
                 let mut lines = BufReader::new(stdout).lines();
@@ -107,9 +110,11 @@ impl Host {
                         continue;
                     };
                     match msg["method"].as_str() {
-                        Some("ready") => {
+                        // `ready` once started, `manifest` when it registers more later.
+                        Some("ready" | "manifest") => {
+                            *manifest.write().unwrap() = parse_manifest(&msg["params"]);
                             if let Some(tx) = ready_tx.take() {
-                                tx.send(msg["params"].clone()).ok();
+                                tx.send(()).ok();
                             }
                         }
                         Some(method) => {
@@ -145,8 +150,8 @@ impl Host {
             });
         }
 
-        let manifest = match tokio::time::timeout(START_TIMEOUT, ready_rx).await {
-            Ok(Ok(params)) => parse_manifest(&params),
+        match tokio::time::timeout(START_TIMEOUT, ready_rx).await {
+            Ok(Ok(())) => {}
             Ok(Err(_)) => {
                 // Exited before registering; give stderr a moment to drain.
                 let _ = child.wait().await;
@@ -155,8 +160,12 @@ impl Host {
                 return Err(if tail.is_empty() { "the extension exited during startup".into() } else { tail });
             }
             Err(_) => return Err(format!("did not start within {} s", START_TIMEOUT.as_secs())),
-        };
+        }
         Ok(Host { stdin, waiting, next_id: AtomicU64::new(1), manifest, _child: child })
+    }
+
+    pub fn manifest(&self) -> RwLockReadGuard<'_, Manifest> {
+        self.manifest.read().unwrap()
     }
 
     pub async fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {

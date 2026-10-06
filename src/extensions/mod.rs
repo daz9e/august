@@ -26,6 +26,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("goal", include_str!("../../extensions/goal/index.ts")),
     ("subagents", include_str!("../../extensions/subagents/index.ts")),
     ("clarify", include_str!("../../extensions/clarify/index.ts")),
+    ("mcp", include_str!("../../extensions/mcp/index.ts")),
 ];
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -349,7 +350,7 @@ impl Extensions {
 
     /// True when some extension handles `event` (so callers can skip building its data).
     pub fn listens(&self, event: &str) -> bool {
-        self.running().iter().any(|(_, h)| h.manifest.events.iter().any(|e| e == event))
+        self.running().iter().any(|(_, h)| h.manifest().events.iter().any(|e| e == event))
     }
 
     /// Runs `event` through every extension that handles it, in name order. Each one gets
@@ -357,7 +358,7 @@ impl Extensions {
     /// Failing handlers are skipped.
     pub async fn emit(&self, event: &str, mut data: Value, chat: &ChatRef) -> Value {
         for (name, host) in self.running() {
-            if !host.manifest.events.iter().any(|e| e == event) {
+            if !host.manifest().events.iter().any(|e| e == event) {
                 continue;
             }
             let params = json!({"name": event, "data": data, "ctx": ctx_json(chat)});
@@ -378,18 +379,18 @@ impl Extensions {
         let mut seen = HashSet::new();
         self.running()
             .iter()
-            .flat_map(|(_, h)| h.manifest.tools.clone())
+            .flat_map(|(_, h)| h.manifest().tools.clone())
             .filter(|t| seen.insert(t.name.clone()))
             .collect()
     }
 
     pub fn has_tool(&self, name: &str) -> bool {
-        self.running().iter().any(|(_, h)| h.manifest.tools.iter().any(|t| t.name == name))
+        self.running().iter().any(|(_, h)| h.manifest().tools.iter().any(|t| t.name == name))
     }
 
     /// Runs an extension tool; `None` if no extension has it.
     pub async fn call_tool(&self, name: &str, input: &Value, chat: &ChatRef) -> Option<Result<String, String>> {
-        let host = self.running().into_iter().find(|(_, h)| h.manifest.tools.iter().any(|t| t.name == name))?.1;
+        let host = self.running().into_iter().find(|(_, h)| h.manifest().tools.iter().any(|t| t.name == name))?.1;
         let params = json!({"name": name, "input": input, "ctx": ctx_json(chat)});
         Some(host.request("tool", params, TOOL_TIMEOUT).await.map(|v| match v {
             Value::String(s) => s,
@@ -402,14 +403,14 @@ impl Extensions {
         let mut seen: HashSet<String> = reserved.iter().map(|s| s.to_string()).collect();
         self.running()
             .iter()
-            .flat_map(|(_, h)| h.manifest.commands.clone())
+            .flat_map(|(_, h)| h.manifest().commands.clone())
             .filter(|(n, _)| seen.insert(n.clone()))
             .collect()
     }
 
     /// Runs `/name args`; `None` if no extension has the command, else the optional reply.
     pub async fn run_command(&self, name: &str, args: &str, chat: &ChatRef) -> Option<Result<Option<String>, String>> {
-        let host = self.running().into_iter().find(|(_, h)| h.manifest.commands.iter().any(|(n, _)| n == name))?.1;
+        let host = self.running().into_iter().find(|(_, h)| h.manifest().commands.iter().any(|(n, _)| n == name))?.1;
         let params = json!({"name": name, "args": args, "ctx": ctx_json(chat)});
         Some(host.request("command", params, COMMAND_TIMEOUT).await.map(|v| v.as_str().map(String::from)))
     }
@@ -419,7 +420,7 @@ impl Extensions {
             State::Failed(e) => format!("❌ {} — {}", slot.name, e.trim()),
             State::Disabled => format!("⏸ {} — disabled", slot.name),
             State::Running(h) => {
-                let m = &h.manifest;
+                let m = h.manifest();
                 let mut parts = Vec::new();
                 let list = |v: Vec<String>| v.join(", ");
                 if !m.tools.is_empty() {

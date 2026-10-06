@@ -113,7 +113,9 @@ declare module "august" {
       event: E,
       handler: (data: Events[E], ctx: Context) => Results[E] | void | Promise<Results[E] | void>,
     ): void;
+    /** May be called any time; tools added or removed after setup show up from the next model call. */
     registerTool<P = any>(tool: Tool<P>): void;
+    unregisterTool(name: string): void;
     /** `/name` in Telegram and the terminal. */
     registerCommand(name: string, command: Command | Command["handler"]): void;
     send(channel: string, chat: string, text: string): Promise<void>;

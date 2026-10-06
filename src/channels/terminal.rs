@@ -4,7 +4,6 @@ use crate::agent::{self, Agent, Event};
 use crate::db::Db;
 use crate::extensions::{self, Extensions};
 use crate::llm::providers;
-use crate::mcp::Mcp;
 use crate::tools::{Approver, ToolCtx, ToolRegistry};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -34,7 +33,6 @@ struct TerminalCore {
     workspace: std::path::PathBuf,
     db: Arc<Db>,
     ext: std::sync::Weak<Extensions>,
-    mcp: Arc<Mcp>,
     stdin: StdinLines,
 }
 
@@ -82,7 +80,7 @@ impl extensions::Core for TerminalCore {
             notify: None,
             inbox: None,
         };
-        let tools = ToolRegistry::with_defaults().with_extensions(ext).with_mcp(self.mcp.clone());
+        let tools = ToolRegistry::with_defaults().with_extensions(ext);
         Ok(tools.call(name, input, &ctx).await)
     }
 
@@ -129,14 +127,12 @@ pub async fn run() -> Result<()> {
     let provider = providers::build(selection).await?;
     let db = Db::open()?;
     let ext = Extensions::new(extensions::dir());
-    let mcp = Mcp::start().await;
     let stdin: StdinLines = Arc::new(Mutex::new(BufReader::new(tokio::io::stdin()).lines()));
     ext.set_core(Arc::new(TerminalCore {
         provider: provider.clone(),
         workspace: workspace.clone(),
         db: db.clone(),
         ext: Arc::downgrade(&ext),
-        mcp: mcp.clone(),
         stdin: stdin.clone(),
     }));
     let status = ext.reload().await;
@@ -153,7 +149,7 @@ pub async fn run() -> Result<()> {
     };
     let mut agent = Agent::new(
         provider.clone(),
-        ToolRegistry::with_defaults().with_extensions(ext.clone()).with_mcp(mcp.clone()),
+        ToolRegistry::with_defaults().with_extensions(ext.clone()),
         agent::system_prompt(&workspace, "The user reads replies in a terminal (plain text)."),
         db.clone(),
         "cli",
@@ -166,9 +162,6 @@ pub async fn run() -> Result<()> {
     );
     if !ext.status().starts_with("No extensions") {
         println!("{status}");
-    }
-    if !mcp.status().starts_with("No MCP") {
-        println!("{}", mcp.status());
     }
 
     loop {
@@ -197,7 +190,6 @@ pub async fn run() -> Result<()> {
                 println!("{}", ext.command(&cmd["/extensions".len()..]).await)
             }
             "/reload" => println!("{}", ext.reload().await),
-            "/mcp" => println!("{}", mcp.status()),
             input => {
                 if let Some((name, args)) = crate::channels::parse_command(input, None) {
                     match ext.run_command(&name, &args, &None).await {

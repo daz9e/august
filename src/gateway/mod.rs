@@ -15,7 +15,6 @@ use crate::extensions::{self, Extensions};
 use crate::channels::{Channel, ChatId, Inbound, InboundKind};
 use crate::llm::{LlmProvider, Message};
 use crate::llm::providers;
-use crate::mcp::Mcp;
 use crate::scheduler::TaskRunner;
 use crate::tools::{ToolCtx, ToolRegistry};
 use anyhow::Result;
@@ -47,7 +46,6 @@ pub struct Gateway {
     workspace: PathBuf,
     pub db: Arc<Db>,
     ext: Arc<Extensions>,
-    mcp: Arc<Mcp>,
     /// Numbers sub-agents.
     subagents: std::sync::atomic::AtomicU64,
 }
@@ -141,7 +139,6 @@ impl Gateway {
         workspace: PathBuf,
         db: Arc<Db>,
         ext: Arc<Extensions>,
-        mcp: Arc<Mcp>,
     ) -> Arc<Self> {
         let gw = Arc::new(Self {
             channels: channels.into_iter().map(|c| (c.id().to_string(), c)).collect(),
@@ -152,7 +149,6 @@ impl Gateway {
             workspace,
             db,
             ext,
-            mcp,
             subagents: Default::default(),
         });
         gw.ext.set_core(Arc::new(ExtCore(Arc::downgrade(&gw))));
@@ -165,7 +161,6 @@ impl Gateway {
         let mut events = bus.subscribe();
         let mut tasks = tokio::task::JoinSet::new();
         eprintln!("{}", self.ext.reload().await);
-        eprintln!("{}", self.mcp.status());
         self.publish_commands().await;
         for ch in self.channels.values() {
             let (ch, bus) = (ch.clone(), bus.clone());
@@ -202,7 +197,7 @@ impl Gateway {
     }
 
     fn tools(&self) -> ToolRegistry {
-        ToolRegistry::with_defaults().with_extensions(self.ext.clone()).with_mcp(self.mcp.clone())
+        ToolRegistry::with_defaults().with_extensions(self.ext.clone())
     }
 
     async fn chat(&self, id: &ChatId) -> Result<Arc<Chat>> {
@@ -332,5 +327,5 @@ pub async fn serve() -> Result<()> {
         workspace.display()
     );
     let ext = Extensions::new(extensions::dir());
-    Gateway::new(chans, provider, label, workspace, Db::open()?, ext, Mcp::start().await).run().await
+    Gateway::new(chans, provider, label, workspace, Db::open()?, ext).run().await
 }

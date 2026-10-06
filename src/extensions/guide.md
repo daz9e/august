@@ -83,6 +83,10 @@ Calling into August:
   chosen option, or null after 5 minutes; `await ctx.approve(action)` is a yes/no approval.
 - `august.workspace` is the agent's workspace folder.
 
+Tools can be registered (and removed with `august.unregisterTool(name)`) at any time, not
+only during setup, e.g. once a remote service answers; the model sees them from its next
+call.
+
 A tool with the name of a built-in one (`shell`, `read_file`, ...) replaces it, e.g. to run
 shell commands in a container.
 
@@ -98,7 +102,7 @@ shell commands in a container.
   August's log).
 - npm packages: just import them; bun installs them on first run. Keep state in files under
   `august.dir`.
-- Timeouts: hooks 10 s, commands 60 s, tools 10 min. A failing or slow hook is skipped
+- Timeouts: hooks 10 s, commands 60 s, tools 10 min, setup 30 s. A failing or slow hook is skipped
   (August continues as if it returned nothing); a crashed extension is restarted.
 - Built-in tool and command names can't be overridden.
 

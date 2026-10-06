@@ -33,6 +33,30 @@ function call(method: string, params: unknown): Promise<any> {
 const handlers = new Map<string, Function[]>();
 const tools = new Map<string, any>();
 const commands = new Map<string, any>();
+let started = false;
+let manifestQueued = false;
+
+function manifest() {
+  return {
+    tools: [...tools.values()].map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters ?? { type: "object", properties: {} },
+    })),
+    commands: [...commands.entries()].map(([n, c]) => ({ name: n, description: c.description ?? "" })),
+    events: [...handlers.keys()],
+  };
+}
+
+/** After startup, tells August what changed (once per tick, however many calls). */
+function changed() {
+  if (!started || manifestQueued) return;
+  manifestQueued = true;
+  queueMicrotask(() => {
+    manifestQueued = false;
+    write({ method: "manifest", params: manifest() });
+  });
+}
 
 function context(chat: Chat | null) {
   const noChat = () => Promise.reject(new Error("this call has no chat"));
@@ -55,17 +79,23 @@ const api = {
   on(event: string, handler: Function) {
     if (typeof handler !== "function") throw new Error(`on("${event}"): handler must be a function`);
     handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+    changed();
   },
   registerTool(tool: any) {
     if (!tool?.name || !tool?.description || typeof tool?.execute !== "function") {
       throw new Error("registerTool: name, description and execute are required");
     }
     tools.set(tool.name, tool);
+    changed();
+  },
+  unregisterTool(name: string) {
+    if (tools.delete(name)) changed();
   },
   registerCommand(cmd: string, spec: any) {
     const command = typeof spec === "function" ? { handler: spec } : spec;
     if (typeof command?.handler !== "function") throw new Error(`registerCommand("${cmd}"): handler is required`);
     commands.set(cmd.replace(/^\//, ""), command);
+    changed();
   },
   send: (channel: string, chat: string, text: string) => call("send", { channel, chat, text }),
   prompt: (channel: string, chat: string, text: string) => call("prompt", { channel, chat, text }),
@@ -138,15 +168,5 @@ try {
 process.on("unhandledRejection", (e) => console.error("unhandled rejection:", e));
 process.on("uncaughtException", (e) => console.error("uncaught exception:", e));
 
-write({
-  method: "ready",
-  params: {
-    tools: [...tools.values()].map((t) => ({
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters ?? { type: "object", properties: {} },
-    })),
-    commands: [...commands.entries()].map(([n, c]) => ({ name: n, description: c.description ?? "" })),
-    events: [...handlers.keys()],
-  },
-});
+started = true;
+write({ method: "ready", params: manifest() });

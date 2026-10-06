@@ -14,7 +14,6 @@ pub use tasks::format_tasks;
 use crate::db::Db;
 use crate::extensions::Extensions;
 use crate::llm::ToolSpec;
-use crate::mcp::Mcp;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -82,7 +81,6 @@ pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
     /// Extension tools and the `tool_call` / `tool_result` hooks.
     ext: Option<Arc<Extensions>>,
-    mcp: Option<Arc<Mcp>>,
     /// Tools (of any kind) the model is not offered and may not call.
     hidden: HashSet<String>,
     /// When set, only these tools are offered.
@@ -113,7 +111,6 @@ impl ToolRegistry {
                 Box::new(extensions::SaveExtension),
             ],
             ext: None,
-            mcp: None,
             hidden: HashSet::new(),
             only: None,
         }
@@ -140,11 +137,6 @@ impl ToolRegistry {
         self
     }
 
-    pub fn with_mcp(mut self, mcp: Arc<Mcp>) -> Self {
-        self.mcp = Some(mcp);
-        self
-    }
-
     pub fn extensions(&self) -> Option<&Arc<Extensions>> {
         self.ext.as_ref()
     }
@@ -165,9 +157,6 @@ impl ToolRegistry {
                 input_schema: t.input_schema(),
             })
             .collect();
-        if let Some(mcp) = &self.mcp {
-            specs.extend(mcp.tool_specs());
-        }
         specs.extend(ext);
         let mut seen = HashSet::new();
         specs.retain(|s| self.offered(&s.name) && seen.insert(s.name.clone()));
@@ -229,19 +218,11 @@ impl ToolRegistry {
                 Err(e) => (format!("error: {e}"), true),
             };
         }
-        if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
-            return match tool.call(input, ctx).await {
+        match self.tools.iter().find(|t| t.name() == name) {
+            Some(tool) => match tool.call(input, ctx).await {
                 Ok(out) => (out, false),
                 Err(e) => (format!("error: {e:#}"), true),
-            };
-        }
-        let found = match &self.mcp {
-            Some(mcp) => mcp.call_tool(name, input).await,
-            None => None,
-        };
-        match found {
-            Some(Ok(out)) => (out, false),
-            Some(Err(e)) => (format!("error: {e}"), true),
+            },
             None => (format!("unknown tool: {name}"), true),
         }
     }

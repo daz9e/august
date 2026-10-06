@@ -97,12 +97,6 @@ async fn mcp_server_tools_become_agent_tools() {
     }});
 
     let cmd = |n: i64, text: &str| message(n, json!({"text": text, "entities": [{"type": "bot_command", "offset": 0, "length": text.len()}]}));
-    let updates = vec![
-        message(1, json!({"text": "echo please"})),
-        message(2, json!({"text": "break it"})),
-        message(3, json!({"text": "what time"})),
-        cmd(4, "/mcp"),
-    ];
     let llm: Llm = Box::new(|req| {
         let last = messages(req).last().unwrap();
         if last["role"] == "tool" {
@@ -117,14 +111,18 @@ async fn mcp_server_tools_become_agent_tools() {
             reply_tool("mcp_web_time", json!({}))
         }
     });
-    let fake = Fake::start(updates, HashMap::new(), Some(llm)).await;
+    let fake = Fake::start(vec![message(1, json!({"text": "echo please"}))], HashMap::new(), Some(llm)).await;
     let _gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[], &[("mcp.json", &config.to_string())]);
 
+    // One message at a time, so each runs as its own turn.
     let sent = |f: &Fake, needle: &str| f.sent_texts().iter().any(|t| t.contains(needle));
-    fake.wait_for(TIMEOUT, |f| {
-        sent(f, "Result: hello world") && sent(f, "disk on fire") && sent(f, "Result: noon over http") && sent(f, "ghost")
-    })
-    .await;
+    fake.wait_for(TIMEOUT, |f| sent(f, "Result: hello world")).await;
+    fake.push_updates(vec![message(2, json!({"text": "break it"}))]);
+    fake.wait_for(TIMEOUT, |f| sent(f, "disk on fire")).await;
+    fake.push_updates(vec![message(3, json!({"text": "what time"}))]);
+    fake.wait_for(TIMEOUT, |f| sent(f, "Result: noon over http")).await;
+    fake.push_updates(vec![cmd(4, "/mcp")]);
+    fake.wait_for(TIMEOUT, |f| sent(f, "ghost")).await;
 
     // The tools were offered under prefixed, sanitized names.
     let reqs = fake.llm_requests();

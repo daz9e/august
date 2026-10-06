@@ -364,3 +364,30 @@ async fn extensions_replace_builtin_tools_and_decide_approvals() {
     fake.push_updates(vec![button_press(4, &deny)]);
     fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: the user denied this")).await;
 }
+
+const LATE: &str = r#"export default function (august) {
+  august.registerTool({ name: "early", description: "Gone after /arm", execute: () => "early ran" });
+  august.registerCommand("arm", () => {
+    august.unregisterTool("early");
+    august.registerTool({ name: "late", description: "Added by /arm", execute: () => "late ran" });
+    return "armed";
+  });
+}"#;
+
+#[tokio::test]
+async fn extension_changes_its_tools_after_startup() {
+    if !have_bun() {
+        return;
+    }
+    let arm = message(1, json!({"text": "/arm", "entities": [{"type": "bot_command", "offset": 0, "length": 4}]}));
+    let fake = Fake::start(vec![arm], HashMap::new(), Some(llm(|_| reply_tool("late", json!({}))))).await;
+    let _gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[], &[("extensions/late/index.ts", LATE)]);
+
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "armed")).await;
+    fake.push_updates(vec![message(2, json!({"text": "go"}))]);
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: late ran")).await;
+
+    let first = &fake.llm_requests()[0];
+    let tools: Vec<&str> = first["tools"].as_array().unwrap().iter().filter_map(|t| t["function"]["name"].as_str()).collect();
+    assert!(tools.contains(&"late") && !tools.contains(&"early"), "{tools:?}");
+}
