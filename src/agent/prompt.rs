@@ -26,7 +26,7 @@ pub fn system_prompt(workspace: &std::path::Path, surface: &str) -> String {
 impl Agent {
     /// System prompt plus what changes between calls: saved facts and available skills.
     pub(super) fn system_now(&self) -> String {
-        let mut s = self.system.clone();
+        let mut s = self.turn_system.as_ref().unwrap_or(&self.system).clone();
         match self.db.facts() {
             Ok(facts) if !facts.is_empty() => {
                 s += "\n\n## Memory\nFacts you saved earlier (delete outdated ones with `forget`):\n";

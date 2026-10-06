@@ -11,7 +11,7 @@ use compaction::DEFAULT_CONTEXT_TOKENS;
 use crate::llm::{Block, LlmProvider, Message, Role, StopReason, Usage};
 use crate::tools::{ToolCtx, ToolRegistry};
 use anyhow::Result;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 const MAX_STEPS: usize = 40;
@@ -31,6 +31,8 @@ pub struct Agent {
     provider: Arc<dyn LlmProvider>,
     tools: ToolRegistry,
     system: String,
+    /// The system prompt a `before_turn` hook set for the running turn.
+    turn_system: Option<String>,
     history: Vec<Message>,
     db: Arc<dyn SessionStore>,
     /// Which chat this is (`telegram:123`, `cli`); sessions are looked up by it.
@@ -63,6 +65,7 @@ impl Agent {
             provider,
             tools,
             system,
+            turn_system: None,
             history,
             db,
             chat_key: chat_key.to_string(),
@@ -140,9 +143,31 @@ impl Agent {
         on_event: &mut (dyn FnMut(Event) + Send),
     ) -> Result<String> {
         self.turn_start = self.history.len();
-        let result = self.run_turn_inner(user_text, attachments, ctx, on_event).await;
+        self.turn_system = None;
+        let ext = self.tools.extensions().cloned();
+        let mut text = user_text.to_string();
+        if let Some(ext) = &ext
+            && ext.listens("before_turn")
+        {
+            let data = ext.emit("before_turn", json!({"text": text, "system": self.system}), &ctx.origin).await;
+            if let Some(t) = data["text"].as_str() {
+                text = t.to_string();
+            }
+            if let Some(s) = data["system"].as_str().filter(|s| *s != self.system) {
+                self.turn_system = Some(s.to_string());
+            }
+        }
+        let result = self.run_turn_inner(&text, attachments, ctx, on_event).await;
+        self.turn_system = None;
         match &result {
-            Ok(_) => self.persist(),
+            Ok(reply) => {
+                self.persist();
+                if let Some(ext) = ext.filter(|e| e.listens("turn_end")) {
+                    let data = json!({"text": text, "reply": reply});
+                    let chat = ctx.origin.clone();
+                    tokio::spawn(async move { ext.emit("turn_end", data, &chat).await });
+                }
+            }
             Err(_) => self.rollback_turn(),
         }
         result

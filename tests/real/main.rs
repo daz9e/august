@@ -5,5 +5,6 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod extensions;
 mod media;
 mod service;

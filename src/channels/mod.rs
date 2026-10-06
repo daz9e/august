@@ -63,9 +63,16 @@ pub struct Button {
     pub data: String,
 }
 
+#[derive(Clone)]
 pub struct CommandSpec {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: std::borrow::Cow<'static, str>,
+    pub description: std::borrow::Cow<'static, str>,
+}
+
+impl CommandSpec {
+    pub const fn new(name: &'static str, description: &'static str) -> Self {
+        Self { name: std::borrow::Cow::Borrowed(name), description: std::borrow::Cow::Borrowed(description) }
+    }
 }
 
 pub struct Limits {

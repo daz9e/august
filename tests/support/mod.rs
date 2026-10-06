@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -48,7 +48,6 @@ struct Inner {
     updates: Mutex<Vec<Value>>,
     files: HashMap<String, Vec<u8>>,
     llm: Option<Llm>,
-    delivered: AtomicBool,
     next_id: AtomicI64,
 }
 
@@ -66,7 +65,6 @@ impl Fake {
             updates: Mutex::new(updates),
             files,
             llm,
-            delivered: AtomicBool::new(false),
             next_id: AtomicI64::new(100),
         });
         let app = axum::Router::new().fallback(handle).with_state(inner.clone());
@@ -74,6 +72,20 @@ impl Fake {
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         Fake { url, inner }
+    }
+
+    /// Queues updates for the next `getUpdates`.
+    pub fn push_updates(&self, updates: Vec<Value>) {
+        self.inner.updates.lock().unwrap().extend(updates);
+    }
+
+    /// Markdown/HTML text of every message the bot sent or edited, in order.
+    pub fn sent_texts(&self) -> Vec<String> {
+        self.requests()
+            .iter()
+            .filter(|r| matches!(r.method(), "sendMessage" | "editMessageText"))
+            .filter_map(|r| r.json()["text"].as_str().map(String::from))
+            .collect()
     }
 
     pub fn requests(&self) -> Vec<Req> {
@@ -129,11 +141,11 @@ async fn handle(State(s): State<Arc<Inner>>, method: Method, uri: Uri, body: Byt
     match api {
         "getMe" => ok(json!({"id": 99, "is_bot": true, "username": "AugustBot"})),
         "getUpdates" => {
-            if !s.delivered.swap(true, Ordering::SeqCst) {
-                return ok(Value::Array(std::mem::take(&mut *s.updates.lock().unwrap())));
+            let updates = std::mem::take(&mut *s.updates.lock().unwrap());
+            if updates.is_empty() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            ok(json!([]))
+            ok(Value::Array(updates))
         }
         "getFile" => {
             let id = params["file_id"].as_str().unwrap_or("");
@@ -160,6 +172,16 @@ pub fn message(id: i64, fields: Value) -> Value {
     json!({"update_id": id, "message": m})
 }
 
+/// The owner pressing an inline button.
+pub fn button_press(id: i64, data: &str) -> Value {
+    json!({"update_id": id, "callback_query": {
+        "id": format!("cb{id}"),
+        "from": {"id": OWNER, "is_bot": false, "first_name": "Owner"},
+        "message": {"message_id": 1, "chat": {"id": CHAT, "type": "private"}},
+        "data": data,
+    }})
+}
+
 /// Chat-completions answers for the fake LLM.
 pub fn reply_text(text: &str) -> Value {
     json!({"choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}]})
@@ -175,6 +197,8 @@ pub fn reply_tool(name: &str, args: Value) -> Value {
 pub struct Gateway {
     child: Child,
     pub workspace: PathBuf,
+    /// `AUGUST_HOME` (only with the fake LLM).
+    pub home: PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -195,7 +219,18 @@ pub enum LlmSetup<'a> {
 /// Starts the gateway with a fresh workspace (seeded with `seed` files) talking to
 /// the fake Bot API at `fake`.
 pub fn spawn_gateway(fake: &Fake, llm: LlmSetup, seed: &[(&str, &[u8])]) -> Gateway {
+    spawn_gateway_with_home(fake, llm, seed, &[])
+}
+
+/// Like `spawn_gateway`, also writing `home_files` (relative paths) into `AUGUST_HOME`.
+pub fn spawn_gateway_with_home(fake: &Fake, llm: LlmSetup, seed: &[(&str, &[u8])], home_files: &[(&str, &str)]) -> Gateway {
     let dir = tempfile::tempdir().unwrap();
+    let fake_home = dir.path().join("home");
+    for (path, text) in home_files {
+        let path = fake_home.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
     let workspace = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     for (name, bytes) in seed {
@@ -215,14 +250,14 @@ pub fn spawn_gateway(fake: &Fake, llm: LlmSetup, seed: &[(&str, &[u8])]) -> Gate
         .stderr(if std::env::var_os("TEST_GATEWAY_LOG").is_some() { Stdio::inherit() } else { Stdio::null() });
     match llm {
         LlmSetup::Fake => {
-            let home = dir.path().join("home");
-            cmd.env("AUGUST_HOME", &home)
+            cmd.env("AUGUST_HOME", &fake_home)
                 .env("AUGUST_PROVIDER", "openai")
                 .env("AUGUST_MODEL", "fake-model")
                 .env("OPENAI_API_KEY", "test")
                 .env("OPENAI_BASE_URL", format!("{}/v1", fake.url));
         }
         LlmSetup::Real { home } => {
+            assert!(home_files.is_empty(), "home files are only written for the fake LLM");
             cmd.env("AUGUST_HOME", home);
             for (k, v) in std::env::vars().filter(|(k, _)| k.starts_with("AUGUST_") || k.ends_with("_API_KEY")) {
                 cmd.env(k, v);
@@ -231,7 +266,7 @@ pub fn spawn_gateway(fake: &Fake, llm: LlmSetup, seed: &[(&str, &[u8])]) -> Gate
         }
     }
     let child = cmd.spawn().expect("start august gateway");
-    Gateway { child, workspace, _dir: dir }
+    Gateway { child, workspace, home: fake_home, _dir: dir }
 }
 
 pub fn fixture(name: &str) -> Vec<u8> {

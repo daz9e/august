@@ -7,24 +7,46 @@ use anyhow::Result;
 use std::sync::Arc;
 
 pub(super) const COMMANDS: &[CommandSpec] = &[
-    CommandSpec { name: "new", description: "Start a fresh conversation" },
-    CommandSpec { name: "stop", description: "Cancel the current task" },
-    CommandSpec { name: "compact", description: "Summarise older messages to free up context" },
-    CommandSpec { name: "memory", description: "Show what I remember about you" },
-    CommandSpec { name: "tasks", description: "List scheduled tasks" },
-    CommandSpec { name: "model", description: "Show or change the model" },
-    CommandSpec { name: "status", description: "Show provider, model and workspace" },
-    CommandSpec { name: "help", description: "List commands" },
+    CommandSpec::new("new", "Start a fresh conversation"),
+    CommandSpec::new("stop", "Cancel the current task"),
+    CommandSpec::new("compact", "Summarise older messages to free up context"),
+    CommandSpec::new("memory", "Show what I remember about you"),
+    CommandSpec::new("tasks", "List scheduled tasks"),
+    CommandSpec::new("model", "Show or change the model"),
+    CommandSpec::new("status", "Show provider, model and workspace"),
+    CommandSpec::new("extensions", "List extensions and their status"),
+    CommandSpec::new("reload", "Restart all extensions"),
+    CommandSpec::new("help", "List commands"),
 ];
 
 impl Gateway {
+    /// Built-in commands followed by the ones extensions registered.
+    pub(super) fn command_list(&self) -> Vec<CommandSpec> {
+        let reserved: Vec<&str> = COMMANDS.iter().map(|c| c.name.as_ref()).chain(["start", "reset"]).collect();
+        let ext = self.ext.commands(&reserved).into_iter().map(|(name, description)| CommandSpec {
+            description: if description.is_empty() { format!("/{name}").into() } else { description.into() },
+            name: name.into(),
+        });
+        COMMANDS.iter().cloned().chain(ext).collect()
+    }
+
+    /// Tells every messenger the current command list (after extensions changed).
+    pub(super) async fn publish_commands(&self) {
+        let list = self.command_list();
+        for ch in self.channels.values() {
+            if let Err(e) = ch.set_commands(&list).await {
+                eprintln!("{}: could not register commands: {e:#}", ch.id());
+            }
+        }
+    }
+
     pub(super) async fn command(&self, channel: &Arc<dyn Channel>, id: &ChatId, name: &str, args: &str) -> Result<()> {
         let chat = id.chat.as_str();
         let state = self.chat(id).await?;
         let reply = match name {
             "start" | "help" => {
                 let mut s = String::from("**August** — your personal agent. Just write a message.\n\n");
-                for c in COMMANDS {
+                for c in self.command_list() {
                     s += &format!("/{} — {}\n", c.name, c.description);
                 }
                 s
@@ -75,7 +97,21 @@ impl Gateway {
                 Ok(label) => format!("Now using `{label}` (applies to the next message)."),
                 Err(e) => format!("Could not switch model: {e:#}"),
             },
-            other => format!("Unknown command /{other}. Try /help."),
+            "extensions" => self.ext.status(),
+            "reload" => {
+                let status = self.ext.reload().await;
+                self.publish_commands().await;
+                format!("Extensions reloaded.\n{status}")
+            }
+            other => {
+                let origin = Some((id.channel.clone(), id.chat.clone()));
+                match self.ext.run_command(other, args, &origin).await {
+                    Some(Ok(Some(reply))) => reply,
+                    Some(Ok(None)) => return Ok(()),
+                    Some(Err(e)) => format!("⚠️ /{other} failed: {e}"),
+                    None => format!("Unknown command /{other}. Try /help."),
+                }
+            }
         };
         channel.send(chat, &reply, &[]).await?;
         Ok(())

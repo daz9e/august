@@ -3,6 +3,7 @@ mod channels;
 mod cli;
 mod config;
 mod db;
+mod extensions;
 mod gateway;
 mod llm;
 mod scheduler;

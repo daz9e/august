@@ -2,6 +2,7 @@
 
 use crate::agent::{self, Agent, Event};
 use crate::db::Db;
+use crate::extensions::{self, Extensions};
 use crate::llm::providers;
 use crate::tools::{Approver, ToolCtx, ToolRegistry};
 use anyhow::Result;
@@ -22,6 +23,21 @@ impl Approver for CliApprover {
         std::io::stdout().flush().ok();
         let answer = self.0.lock().await.next_line().await.ok().flatten();
         matches!(answer.as_deref().map(str::trim), Some("y" | "Y" | "yes"))
+    }
+}
+
+/// Extensions in the terminal: messages are printed, turns can't be queued.
+struct TerminalCore;
+
+#[async_trait]
+impl extensions::Core for TerminalCore {
+    async fn send(&self, _channel: &str, _chat: &str, text: &str) -> Result<()> {
+        println!("\n{text}");
+        Ok(())
+    }
+
+    async fn prompt(&self, _channel: &str, _chat: &str, _text: &str) -> Result<()> {
+        anyhow::bail!("queuing turns is not supported in the terminal")
     }
 }
 
@@ -52,6 +68,9 @@ pub async fn run() -> Result<()> {
     let provider_id = selection.provider.id;
     let provider = providers::build(selection).await?;
     let db = Db::open()?;
+    let ext = Extensions::new(extensions::dir());
+    ext.set_core(Arc::new(TerminalCore));
+    let status = ext.reload().await;
     let stdin: StdinLines = Arc::new(Mutex::new(BufReader::new(tokio::io::stdin()).lines()));
     let ctx = ToolCtx {
         workspace: workspace.clone(),
@@ -59,20 +78,24 @@ pub async fn run() -> Result<()> {
         db: db.clone(),
         origin: None,
         files: None,
+        extensions: Some(ext.clone()),
     };
     let mut agent = Agent::new(
         provider.clone(),
-        ToolRegistry::with_defaults(),
+        ToolRegistry::with_defaults().with_extensions(ext.clone()),
         agent::system_prompt(&workspace, "The user reads replies in a terminal (plain text)."),
         db,
         "cli",
     )?;
 
     println!(
-        "august · {provider_id} · {} · workspace {}\n/reset — new session, /compact — summarise old messages, /exit — quit",
+        "august · {provider_id} · {} · workspace {}\n/reset — new session, /compact — summarise old messages, /extensions, /reload, /exit — quit",
         provider.name(),
         workspace.display()
     );
+    if !ext.status().starts_with("No extensions") {
+        println!("{status}");
+    }
 
     loop {
         print!("\n> ");
@@ -92,10 +115,33 @@ pub async fn run() -> Result<()> {
                 Ok(None) => println!("nothing to compact"),
                 Err(e) => eprintln!("error: {e:#}"),
             },
-            input => match agent.run_turn(input, &ctx, &mut print_event).await {
-                Ok(_) => println!(),
-                Err(e) => eprintln!("\nerror: {e:#}"),
-            },
+            "/extensions" => println!("{}", ext.status()),
+            "/reload" => println!("{}", ext.reload().await),
+            input => {
+                if let Some((name, args)) = crate::channels::parse_command(input, None) {
+                    match ext.run_command(&name, &args, &None).await {
+                        Some(Ok(reply)) => println!("{}", reply.unwrap_or_default()),
+                        Some(Err(e)) => eprintln!("/{name} failed: {e}"),
+                        None => println!("unknown command /{name}"),
+                    }
+                    continue;
+                }
+                let mut text = input.to_string();
+                if ext.listens("message_in") {
+                    let data = ext.emit("message_in", serde_json::json!({"text": text}), &None).await;
+                    if data["handled"] == true {
+                        println!("{}", data["reply"].as_str().unwrap_or(""));
+                        continue;
+                    }
+                    if let Some(t) = data["text"].as_str() {
+                        text = t.to_string();
+                    }
+                }
+                match agent.run_turn(&text, &ctx, &mut print_event).await {
+                    Ok(_) => println!(),
+                    Err(e) => eprintln!("\nerror: {e:#}"),
+                }
+            }
         }
     }
     Ok(())

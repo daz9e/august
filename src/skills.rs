@@ -21,6 +21,16 @@ pub struct Skill {
     pub description: String,
 }
 
+/// Skills that ship with August: `(name, description, body)`.
+fn builtin() -> Vec<(&'static str, &'static str, String)> {
+    vec![(
+        "writing-extensions",
+        "How to extend August itself with TypeScript extensions (tools, slash commands, hooks); \
+         read before `save_extension`",
+        crate::extensions::guide(),
+    )]
+}
+
 pub fn dir() -> PathBuf {
     crate::config::home().join("skills")
 }
@@ -47,12 +57,16 @@ fn parse(text: &str) -> (Option<String>, &str) {
     (description, body)
 }
 
-/// Every valid skill, sorted by name. Unreadable folders are skipped.
+/// Every valid skill (built-in ones first), sorted by name. Unreadable folders are skipped.
 pub fn list() -> Vec<Skill> {
+    let mut skills: Vec<Skill> = builtin()
+        .into_iter()
+        .map(|(name, description, _)| Skill { name: name.into(), description: description.into() })
+        .collect();
     let Ok(entries) = std::fs::read_dir(dir()) else {
-        return Vec::new();
+        return skills;
     };
-    let mut skills: Vec<Skill> = entries
+    let installed = entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
@@ -62,8 +76,12 @@ pub fn list() -> Vec<Skill> {
             let text = std::fs::read_to_string(e.path().join("SKILL.md")).ok()?;
             let (description, _) = parse(&text);
             Some(Skill { name, description: description.unwrap_or_default() })
-        })
-        .collect();
+        });
+    for skill in installed {
+        if !skills.iter().any(|s| s.name == skill.name) {
+            skills.push(skill);
+        }
+    }
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
 }
@@ -89,6 +107,9 @@ pub fn load(name: &str) -> Result<String> {
     if !valid_name(name) {
         bail!("invalid skill name `{name}`");
     }
+    if let Some((_, _, body)) = builtin().into_iter().find(|b| b.0 == name) {
+        return Ok(body);
+    }
     let folder = dir().join(name);
     let text = std::fs::read_to_string(folder.join("SKILL.md"))
         .with_context(|| format!("no skill named `{name}`"))?;
@@ -111,6 +132,9 @@ pub fn load(name: &str) -> Result<String> {
 pub fn save(name: &str, description: &str, body: &str) -> Result<PathBuf> {
     if !valid_name(name) {
         bail!("skill names use lowercase letters, digits, `-` and `_` (max 64)");
+    }
+    if builtin().iter().any(|b| b.0 == name) {
+        bail!("`{name}` is a built-in skill; pick another name");
     }
     if description.trim().is_empty() || description.contains('\n') {
         bail!("description must be one non-empty line");

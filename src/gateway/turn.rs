@@ -65,6 +65,7 @@ impl Gateway {
             db: self.db.clone(),
             origin: Some((id.channel.clone(), id.chat.clone())),
             files: Some(Arc::new(ChatFiles(tx.clone()))),
+            extensions: Some(self.ext.clone()),
         };
         let streamed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let streamed2 = streamed.clone();
