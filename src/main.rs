@@ -6,6 +6,7 @@ mod db;
 mod extensions;
 mod gateway;
 mod llm;
+mod mcp;
 mod scheduler;
 mod skills;
 mod tools;

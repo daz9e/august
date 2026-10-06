@@ -11,3 +11,4 @@ mod compaction;
 mod skills;
 mod review;
 mod usage;
+mod mcp;

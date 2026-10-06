@@ -1,0 +1,148 @@
+//! MCP servers from `AUGUST_HOME/mcp.json`: a stdio server (a small Python script), a
+//! streamable HTTP server and one that can't start. Skipped without python3.
+
+use crate::support::*;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::time::Duration;
+
+const TIMEOUT: Duration = Duration::from_secs(30);
+
+const SERVER_PY: &str = r#"
+import json, os, sys
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method, id = msg.get("method"), msg.get("id")
+    if id is None:
+        continue
+    if method == "initialize":
+        result = {"protocolVersion": msg["params"]["protocolVersion"], "capabilities": {"tools": {}},
+                  "serverInfo": {"name": "fake", "version": "1"}}
+    elif method == "tools/list":
+        result = {"tools": [
+            {"name": "echo", "description": "Echo text", "inputSchema": {"type": "object",
+             "properties": {"text": {"type": "string"}}, "required": ["text"]}},
+            {"name": "fail.hard", "description": "Always fails", "inputSchema": {"type": "object"}},
+        ]}
+    elif method == "tools/call" and msg["params"]["name"] == "echo":
+        text = os.environ["GREETING"] + " " + msg["params"]["arguments"]["text"]
+        result = {"content": [{"type": "text", "text": text}, {"type": "image", "data": "", "mimeType": "image/png"}]}
+    elif method == "tools/call":
+        result = {"content": [{"type": "text", "text": "disk on fire"}], "isError": True}
+    else:
+        send({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "no such method"}})
+        continue
+    send({"jsonrpc": "2.0", "id": id, "result": result})
+"#;
+
+fn have_python() -> bool {
+    let found = std::process::Command::new("python3").arg("--version").output().is_ok_and(|o| o.status.success());
+    if !found {
+        eprintln!("skipping: python3 is not installed");
+    }
+    found
+}
+
+/// A streamable HTTP MCP server: JSON for the handshake, SSE for tool calls, and a
+/// session id it insists on after `initialize`.
+async fn http_server() -> String {
+    async fn handle(headers: HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+        let msg: Value = serde_json::from_slice(&body).unwrap();
+        let session = headers.get("mcp-session-id").and_then(|v| v.to_str().ok());
+        let Some(id) = msg.get("id").cloned() else { return StatusCode::ACCEPTED.into_response() };
+        let reply = |result: Value| json!({"jsonrpc": "2.0", "id": id, "result": result});
+        match msg["method"].as_str().unwrap() {
+            "initialize" => {
+                let r = reply(json!({"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "web"}}));
+                ([("mcp-session-id", "s1")], axum::Json(r)).into_response()
+            }
+            _ if session != Some("s1") => StatusCode::BAD_REQUEST.into_response(),
+            "tools/list" => axum::Json(reply(json!({"tools": [{"name": "time", "inputSchema": {"type": "object"}}]}))).into_response(),
+            _ => {
+                let r = reply(json!({"content": [{"type": "text", "text": "noon over http"}]}));
+                ([("content-type", "text/event-stream")], format!("event: message\ndata: {r}\n\n")).into_response()
+            }
+        }
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, axum::Router::new().fallback(handle)).await.unwrap() });
+    url
+}
+
+fn messages(req: &Value) -> &Vec<Value> {
+    req["messages"].as_array().unwrap()
+}
+
+#[tokio::test]
+async fn mcp_server_tools_become_agent_tools() {
+    if !have_python() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("server.py");
+    std::fs::write(&script, SERVER_PY).unwrap();
+    let config = json!({"servers": {
+        "fake": {"command": "python3", "args": [script], "env": {"GREETING": "hello"}},
+        "web": {"url": http_server().await},
+        "ghost": {"command": "/nonexistent/mcp-server"},
+        "dies": {"command": "python3", "args": ["-c", "import sys; sys.stdin.readline(); print('bye', file=sys.stderr)"]},
+    }});
+
+    let cmd = |n: i64, text: &str| message(n, json!({"text": text, "entities": [{"type": "bot_command", "offset": 0, "length": text.len()}]}));
+    let updates = vec![
+        message(1, json!({"text": "echo please"})),
+        message(2, json!({"text": "break it"})),
+        message(3, json!({"text": "what time"})),
+        cmd(4, "/mcp"),
+    ];
+    let llm: Llm = Box::new(|req| {
+        let last = messages(req).last().unwrap();
+        if last["role"] == "tool" {
+            return reply_text(&format!("Result: {}", last["content"].as_str().unwrap_or("")));
+        }
+        let text = last["content"].as_str().unwrap_or("");
+        if text.contains("echo") {
+            reply_tool("mcp_fake_echo", json!({"text": "world"}))
+        } else if text.contains("break") {
+            reply_tool("mcp_fake_fail_hard", json!({}))
+        } else {
+            reply_tool("mcp_web_time", json!({}))
+        }
+    });
+    let fake = Fake::start(updates, HashMap::new(), Some(llm)).await;
+    let _gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[], &[("mcp.json", &config.to_string())]);
+
+    let sent = |f: &Fake, needle: &str| f.sent_texts().iter().any(|t| t.contains(needle));
+    fake.wait_for(TIMEOUT, |f| {
+        sent(f, "Result: hello world") && sent(f, "disk on fire") && sent(f, "Result: noon over http") && sent(f, "ghost")
+    })
+    .await;
+
+    // The tools were offered under prefixed, sanitized names.
+    let reqs = fake.llm_requests();
+    let tools: Vec<&str> = reqs[0]["tools"].as_array().unwrap().iter().filter_map(|t| t["function"]["name"].as_str()).collect();
+    for name in ["mcp_fake_echo", "mcp_fake_fail_hard", "mcp_web_time", "shell"] {
+        assert!(tools.contains(&name), "{tools:?}");
+    }
+    // Non-text content is noted; an MCP error result reaches the model as a tool error.
+    let tool_msgs: Vec<String> = reqs.iter().flat_map(messages).filter(|m| m["role"] == "tool")
+        .filter_map(|m| m["content"].as_str().map(String::from)).collect();
+    assert!(tool_msgs.iter().any(|m| m.contains("hello world") && m.contains("[image content (image/png) not shown]")), "{tool_msgs:?}");
+    assert!(tool_msgs.iter().any(|m| m == "error: disk on fire"), "{tool_msgs:?}");
+
+    // /mcp lists every server, including the one that could not start.
+    let status = fake.sent_texts().into_iter().find(|t| t.contains("ghost")).unwrap();
+    assert!(status.contains("fake — tools: mcp_fake_echo, mcp_fake_fail_hard"), "{status}");
+    assert!(status.contains("web — tools: mcp_web_time"), "{status}");
+    assert!(status.contains("could not run /nonexistent/mcp-server"), "{status}");
+    assert!(status.contains("dies — the server exited: bye"), "{status}");
+    assert!(fake.calls("setMyCommands").iter().any(|r| r.text().contains("\"mcp\"")));
+}

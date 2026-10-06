@@ -6,5 +6,6 @@
 mod support;
 
 mod extensions;
+mod mcp;
 mod media;
 mod service;

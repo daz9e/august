@@ -17,6 +17,7 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("status", "Show provider, model and workspace"),
     CommandSpec::new("extensions", "List extensions and their status"),
     CommandSpec::new("reload", "Restart all extensions"),
+    CommandSpec::new("mcp", "List MCP servers and their tools"),
     CommandSpec::new("help", "List commands"),
 ];
 
@@ -100,6 +101,7 @@ impl Gateway {
                 Err(e) => format!("Could not switch model: {e:#}"),
             },
             "extensions" => self.ext.status(),
+            "mcp" => self.mcp.status(),
             "reload" => {
                 let status = self.ext.reload().await;
                 self.publish_commands().await;

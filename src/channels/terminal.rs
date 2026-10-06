@@ -4,6 +4,7 @@ use crate::agent::{self, Agent, Event};
 use crate::db::Db;
 use crate::extensions::{self, Extensions};
 use crate::llm::providers;
+use crate::mcp::Mcp;
 use crate::tools::{Approver, ToolCtx, ToolRegistry};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -71,6 +72,7 @@ pub async fn run() -> Result<()> {
     let ext = Extensions::new(extensions::dir());
     ext.set_core(Arc::new(TerminalCore));
     let status = ext.reload().await;
+    let mcp = Mcp::start().await;
     let stdin: StdinLines = Arc::new(Mutex::new(BufReader::new(tokio::io::stdin()).lines()));
     let ctx = ToolCtx {
         workspace: workspace.clone(),
@@ -83,19 +85,22 @@ pub async fn run() -> Result<()> {
     };
     let mut agent = Agent::new(
         provider.clone(),
-        ToolRegistry::with_defaults().with_extensions(ext.clone()),
+        ToolRegistry::with_defaults().with_extensions(ext.clone()).with_mcp(mcp.clone()),
         agent::system_prompt(&workspace, "The user reads replies in a terminal (plain text)."),
         db.clone(),
         "cli",
     )?;
 
     println!(
-        "august · {provider_id} · {} · workspace {}\n/reset — new session, /compact — summarise old messages, /usage — tokens used, /extensions, /reload, /exit — quit",
+        "august · {provider_id} · {} · workspace {}\n/reset — new session, /compact — summarise old messages, /usage — tokens used, /extensions, /reload, /mcp, /exit — quit",
         provider.name(),
         workspace.display()
     );
     if !ext.status().starts_with("No extensions") {
         println!("{status}");
+    }
+    if !mcp.status().starts_with("No MCP") {
+        println!("{}", mcp.status());
     }
 
     loop {
@@ -122,6 +127,7 @@ pub async fn run() -> Result<()> {
             },
             "/extensions" => println!("{}", ext.status()),
             "/reload" => println!("{}", ext.reload().await),
+            "/mcp" => println!("{}", mcp.status()),
             input => {
                 if let Some((name, args)) = crate::channels::parse_command(input, None) {
                     match ext.run_command(&name, &args, &None).await {
