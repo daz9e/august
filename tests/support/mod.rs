@@ -224,6 +224,17 @@ pub fn spawn_gateway(fake: &Fake, llm: LlmSetup, seed: &[(&str, &[u8])]) -> Gate
 
 /// Like `spawn_gateway`, also writing `home_files` (relative paths) into `AUGUST_HOME`.
 pub fn spawn_gateway_with_home(fake: &Fake, llm: LlmSetup, seed: &[(&str, &[u8])], home_files: &[(&str, &str)]) -> Gateway {
+    spawn_gateway_env(fake, llm, seed, home_files, &[])
+}
+
+/// Like `spawn_gateway_with_home`, with extra environment variables for the gateway.
+pub fn spawn_gateway_env(
+    fake: &Fake,
+    llm: LlmSetup,
+    seed: &[(&str, &[u8])],
+    home_files: &[(&str, &str)],
+    env: &[(&str, &str)],
+) -> Gateway {
     let dir = tempfile::tempdir().unwrap();
     let fake_home = dir.path().join("home");
     for (path, text) in home_files {
@@ -265,6 +276,7 @@ pub fn spawn_gateway_with_home(fake: &Fake, llm: LlmSetup, seed: &[(&str, &[u8])
             cmd.env("AUGUST_WORKSPACE", &workspace);
         }
     }
+    cmd.envs(env.iter().copied());
     let child = cmd.spawn().expect("start august gateway");
     Gateway { child, workspace, home: fake_home, _dir: dir }
 }

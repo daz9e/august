@@ -7,3 +7,4 @@ mod support;
 mod media;
 mod extensions;
 mod memory;
+mod compaction;

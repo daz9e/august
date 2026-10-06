@@ -17,10 +17,20 @@ const IMAGE_TOKENS: usize = 1_600;
 const TRANSCRIPT_MAX: usize = 150_000;
 
 const SUMMARY_SYSTEM: &str = "You compress conversations for an AI assistant that will continue \
-    them. Write a dense summary of the transcript: the user's goals, decisions made, facts and \
-    preferences learned, work done (files, commands, results), and anything still pending. \
-    Keep names, paths, numbers and identifiers exact. Use the conversation's language. Output \
-    only the summary.";
+    them. Write the summary in exactly these sections (omit a section only if it would be empty):\n\
+    ## Goal\nWhat the user is trying to accomplish.\n\
+    ## Constraints & Preferences\nWhat the user asked for or ruled out, how they want things done.\n\
+    ## Progress\n### Done\nCompleted work: files, commands, results.\n### In Progress\n### Blocked\n\
+    ## Key Decisions\nDecisions made and why.\n\
+    ## Relevant Files\nPaths read, changed or created, with a note on each.\n\
+    ## Next Steps\n\
+    ## Critical Context\nExact values, names, ids, error messages still needed.\n\
+    Keep names, paths, numbers and identifiers exact. Use the conversation's language. When a \
+    current summary is given, update it with the new transcript instead of starting over: move \
+    finished items to Done, drop what is obsolete, keep what still matters. Output only the summary.";
+
+/// Marks the summary message at the start of a compacted history.
+const SUMMARY_MARK: &str = "[Summary of the earlier conversation]";
 
 impl Agent {
     pub(super) fn estimate_tokens(&self) -> usize {
@@ -100,8 +110,21 @@ impl Agent {
         if self.history.len() < self.compact_retry_at {
             return Ok(false);
         }
-        let transcript = transcript(&self.history[..cut]);
-        let ask = vec![Message::user_text(format!("Transcript to summarise:\n\n{transcript}"))];
+        // A summary from an earlier compaction is updated, not summarised again.
+        let mut old = self.history[..cut].to_vec();
+        let mut previous = None;
+        if let Some(Block::Text(t)) = old.first_mut().and_then(|m| m.content.first_mut()) {
+            if let Some(prev) = t.strip_prefix(SUMMARY_MARK) {
+                previous = Some(prev.trim().to_string());
+                t.clear();
+            }
+        }
+        let transcript = transcript(&old);
+        let ask = match previous {
+            Some(p) => format!("Current summary:\n\n{p}\n\nNew transcript to fold into it:\n\n{transcript}"),
+            None => format!("Transcript to summarise:\n\n{transcript}"),
+        };
+        let ask = vec![Message::user_text(ask)];
         let summary = match self.provider.complete(&self.session, SUMMARY_SYSTEM, &ask, &[]).await {
             Ok(c) if !c.message.text().trim().is_empty() => c.message.text(),
             Ok(_) => anyhow::bail!("the model returned an empty summary"),
@@ -110,7 +133,7 @@ impl Agent {
                 return Err(e);
             }
         };
-        let note = format!("[Summary of the earlier conversation]\n{}", summary.trim());
+        let note = format!("{SUMMARY_MARK}\n{}", summary.trim());
         let mut tail = self.history.split_off(cut);
         let separate = tail[0].role != Role::User;
         if separate {
@@ -146,6 +169,7 @@ fn transcript(msgs: &[Message]) -> String {
         let who = if m.role == Role::User { "User" } else { "Assistant" };
         for b in &m.content {
             match b {
+                Block::Text(t) if t.is_empty() => {}
                 Block::Text(t) => lines.push(format!("{who}: {}", clip(t, 4_000))),
                 Block::ToolUse { name, input, .. } => lines.push(format!("[tool call {name} {}]", clip(&input.to_string(), 500))),
                 Block::ToolResult { content, is_error, .. } => {
