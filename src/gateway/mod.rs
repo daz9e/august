@@ -65,7 +65,7 @@ impl extensions::Core for ExtCore {
         let (id, chat, text) = (ChatId { channel: channel.into(), chat: chat.into() }, chat.to_string(), text.to_string());
         // Queued, not awaited: the caller may be inside a turn of that very chat.
         tokio::spawn(async move {
-            if let Err(e) = gw.turn(ch, id, &chat, &text, Vec::new(), true).await {
+            if let Err(e) = gw.turn(ch, id, &chat, &text, Vec::new(), false).await {
                 eprintln!("extension prompt: {e:#}");
             }
         });
@@ -170,9 +170,47 @@ impl Gateway {
             anyhow::bail!("task #{}: channel `{}` is not running", task.id, task.channel);
         };
         eprintln!("task #{} fires in {}:{}", task.id, task.channel, task.chat);
-        let id = ChatId { channel: task.channel.clone(), chat: task.chat.clone() };
-        let text = format!("[Scheduled task #{} fired] {}", task.id, task.prompt);
-        self.turn(channel, id, &task.chat, &text, Vec::new(), false).await
+        let mut text = format!(
+            "[Scheduled task #{} fired; your reply goes to the user, or reply exactly [SILENT] if \
+             there is nothing worth telling them]\n{}",
+            task.id, task.prompt
+        );
+        for name in &task.skills {
+            match crate::skills::load(name) {
+                Ok(body) => text += &format!("\n\n[Skill `{name}`]\n{body}"),
+                Err(e) => text += &format!("\n\n[Skill `{name}` could not be loaded: {e:#}]"),
+            }
+        }
+        if let Some(script) = &task.script {
+            text += &format!("\n\n[Output of the task's script `{script}`]\n{}", self.run_script(script).await);
+        }
+        // An isolated task gets a fresh conversation of its own on every run.
+        let mut id = ChatId { channel: task.channel.clone(), chat: task.chat.clone() };
+        if task.isolated {
+            id.chat = format!("{}#task{}", task.chat, task.id);
+            self.chat(&id).await?.agent.lock().await.reset()?;
+        }
+        self.turn(channel, id, &task.chat, &text, Vec::new(), true).await
+    }
+
+    async fn run_script(&self, script: &str) -> String {
+        let run = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .current_dir(&self.workspace)
+            .kill_on_drop(true)
+            .output();
+        match tokio::time::timeout(std::time::Duration::from_secs(120), run).await {
+            Ok(Ok(out)) => {
+                let mut s = String::from_utf8_lossy(&out.stdout).to_string();
+                if !out.status.success() {
+                    s += &format!("\n[exit status {}] {}", out.status, String::from_utf8_lossy(&out.stderr));
+                }
+                crate::tools::truncate(s, 20_000)
+            }
+            Ok(Err(e)) => format!("[could not run the script: {e}]"),
+            Err(_) => "[the script timed out after 120 s]".into(),
+        }
     }
 
     async fn handle(self: Arc<Self>, ev: Inbound) -> Result<()> {
@@ -215,7 +253,7 @@ impl Gateway {
                     channel.send(&chat, "↪️ Got it, I'll take this into account.", &[]).await?;
                     return Ok(());
                 }
-                self.turn(channel, ev.chat, &chat, &text, images, true).await?
+                self.turn(channel, ev.chat, &chat, &text, images, false).await?
             }
         }
         Ok(())

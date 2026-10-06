@@ -51,8 +51,9 @@ pub struct ToolCtx {
     pub files: Option<Arc<dyn FileSink>>,
     /// Loaded extensions, for `save_extension`; `None` when they are off.
     pub extensions: Option<Arc<Extensions>>,
-    /// Whether this turn counts towards the background review (not for scheduled tasks).
-    pub review: bool,
+    /// The turn runs a scheduled task: no background review, no scheduling more tasks,
+    /// and only the final reply reaches the chat.
+    pub scheduled: bool,
     /// Where the background review reports what it saved.
     pub notify: Option<Arc<dyn Notifier>>,
     /// Messages the user sends while the turn runs.

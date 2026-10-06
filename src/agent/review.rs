@@ -118,7 +118,7 @@ impl Agent {
                 origin: ctx.origin.clone(),
                 files: None,
                 extensions: None,
-                review: false,
+                scheduled: false,
                 notify: ctx.notify.clone(),
                 inbox: None,
             },

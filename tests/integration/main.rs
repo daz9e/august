@@ -12,5 +12,6 @@ mod skills;
 mod review;
 mod inbox;
 mod limits;
+mod tasks;
 mod usage;
 mod mcp;

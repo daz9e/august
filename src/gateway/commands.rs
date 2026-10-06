@@ -67,7 +67,7 @@ impl Gateway {
             "queue" => {
                 let (gw, ch, id, chat, text) = (self.clone(), channel.clone(), id.clone(), chat.to_string(), args.to_string());
                 tokio::spawn(async move {
-                    if let Err(e) = gw.turn(ch, id, &chat, &text, Vec::new(), true).await {
+                    if let Err(e) = gw.turn(ch, id, &chat, &text, Vec::new(), false).await {
                         eprintln!("gateway: {e:#}");
                     }
                 });

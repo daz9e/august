@@ -1,6 +1,7 @@
 //! Schedule specs for tasks, all in the machine's local time:
 //! - `every 30m` / `every 2h` / `every 1d` (at least a minute)
 //! - `at 2026-10-06 09:00` (once)
+//! - `in 30m` / `in 2h` / `in 45s` (once; stored as `at …` by `normalize`)
 //! - a 5-field cron expression: `minute hour day-of-month month day-of-week`
 
 use anyhow::{Result, bail};
@@ -42,6 +43,7 @@ impl Schedule {
         }
         if let Some(rest) = spec.strip_prefix("at ") {
             let naive = NaiveDateTime::parse_from_str(rest.trim(), "%Y-%m-%d %H:%M")
+                .or_else(|_| NaiveDateTime::parse_from_str(rest.trim(), "%Y-%m-%d %H:%M:%S"))
                 .map_err(|_| anyhow::anyhow!("bad time `{rest}`, expected `at YYYY-MM-DD HH:MM` (local time)"))?;
             let ts = Local
                 .from_local_datetime(&naive)
@@ -51,6 +53,27 @@ impl Schedule {
             return Ok(Schedule::At(ts));
         }
         Ok(Schedule::Cron(Cron::parse(spec)?))
+    }
+
+    /// The spec to store: `in …` becomes the absolute `at …` it means now.
+    pub fn normalize(spec: &str, now: i64) -> Result<String> {
+        let spec = spec.trim();
+        let Some(rest) = spec.strip_prefix("in ") else {
+            Schedule::parse(spec)?;
+            return Ok(spec.to_string());
+        };
+        let rest = rest.trim();
+        let (num, unit) = rest.split_at(rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len()));
+        let n: i64 = num.parse().map_err(|_| anyhow::anyhow!("bad delay `{rest}`, expected e.g. `in 30m`"))?;
+        let secs = match unit.trim() {
+            "s" => n,
+            "m" | "min" => n * 60,
+            "h" => n * 3600,
+            "d" => n * 86400,
+            _ => bail!("bad delay unit in `{rest}`, use s, m, h or d"),
+        };
+        let at = Local.timestamp_opt(now + secs.max(1), 0).single().ok_or_else(|| anyhow::anyhow!("bad delay"))?;
+        Ok(format!("at {}", at.format("%Y-%m-%d %H:%M:%S")))
     }
 
     /// First run strictly after `from` (unix seconds); `None` if it never runs again.

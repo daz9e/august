@@ -9,6 +9,7 @@ use schedule::Schedule;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// How often due tasks are checked (override in seconds: `AUGUST_SCHEDULER_TICK`).
 const TICK: Duration = Duration::from_secs(20);
 
 /// Whatever knows how to execute a due task (the gateway runs it as a chat turn).
@@ -22,7 +23,8 @@ pub async fn run(db: Arc<Db>, runner: Arc<dyn TaskRunner>) {
         if let Err(e) = tick(&db, &runner).await {
             eprintln!("scheduler: {e:#}");
         }
-        tokio::time::sleep(TICK).await;
+        let tick = std::env::var("AUGUST_SCHEDULER_TICK").ok().and_then(|v| v.parse().ok()).map(Duration::from_secs);
+        tokio::time::sleep(tick.unwrap_or(TICK)).await;
     }
 }
 

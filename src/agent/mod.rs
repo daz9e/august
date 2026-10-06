@@ -187,7 +187,7 @@ impl Agent {
         match &result {
             Ok(reply) => {
                 self.persist();
-                if ctx.review {
+                if !ctx.scheduled {
                     if let Some(review) = self.review_due(ctx, self.turn_tool_calls) {
                         let notify = ctx.notify.clone();
                         tokio::spawn(async move {

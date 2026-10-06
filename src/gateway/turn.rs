@@ -52,14 +52,14 @@ impl Gateway {
         chat: &str,
         text: &str,
         images: Vec<Block>,
-        review: bool,
+        scheduled: bool,
     ) -> Result<()> {
         let state = self.chat(&id).await?;
         let mut agent = state.agent.lock().await; // turns in one chat run in order
         state.inbox.start();
         let (mut text, mut images) = (text.to_string(), images);
         loop {
-            let r = self.turn_once(&state, &mut agent, channel.clone(), &id, chat, &text, images, review).await;
+            let r = self.turn_once(&state, &mut agent, channel.clone(), &id, chat, &text, images, scheduled).await;
             let left = state.inbox.finish();
             if left.is_empty() {
                 return r;
@@ -78,7 +78,7 @@ impl Gateway {
         chat: &str,
         text: &str,
         images: Vec<Block>,
-        review: bool,
+        scheduled: bool,
     ) -> Result<()> {
         let cancel = Arc::new(Notify::new());
         *state.cancel.lock().unwrap() = Some(cancel.clone());
@@ -104,10 +104,10 @@ impl Gateway {
                 pending: self.pending.clone(),
             }),
             db: self.db.clone(),
-            origin: Some((id.channel.clone(), id.chat.clone())),
+            origin: Some((id.channel.clone(), chat.to_string())),
             files: Some(Arc::new(ChatFiles(tx.clone()))),
             extensions: Some(self.ext.clone()),
-            review,
+            scheduled,
             notify: Some(Arc::new(ChatNotes { channel: channel.clone(), chat: chat.to_string() })),
             inbox: Some(state.inbox.clone()),
         };
@@ -115,6 +115,9 @@ impl Gateway {
         let streamed2 = streamed.clone();
         let tx2 = tx.clone();
         let mut on_event = move |e: Event| {
+            if scheduled {
+                return; // only the final reply of a task reaches the chat
+            }
             let ui = match e {
                 Event::Text(t) => {
                     streamed2.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -133,6 +136,7 @@ impl Gateway {
             _ = cancel.notified() => None,
         };
         match outcome {
+            Some(Ok(reply)) if scheduled && reply.trim_start().starts_with("[SILENT]") => {}
             Some(Ok(reply)) => {
                 if !streamed.load(std::sync::atomic::Ordering::Relaxed) {
                     tx.send(Ui::Text(if reply.is_empty() { "(empty reply)".into() } else { reply })).ok();

@@ -90,7 +90,7 @@ pub async fn run() -> Result<()> {
         origin: None,
         files: None,
         extensions: Some(ext.clone()),
-        review: true,
+        scheduled: false,
         notify: Some(Arc::new(TerminalNotes)),
         inbox: None,
     };
