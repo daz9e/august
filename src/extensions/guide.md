@@ -40,8 +40,9 @@ export default function (august: August) {
 Handlers get `(data, ctx)`. Returned fields replace the event's data; return nothing to
 leave it unchanged.
 
-- `message_in` `{ text }`: a user message, before the agent sees it. Return `{ text }` to
-  rewrite it, or `{ handled: true, reply? }` to swallow it.
+- `message_in` `{ text, files }`: a user message, before the agent sees it. `files` are its
+  attachments, already saved (`{ path, mime, voice }`). Return `{ text }` to rewrite it, or
+  `{ handled: true, reply? }` to swallow it.
 - `before_turn` `{ text, system }`: once per turn. Return `{ system }` to change the base
   system prompt for this turn, `{ text }` to change the user message.
 - `tool_call` `{ tool, input }`: before any tool runs (built-in or extension). Return
@@ -102,7 +103,7 @@ shell commands in a container.
   August's log).
 - npm packages: just import them; bun installs them on first run. Keep state in files under
   `august.dir`.
-- Timeouts: hooks 10 s, commands 60 s, tools 10 min, setup 30 s. A failing or slow hook is skipped
+- Timeouts: hooks 10 s (`message_in` 2 min), commands 60 s, tools 10 min, setup 30 s. A failing or slow hook is skipped
   (August continues as if it returned nothing); a crashed extension is restarted.
 - Built-in tool and command names can't be overridden.
 

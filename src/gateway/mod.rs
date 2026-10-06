@@ -35,6 +35,8 @@ struct Chat {
     inbox: Arc<agent::Inbox>,
     /// Set while a turn runs; `/stop` notifies it.
     cancel: StdMutex<Option<Arc<Notify>>>,
+    /// Held while a message is prepared (files, `message_in`), so messages keep their order.
+    intake: Mutex<()>,
 }
 
 pub struct Gateway {
@@ -212,7 +214,7 @@ impl Gateway {
             self.db.clone(),
             &format!("{}:{}", id.channel, id.chat),
         )?;
-        let chat = Arc::new(Chat { agent: Mutex::new(agent), inbox: Arc::default(), cancel: StdMutex::new(None) });
+        let chat = Arc::new(Chat { agent: Mutex::new(agent), inbox: Arc::default(), cancel: StdMutex::new(None), intake: Mutex::new(()) });
         chats.insert(id.clone(), chat.clone());
         Ok(chat)
     }
@@ -286,11 +288,13 @@ impl Gateway {
             InboundKind::Command { name, args } => self.command(&channel, &ev.chat, &name, &args).await?,
             InboundKind::Message { text, files } if text.is_empty() && files.is_empty() => {}
             InboundKind::Message { text, files } => {
-                let (note, images) = self.receive(&*channel, &files).await;
+                let state = self.chat(&ev.chat).await?;
+                let intake = state.intake.lock().await;
+                let (note, images, saved) = self.receive(&*channel, &files).await;
                 let mut text = [text, note].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
                 if self.ext.listens("message_in") {
                     let origin = Some((ev.chat.channel.clone(), chat.clone()));
-                    let data = self.ext.emit("message_in", serde_json::json!({"text": text}), &origin).await;
+                    let data = self.ext.emit("message_in", serde_json::json!({"text": text, "files": saved}), &origin).await;
                     if data["handled"] == true {
                         if let Some(reply) = data["reply"].as_str().filter(|r| !r.is_empty()) {
                             channel.send(&chat, reply, &[]).await?;
@@ -302,10 +306,14 @@ impl Gateway {
                     }
                 }
                 // While a turn runs, plain text goes to it instead of waiting for it to end.
-                if images.is_empty() && self.chat(&ev.chat).await?.inbox.offer(&text) {
+                if images.is_empty() && state.inbox.offer(&text) {
+                    drop(intake);
                     channel.send(&chat, "↪️ Got it, I'll take this into account.", &[]).await?;
                     return Ok(());
                 }
+                // Busy from here, so the next message joins this turn instead of racing it.
+                state.inbox.start();
+                drop(intake);
                 self.turn(channel, ev.chat, &chat, &text, images, false).await?
             }
         }

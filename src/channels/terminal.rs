@@ -201,7 +201,7 @@ pub async fn run() -> Result<()> {
                 }
                 let mut text = input.to_string();
                 if ext.listens("message_in") {
-                    let data = ext.emit("message_in", serde_json::json!({"text": text}), &None).await;
+                    let data = ext.emit("message_in", serde_json::json!({"text": text, "files": []}), &None).await;
                     if data["handled"] == true {
                         println!("{}", data["reply"].as_str().unwrap_or(""));
                         continue;

@@ -40,8 +40,9 @@ declare module "august" {
 
   /** What each event handler receives. */
   export interface Events {
-    /** A user message arrived (before the agent sees it). */
-    message_in: { text: string };
+    /** A user message arrived (before the agent sees it). `files`: its attachments, already
+     *  saved in the workspace (`path` is absolute); `voice` marks a recorded voice note. */
+    message_in: { text: string; files: { path: string; mime: string; voice: boolean }[] };
     /** A turn is about to start; `system` is the base system prompt. */
     before_turn: { text: string; system: string };
     /** The model wants to run a tool. */

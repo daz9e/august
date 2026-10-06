@@ -27,9 +27,12 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("subagents", include_str!("../../extensions/subagents/index.ts")),
     ("clarify", include_str!("../../extensions/clarify/index.ts")),
     ("mcp", include_str!("../../extensions/mcp/index.ts")),
+    ("voice", include_str!("../../extensions/voice/index.ts")),
 ];
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
+/// `message_in` may do real work on attachments (e.g. transcribe a voice note).
+const MESSAGE_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Restarts after a crash before an extension stays down until `/reload`.
@@ -362,7 +365,8 @@ impl Extensions {
                 continue;
             }
             let params = json!({"name": event, "data": data, "ctx": ctx_json(chat)});
-            match host.request("event", params, EVENT_TIMEOUT).await {
+            let timeout = if event == "message_in" { MESSAGE_TIMEOUT } else { EVENT_TIMEOUT };
+            match host.request("event", params, timeout).await {
                 Ok(v) if v.is_object() => data = v,
                 Ok(_) => {}
                 Err(e) => eprintln!("extension {name}: `{event}` hook failed: {e}"),
