@@ -61,7 +61,7 @@ impl extensions::Core for ExtCore {
         let (id, chat, text) = (ChatId { channel: channel.into(), chat: chat.into() }, chat.to_string(), text.to_string());
         // Queued, not awaited: the caller may be inside a turn of that very chat.
         tokio::spawn(async move {
-            if let Err(e) = gw.turn(ch, id, &chat, &text, Vec::new()).await {
+            if let Err(e) = gw.turn(ch, id, &chat, &text, Vec::new(), true).await {
                 eprintln!("extension prompt: {e:#}");
             }
         });
@@ -165,7 +165,7 @@ impl Gateway {
         eprintln!("task #{} fires in {}:{}", task.id, task.channel, task.chat);
         let id = ChatId { channel: task.channel.clone(), chat: task.chat.clone() };
         let text = format!("[Scheduled task #{} fired] {}", task.id, task.prompt);
-        self.turn(channel, id, &task.chat, &text, Vec::new()).await
+        self.turn(channel, id, &task.chat, &text, Vec::new(), false).await
     }
 
     async fn handle(self: Arc<Self>, ev: Inbound) -> Result<()> {
@@ -203,7 +203,7 @@ impl Gateway {
                         text = t.to_string();
                     }
                 }
-                self.turn(channel, ev.chat, &chat, &text, images).await?
+                self.turn(channel, ev.chat, &chat, &text, images, true).await?
             }
         }
         Ok(())

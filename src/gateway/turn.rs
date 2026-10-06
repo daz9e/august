@@ -35,6 +35,7 @@ impl Gateway {
         chat: &str,
         text: &str,
         images: Vec<Block>,
+        review: bool,
     ) -> Result<()> {
         let state = self.chat(&id).await?;
         let mut agent = state.agent.lock().await; // turns in one chat run in order
@@ -66,6 +67,7 @@ impl Gateway {
             origin: Some((id.channel.clone(), id.chat.clone())),
             files: Some(Arc::new(ChatFiles(tx.clone()))),
             extensions: Some(self.ext.clone()),
+            review,
         };
         let streamed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let streamed2 = streamed.clone();

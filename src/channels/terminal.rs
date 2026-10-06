@@ -79,6 +79,7 @@ pub async fn run() -> Result<()> {
         origin: None,
         files: None,
         extensions: Some(ext.clone()),
+        review: true,
     };
     let mut agent = Agent::new(
         provider.clone(),

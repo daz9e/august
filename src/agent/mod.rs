@@ -2,6 +2,7 @@
 
 mod compaction;
 mod prompt;
+mod review;
 mod store;
 
 pub use prompt::system_prompt;
@@ -50,6 +51,9 @@ pub struct Agent {
     last_input_tokens: usize,
     /// After a failed summary, don't retry until the history has grown to this length.
     compact_retry_at: usize,
+    /// Tool calls the running turn made.
+    turn_tool_calls: usize,
+    review_counters: review::Counters,
 }
 
 impl Agent {
@@ -81,6 +85,8 @@ impl Agent {
                 .unwrap_or(DEFAULT_CONTEXT_TOKENS),
             last_input_tokens: 0,
             compact_retry_at: 0,
+            turn_tool_calls: 0,
+            review_counters: review::Counters::default(),
         })
     }
 
@@ -148,6 +154,7 @@ impl Agent {
     ) -> Result<String> {
         self.turn_start = self.history.len();
         self.turn_system = None;
+        self.turn_tool_calls = 0;
         let ext = self.tools.extensions().cloned();
         let mut text = user_text.to_string();
         if let Some(ext) = &ext
@@ -166,6 +173,17 @@ impl Agent {
         match &result {
             Ok(reply) => {
                 self.persist();
+                if ctx.review {
+                    if let Some(review) = self.review_due(ctx, self.turn_tool_calls) {
+                        tokio::spawn(async move {
+                            match review.run().await {
+                                Ok(changes) if changes.is_empty() => eprintln!("review: nothing to save"),
+                                Ok(changes) => eprintln!("review: {}", changes.join("; ")),
+                                Err(e) => eprintln!("review failed: {e:#}"),
+                            }
+                        });
+                    }
+                }
                 if let Some(ext) = ext.filter(|e| e.listens("turn_end")) {
                     let data = json!({"text": text, "reply": reply});
                     let chat = ctx.origin.clone();
@@ -223,6 +241,7 @@ impl Agent {
 
             // Run the requested tools concurrently; results go back in call order.
             let calls: Vec<_> = reply.tool_uses().collect();
+            self.turn_tool_calls += calls.len();
             for (_, name, input) in &calls {
                 on_event(Event::ToolCall { name, input });
             }

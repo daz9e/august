@@ -43,6 +43,8 @@ pub struct ToolCtx {
     pub files: Option<Arc<dyn FileSink>>,
     /// Loaded extensions, for `save_extension`; `None` when they are off.
     pub extensions: Option<Arc<Extensions>>,
+    /// Whether this turn counts towards the background review (not for scheduled tasks).
+    pub review: bool,
 }
 
 #[async_trait]
