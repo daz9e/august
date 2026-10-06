@@ -1,6 +1,7 @@
 //! The agent loop: model -> tools -> model ... until the model stops calling tools.
 
 mod compaction;
+mod goal;
 mod inbox;
 mod prompt;
 mod review;

@@ -33,8 +33,22 @@ struct Chat {
     agent: Mutex<Agent>,
     /// Messages sent while a turn runs.
     inbox: Arc<agent::Inbox>,
+    goal: StdMutex<Option<Goal>>,
     /// Set while a turn runs; `/stop` notifies it.
     cancel: StdMutex<Option<Arc<Notify>>>,
+}
+
+/// A standing goal of a chat (`/goal`); not kept across restarts.
+#[derive(Clone)]
+struct Goal {
+    text: String,
+    /// Turns spent on it so far.
+    turns: usize,
+}
+
+/// Turns a goal may take before it's paused (override: `AUGUST_GOAL_TURNS`).
+fn goal_turns() -> usize {
+    std::env::var("AUGUST_GOAL_TURNS").ok().and_then(|v| v.parse().ok()).unwrap_or(20)
 }
 
 pub struct Gateway {
@@ -163,7 +177,7 @@ impl Gateway {
             self.db.clone(),
             &format!("{}:{}", id.channel, id.chat),
         )?;
-        let chat = Arc::new(Chat { agent: Mutex::new(agent), inbox: Arc::default(), cancel: StdMutex::new(None) });
+        let chat = Arc::new(Chat { agent: Mutex::new(agent), inbox: Arc::default(), goal: StdMutex::new(None), cancel: StdMutex::new(None) });
         chats.insert(id.clone(), chat.clone());
         Ok(chat)
     }

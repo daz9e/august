@@ -9,6 +9,7 @@ use std::sync::Arc;
 pub(super) const COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("new", "Start a fresh conversation"),
     CommandSpec::new("stop", "Cancel the current task"),
+    CommandSpec::new("goal", "Keep working until a goal is reached (/goal clear to stop)"),
     CommandSpec::new("queue", "Run a message as its own turn after the current one"),
     CommandSpec::new("compact", "Summarise older messages to free up context"),
     CommandSpec::new("usage", "Show token usage of this conversation and today"),
@@ -63,6 +64,25 @@ impl Gateway {
                     None => "Nothing is running.".to_string(),
                 }
             }
+            "goal" if args.is_empty() => match state.goal.lock().unwrap().as_ref() {
+                Some(g) => format!("🎯 Goal: {} ({} turns so far). /goal clear to drop it.", g.text, g.turns),
+                None => "No goal. Set one with /goal <what should be achieved>.".into(),
+            },
+            "goal" if args == "clear" => {
+                let had = state.goal.lock().unwrap().take().is_some();
+                if had { "Goal dropped.".into() } else { "No goal to drop.".into() }
+            }
+            "goal" => {
+                *state.goal.lock().unwrap() = Some(super::Goal { text: args.to_string(), turns: 0 });
+                let (gw, ch, id, chat) = (self.clone(), channel.clone(), id.clone(), chat.to_string());
+                let text = format!("[New goal] {args}\nWork on it until it is achieved; I'll check after each turn.");
+                tokio::spawn(async move {
+                    if let Err(e) = gw.turn(ch, id, &chat, &text, Vec::new(), false).await {
+                        eprintln!("gateway: {e:#}");
+                    }
+                });
+                format!("🎯 Goal set: {args}")
+            }
             "queue" if args.is_empty() => "Usage: /queue <message>".into(),
             "queue" => {
                 let (gw, ch, id, chat, text) = (self.clone(), channel.clone(), id.clone(), chat.to_string(), args.to_string());
@@ -77,6 +97,7 @@ impl Gateway {
                 if let Some(n) = state.cancel.lock().unwrap().as_ref() {
                     n.notify_one();
                 }
+                state.goal.lock().unwrap().take();
                 state.agent.lock().await.reset()?;
                 "Started a new conversation.".into()
             }
