@@ -61,7 +61,7 @@ fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-const OPENAI_DEFAULT_URL: &str = "https://api.openai.com/v1";
+pub const OPENAI_DEFAULT_URL: &str = "https://api.openai.com/v1";
 
 /// Credential for an API-key provider: env first, then `credentials.json`.
 pub fn credential(p: &dyn ProviderDef) -> Result<Option<ApiCredential>> {

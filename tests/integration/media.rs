@@ -130,3 +130,60 @@ async fn too_large_file_is_reported_to_the_agent() {
     let (text, _) = last_user(&fake.llm_requests()[0]);
     assert!(text.contains("big.zip could not be received") && text.contains("20 MB"), "{text}");
 }
+
+fn voice_note() -> (Value, HashMap<String, Vec<u8>>) {
+    let ogg = fixture("voice.ogg");
+    let update = message(
+        1,
+        json!({"voice": {"file_id": "v1", "duration": 2, "mime_type": "audio/ogg", "file_size": ogg.len()}}),
+    );
+    (update, HashMap::from([("v1".to_string(), ogg)]))
+}
+
+#[tokio::test]
+async fn voice_note_is_transcribed_for_the_agent() {
+    let (update, files) = voice_note();
+    let llm: Llm = Box::new(|_| reply_text("Will do."));
+    let fake = Fake::start(vec![update], files, Some(llm)).await;
+    let url = format!("{}/stt/v1", fake.url);
+    let env = [
+        ("AUGUST_TRANSCRIBE_URL", url.as_str()),
+        ("AUGUST_TRANSCRIBE_API_KEY", "stt-key"),
+        ("AUGUST_TRANSCRIBE_MODEL", "whisper-large-v3-turbo"),
+    ];
+    let gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &env);
+
+    fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("Will do."))).await;
+
+    // The audio went to the configured endpoint with its model.
+    let stt: Vec<Req> = fake.requests().into_iter().filter(|r| r.path == "/stt/v1/audio/transcriptions").collect();
+    assert_eq!(stt.len(), 1);
+    let ogg = fixture("voice.ogg");
+    assert!(stt[0].text().contains("whisper-large-v3-turbo"));
+    assert!(stt[0].body.windows(ogg.len()).any(|w| w == ogg.as_slice()));
+
+    // The file is kept, and the model sees the transcript and where the file is.
+    let saved = inbox(&gw);
+    assert_eq!(saved.len(), 1, "{saved:?}");
+    let name = saved[0].file_name().unwrap().to_string_lossy().to_string();
+    assert!(name.ends_with("-voice.ogg"), "{name}");
+    let (text, _) = last_user(&fake.llm_requests()[0]);
+    assert!(text.contains(&format!("inbox/{name}")), "{text}");
+    assert!(text.contains(&format!("[Voice message transcript]\n{TRANSCRIPT}")), "{text}");
+}
+
+#[tokio::test]
+async fn voice_note_without_transcription_is_still_saved() {
+    let (update, files) = voice_note();
+    let llm: Llm = Box::new(|_| reply_text("Saved it."));
+    let fake = Fake::start(vec![update], files, Some(llm)).await;
+    let gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
+
+    fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("Saved it."))).await;
+
+    assert!(fake.requests().iter().all(|r| !r.path.ends_with("/audio/transcriptions")));
+    assert_eq!(inbox(&gw).len(), 1);
+    let (text, _) = last_user(&fake.llm_requests()[0]);
+    assert!(text.contains("inbox/") && text.contains("voice.ogg"), "{text}");
+    assert!(text.contains("No transcript: transcription is not configured"), "{text}");
+}

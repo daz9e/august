@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 pub const TOKEN: &str = "TEST";
 pub const OWNER: i64 = 7;
 pub const CHAT: i64 = 5;
+/// What the fake speech-to-text endpoint hears in any audio.
+pub const TRANSCRIPT: &str = "Remind me to water the plants at six.";
 
 /// One request the fake server received.
 #[derive(Clone)]
@@ -126,6 +128,9 @@ async fn handle(State(s): State<Arc<Inner>>, method: Method, uri: Uri, body: Byt
         let llm = s.llm.as_ref().expect("no fake LLM configured");
         let req: Value = serde_json::from_slice(&body).unwrap();
         return axum::Json(llm(&req)).into_response();
+    }
+    if path.ends_with("/audio/transcriptions") {
+        return axum::Json(json!({"text": TRANSCRIPT})).into_response();
     }
     if let Some(file) = path.strip_prefix(&format!("/file/bot{TOKEN}/")) {
         assert_eq!(method, Method::GET);
