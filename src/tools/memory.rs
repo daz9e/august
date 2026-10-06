@@ -1,6 +1,13 @@
 use super::*;
 use serde_json::json;
 
+/// Total characters all facts may take in the system prompt (override: `AUGUST_MEMORY_CHARS`).
+const DEFAULT_MEMORY_CHARS: usize = 3_000;
+
+fn memory_limit() -> usize {
+    std::env::var("AUGUST_MEMORY_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_MEMORY_CHARS)
+}
+
 pub struct Remember;
 
 #[async_trait]
@@ -12,13 +19,17 @@ impl Tool for Remember {
     fn description(&self) -> &'static str {
         "Save a durable fact about the user or their world (preferences, people, projects, \
          decisions) so it is available in every future conversation. One short self-contained \
-         sentence per fact. Don't save temporary details or things already remembered."
+         sentence per fact. Don't save temporary details or things already remembered. Memory \
+         has a size limit: to update or merge facts, pass the ids they replace in `replaces`."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": {"fact": {"type": "string", "description": "The fact to remember"}},
+            "properties": {
+                "fact": {"type": "string", "description": "The fact to remember"},
+                "replaces": {"type": "array", "items": {"type": "integer"}, "description": "Ids of facts this one replaces (they are deleted)"}
+            },
             "required": ["fact"],
             "additionalProperties": false
         })
@@ -29,8 +40,25 @@ impl Tool for Remember {
         if fact.is_empty() {
             anyhow::bail!("empty fact");
         }
-        let id = ctx.db.add_fact(fact)?;
-        Ok(format!("remembered as #{id}"))
+        let replaces: Vec<i64> = input["replaces"].as_array().into_iter().flatten().filter_map(|v| v.as_i64()).collect();
+        let facts = ctx.db.facts()?;
+        if replaces.is_empty() && facts.iter().any(|f| f.text == fact) {
+            return Ok("already remembered".into());
+        }
+        let kept: usize = facts.iter().filter(|f| !replaces.contains(&f.id)).map(|f| f.text.chars().count()).sum();
+        let (used, limit) = (kept + fact.chars().count(), memory_limit());
+        if used > limit {
+            let list: Vec<String> = facts.iter().map(|f| format!("#{} {}", f.id, f.text)).collect();
+            anyhow::bail!(
+                "memory is full: this would use {used}/{limit} characters. Call `remember` again with \
+                 `replaces` listing outdated facts, or facts merged into this one (shorten them), to \
+                 free at least {} characters. Current facts:\n{}",
+                used - limit,
+                list.join("\n")
+            );
+        }
+        let id = ctx.db.replace_facts(&replaces, fact)?;
+        Ok(format!("remembered as #{id} ({used}/{limit} characters used)"))
     }
 }
 

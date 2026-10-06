@@ -59,3 +59,32 @@ async fn saved_fact_reaches_the_prompt_of_the_next_session() {
     let after = fake.llm_requests().into_iter().find(|r| last_user_text(r).contains("hi again")).unwrap();
     assert!(system(&after).contains("User drinks green tea"), "{}", system(&after));
 }
+
+#[tokio::test]
+async fn full_memory_makes_the_agent_merge_facts() {
+    // Remembers one fact, then a second that doesn't fit; on the error it merges both.
+    let llm: Llm = Box::new(|req| {
+        let msgs = req["messages"].as_array().unwrap();
+        let last = msgs.last().unwrap();
+        let out = last["content"].as_str().unwrap_or("");
+        if last["role"] != "tool" {
+            let fact = if last_user_text(req).contains("cat") { "User has a cat named Murzik" } else { "User has a dog named Sharik" };
+            return reply_tool("remember", json!({"fact": fact}));
+        }
+        if out.contains("memory is full") {
+            assert!(out.contains("#1 User has a cat named Murzik"), "{out}");
+            return reply_tool("remember", json!({"fact": "User has a cat Murzik and a dog Sharik", "replaces": [1]}));
+        }
+        reply_text(&format!("done: {out}"))
+    });
+    let fake = Fake::start(vec![message(1, json!({"text": "I have a cat"}))], HashMap::new(), Some(llm)).await;
+    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &[("AUGUST_MEMORY_CHARS", "50")]);
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("done: remembered as #1"))).await;
+
+    fake.push_updates(vec![message(2, json!({"text": "I also have a dog"}))]);
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("done: remembered as #2"))).await;
+
+    fake.push_updates(vec![command(3, "/memory")]);
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("#2 User has a cat Murzik and a dog Sharik"))).await;
+    assert!(!fake.sent_texts().iter().any(|t| t.contains("#1 User has a cat named")));
+}

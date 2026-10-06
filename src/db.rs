@@ -182,10 +182,20 @@ impl Db {
 
     // ---- facts ---------------------------------------------------------
 
-    pub fn add_fact(&self, text: &str) -> Result<i64> {
-        let conn = self.conn();
-        conn.execute("INSERT INTO facts (text, created_at) VALUES (?1, ?2)", params![text, now()])?;
-        Ok(conn.last_insert_rowid())
+    /// Deletes the facts `remove` and adds `text`, in one transaction. Fails, changing
+    /// nothing, if one of the ids doesn't exist.
+    pub fn replace_facts(&self, remove: &[i64], text: &str) -> Result<i64> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        for id in remove {
+            if tx.execute("DELETE FROM facts WHERE id = ?1", [id])? == 0 {
+                anyhow::bail!("no fact #{id}");
+            }
+        }
+        tx.execute("INSERT INTO facts (text, created_at) VALUES (?1, ?2)", params![text, now()])?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(id)
     }
 
     pub fn delete_fact(&self, id: i64) -> Result<bool> {
@@ -363,7 +373,7 @@ mod tests {
     #[test]
     fn facts_and_tasks() {
         let db = Db::in_memory();
-        let id = db.add_fact("user lives in Berlin").unwrap();
+        let id = db.replace_facts(&[], "user lives in Berlin").unwrap();
         assert_eq!(db.facts().unwrap().len(), 1);
         assert!(db.delete_fact(id).unwrap());
         assert!(!db.delete_fact(id).unwrap());
