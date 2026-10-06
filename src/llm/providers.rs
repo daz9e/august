@@ -17,6 +17,8 @@ pub enum Auth {
     OAuth,
     /// Browser sign-in with the Codex CLI client (legacy ChatGPT login).
     CodexOAuth,
+    /// A local CLI that holds its own login (Claude Code).
+    Cli,
 }
 
 /// One vendor: identity, how it authenticates, and how to build / list it.
@@ -39,10 +41,11 @@ pub trait ProviderDef: Send + Sync {
 
 /// All providers, in menu order.
 pub fn registry() -> &'static [&'static dyn ProviderDef] {
-    static REGISTRY: [&dyn ProviderDef; 6] = [
+    static REGISTRY: [&dyn ProviderDef; 7] = [
         &OpenCode { go: true },
         &OpenCode { go: false },
         &AnthropicDef,
+        &ClaudeCliDef,
         &ChatGptDef,
         &CodexDef,
         &OpenAiDef,
@@ -65,7 +68,7 @@ pub const OPENAI_DEFAULT_URL: &str = "https://api.openai.com/v1";
 
 /// Credential for an API-key provider: env first, then `credentials.json`.
 pub fn credential(p: &dyn ProviderDef) -> Result<Option<ApiCredential>> {
-    if p.auth() == Auth::OAuth {
+    if matches!(p.auth(), Auth::OAuth | Auth::Cli) {
         return Ok(None);
     }
     let stored = config::load::<Credentials>(config::CREDENTIALS)?.remove(p.id());
@@ -283,6 +286,35 @@ impl ProviderDef for AnthropicDef {
             .json()
             .await?;
         Ok(model_ids(v))
+    }
+}
+
+struct ClaudeCliDef;
+
+#[async_trait]
+impl ProviderDef for ClaudeCliDef {
+    fn id(&self) -> &'static str {
+        "claude-cli"
+    }
+    fn label(&self) -> &'static str {
+        "Claude Pro/Max via the Claude Code CLI (tools via text protocol)"
+    }
+    fn auth(&self) -> Auth {
+        Auth::Cli
+    }
+    fn default_model(&self) -> Option<&'static str> {
+        Some("opus")
+    }
+    async fn build(&self, sel: &Selection) -> Result<Arc<dyn LlmProvider>> {
+        llm::claude_cli::check_installed().await?;
+        Ok(Arc::new(llm::claude_cli::ClaudeCli {
+            model: sel.model.clone(),
+            effort: sel.effort.clone(),
+        }))
+    }
+    async fn list_models(&self, _cred: Option<&ApiCredential>) -> Result<Vec<String>> {
+        // Aliases the CLI resolves to the latest model of each family.
+        Ok(["opus", "sonnet", "haiku"].map(String::from).to_vec())
     }
 }
 

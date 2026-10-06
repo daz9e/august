@@ -2,6 +2,7 @@
 
 pub mod anthropic;
 pub mod chatgpt;
+pub mod claude_cli;
 pub mod openai;
 pub mod opencode;
 pub mod providers;

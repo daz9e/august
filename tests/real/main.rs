@@ -5,6 +5,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod claude_cli;
 mod extensions;
 mod mcp;
 mod media;
