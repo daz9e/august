@@ -5,7 +5,7 @@ mod approval;
 mod commands;
 mod media;
 mod render;
-mod subtasks;
+mod subagents;
 mod turn;
 
 use crate::agent::{self, Agent};
@@ -34,22 +34,8 @@ struct Chat {
     agent: Mutex<Agent>,
     /// Messages sent while a turn runs.
     inbox: Arc<agent::Inbox>,
-    goal: StdMutex<Option<Goal>>,
     /// Set while a turn runs; `/stop` notifies it.
     cancel: StdMutex<Option<Arc<Notify>>>,
-}
-
-/// A standing goal of a chat (`/goal`); not kept across restarts.
-#[derive(Clone)]
-struct Goal {
-    text: String,
-    /// Turns spent on it so far.
-    turns: usize,
-}
-
-/// Turns a goal may take before it's paused (override: `AUGUST_GOAL_TURNS`).
-fn goal_turns() -> usize {
-    std::env::var("AUGUST_GOAL_TURNS").ok().and_then(|v| v.parse().ok()).unwrap_or(20)
 }
 
 pub struct Gateway {
@@ -62,8 +48,8 @@ pub struct Gateway {
     pub db: Arc<Db>,
     ext: Arc<Extensions>,
     mcp: Arc<Mcp>,
-    /// Numbers subtasks.
-    subtasks: std::sync::atomic::AtomicU64,
+    /// Numbers sub-agents.
+    subagents: std::sync::atomic::AtomicU64,
 }
 
 /// What extensions can do in the gateway: message chats, start turns, run tools, ask the model.
@@ -90,14 +76,31 @@ impl extensions::Core for ExtCore {
 
     async fn prompt(&self, channel: &str, chat: &str, text: &str) -> Result<()> {
         let (gw, ch) = self.channel(channel)?;
-        let (id, chat, text) = (ChatId { channel: channel.into(), chat: chat.into() }, chat.to_string(), text.to_string());
-        // Queued, not awaited: the caller may be inside a turn of that very chat.
-        tokio::spawn(async move {
-            if let Err(e) = gw.turn(ch, id, &chat, &text, Vec::new(), false).await {
-                eprintln!("extension prompt: {e:#}");
-            }
-        });
+        let (id, text) = (ChatId { channel: channel.into(), chat: chat.into() }, text.to_string());
+        // Not awaited: the caller may be inside a turn of that very chat.
+        tokio::spawn(async move { gw.deliver(ch, id, &text).await });
         Ok(())
+    }
+
+    async fn agent(&self, channel: &str, chat: &str, task: &str, opts: extensions::AgentOpts) -> Result<String> {
+        let (gw, ch) = self.channel(channel)?;
+        gw.subagent(ch, ChatId { channel: channel.into(), chat: chat.into() }, task, opts).await
+    }
+
+    async fn approve(&self, channel: &str, chat: &str, action: &str) -> Result<bool> {
+        let (gw, ch) = self.channel(channel)?;
+        let approver = approval::ChatApprover { channel: ch, chat: chat.into(), pending: gw.pending.clone() };
+        Ok(crate::tools::Approver::approve(&approver, action).await)
+    }
+
+    async fn ask(&self, channel: &str, chat: &str, question: &str, options: &[String]) -> Result<Option<String>> {
+        let (gw, ch) = self.channel(channel)?;
+        let asker = approval::ChatApprover { channel: ch, chat: chat.into(), pending: gw.pending.clone() };
+        let values: Vec<String> = (0..options.len()).map(|i| i.to_string()).collect();
+        let pairs: Vec<(&str, &str)> = options.iter().zip(&values).map(|(o, v)| (o.as_str(), v.as_str())).collect();
+        let done = |label: Option<&str>| format!("❓ {question}\n→ {}", label.unwrap_or("⌛ no answer"));
+        let answer = asker.ask(&format!("❓ {question}"), &pairs, done).await;
+        Ok(answer.and_then(|i| options.get(i.parse::<usize>().ok()?).cloned()))
     }
 
     async fn call_tool(&self, channel: &str, chat: &str, name: &str, input: &Value) -> Result<(String, bool)> {
@@ -110,7 +113,6 @@ impl extensions::Core for ExtCore {
             files: None,
             extensions: Some(gw.ext.clone()),
             unattended: false,
-            delegate: None,
             notify: None,
             inbox: None,
         };
@@ -151,7 +153,7 @@ impl Gateway {
             db,
             ext,
             mcp,
-            subtasks: Default::default(),
+            subagents: Default::default(),
         });
         gw.ext.set_core(Arc::new(ExtCore(Arc::downgrade(&gw))));
         gw
@@ -215,7 +217,7 @@ impl Gateway {
             self.db.clone(),
             &format!("{}:{}", id.channel, id.chat),
         )?;
-        let chat = Arc::new(Chat { agent: Mutex::new(agent), inbox: Arc::default(), goal: StdMutex::new(None), cancel: StdMutex::new(None) });
+        let chat = Arc::new(Chat { agent: Mutex::new(agent), inbox: Arc::default(), cancel: StdMutex::new(None) });
         chats.insert(id.clone(), chat.clone());
         Ok(chat)
     }
@@ -282,7 +284,7 @@ impl Gateway {
                 let mut parts = data.splitn(3, ':');
                 if let (Some("ap"), Some(key), Some(answer)) = (parts.next(), parts.next(), parts.next()) {
                     if let Some(tx) = self.pending.lock().unwrap().remove(key) {
-                        tx.send(answer == "y").ok();
+                        tx.send(answer.to_string()).ok();
                     }
                 }
             }

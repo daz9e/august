@@ -65,60 +65,8 @@ impl Gateway {
                 (text, images) = (left.join("\n"), Vec::new());
                 continue;
             }
-            let reply = match &r {
-                Ok(reply) if !scheduled => reply.clone(),
-                _ => return r.map(|_| ()),
-            };
-            match self.next_for_goal(&state, &mut agent, &channel, chat, reply).await {
-                Some(next) => {
-                    state.inbox.start();
-                    (text, images) = (next, Vec::new());
-                }
-                None => return Ok(()),
-            }
+            return r.map(|_| ());
         }
-    }
-
-    /// After a turn: if the chat has a goal, judges it and returns the message to keep
-    /// working with, or `None` when there's nothing more to do.
-    async fn next_for_goal(
-        &self,
-        state: &super::Chat,
-        agent: &mut crate::agent::Agent,
-        channel: &Arc<dyn Channel>,
-        chat: &str,
-        reply: Option<String>,
-    ) -> Option<String> {
-        let goal = state.goal.lock().unwrap().clone()?;
-        let note = |text: String| async move {
-            channel.send(chat, &text, &[]).await.ok();
-        };
-        let Some(reply) = reply else {
-            *state.goal.lock().unwrap() = None;
-            note("🎯 Goal dropped (the turn was stopped or failed).".into()).await;
-            return None;
-        };
-        let missing = match agent.judge_goal(&goal.text, &reply).await {
-            Ok(None) => {
-                *state.goal.lock().unwrap() = None;
-                note(format!("🎯 Goal reached: {}", goal.text)).await;
-                return None;
-            }
-            Ok(Some(missing)) => missing,
-            Err(e) => {
-                note(format!("⚠️ Could not check the goal, pausing it: {e:#}")).await;
-                *state.goal.lock().unwrap() = None;
-                return None;
-            }
-        };
-        let turns = goal.turns + 1;
-        if turns >= super::goal_turns() {
-            *state.goal.lock().unwrap() = None;
-            note(format!("⏸ Goal paused after {turns} turns. Still missing: {missing}\nSet it again with /goal to continue.")).await;
-            return None;
-        }
-        *state.goal.lock().unwrap() = Some(super::Goal { turns, ..goal.clone() });
-        Some(format!("[Goal not reached yet: {missing}] Keep working towards the goal: {}", goal.text))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -162,12 +110,6 @@ impl Gateway {
             files: Some(Arc::new(ChatFiles(tx.clone()))),
             extensions: Some(self.ext.clone()),
             unattended: scheduled,
-            delegate: Some(Arc::new(super::subtasks::Subtasks {
-                gw: Arc::downgrade(self),
-                channel: channel.clone(),
-                id: ChatId { channel: id.channel.clone(), chat: chat.to_string() },
-                approver,
-            })),
             notify: Some(Arc::new(ChatNotes { channel: channel.clone(), chat: chat.to_string() })),
             inbox: Some(state.inbox.clone()),
         };

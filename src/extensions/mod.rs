@@ -1,5 +1,6 @@
 //! Extensions: TypeScript files in `~/.august/extensions/<name>/index.ts` that add tools,
-//! slash commands and hooks. Each runs in its own bun process (see `host.rs`), so a
+//! slash commands and hooks. Default extensions (the repo's `extensions/`) are built in and
+//! written to `.runtime/defaults/` on load; a user extension of the same name replaces one. Each runs in its own bun process (see `host.rs`), so a
 //! broken or hanging extension can't take the gateway down.
 
 mod host;
@@ -18,6 +19,14 @@ use std::time::Duration;
 const HOST_TS: &str = include_str!("host.ts");
 const TYPES: &str = include_str!("august.d.ts");
 const GUIDE: &str = include_str!("guide.md");
+/// `(name, index.ts)` of the extensions that ship with August.
+const DEFAULTS: &[(&str, &str)] = &[
+    ("browser", include_str!("../../extensions/browser/index.ts")),
+    ("web", include_str!("../../extensions/web/index.ts")),
+    ("goal", include_str!("../../extensions/goal/index.ts")),
+    ("subagents", include_str!("../../extensions/subagents/index.ts")),
+    ("clarify", include_str!("../../extensions/clarify/index.ts")),
+];
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
@@ -35,10 +44,28 @@ pub trait Core: Send + Sync {
     async fn send(&self, channel: &str, chat: &str, text: &str) -> Result<()>;
     /// Queues an agent turn in a chat.
     async fn prompt(&self, channel: &str, chat: &str, text: &str) -> Result<()>;
+    /// Runs a sub-agent in a chat (fresh conversation, unattended) and returns its reply.
+    async fn agent(&self, channel: &str, chat: &str, task: &str, opts: AgentOpts) -> Result<String>;
+    /// Asks the user in a chat to pick one of `options`; `None` if they didn't answer.
+    async fn ask(&self, channel: &str, chat: &str, question: &str, options: &[String]) -> Result<Option<String>>;
+    /// Asks the user in a chat whether `action` may run.
+    async fn approve(&self, channel: &str, chat: &str, action: &str) -> Result<bool>;
     /// Runs an agent tool in a chat (hooks and approvals included): `(output, is_error)`.
     async fn call_tool(&self, channel: &str, chat: &str, name: &str, input: &Value) -> Result<(String, bool)>;
     /// One completion without tools on the configured model.
     async fn llm(&self, prompt: &str, system: &str) -> Result<String>;
+}
+
+/// Options of `ctx.agent`.
+#[derive(Default, serde::Deserialize)]
+pub struct AgentOpts {
+    /// Instructions added to the base system prompt.
+    pub system: Option<String>,
+    /// Only these tools.
+    pub tools: Option<Vec<String>>,
+    /// Never these tools.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// The chat a hook, tool or command runs for: `(channel, chat)`.
@@ -98,18 +125,16 @@ fn entry_of(folder: &Path) -> Option<PathBuf> {
     ENTRIES.iter().map(|e| folder.join(e)).find(|p| p.is_file())
 }
 
-/// `(name, entry file)` of every extension folder, sorted by name.
-fn discover(dir: &Path) -> Vec<(String, PathBuf)> {
-    let mut found: Vec<_> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            valid_name(&name).then_some(())?;
-            Some((name, entry_of(&e.path())?))
-        })
-        .collect();
+/// `(name, entry file)` of every extension folder in `dirs`, sorted by name; the first
+/// folder of a name wins.
+fn discover(dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    for e in dirs.iter().flat_map(std::fs::read_dir).flatten().filter_map(|e| e.ok()) {
+        let name = e.file_name().to_string_lossy().to_string();
+        if valid_name(&name) && !found.iter().any(|(n, _)| *n == name) && let Some(entry) = entry_of(&e.path()) {
+            found.push((name, entry));
+        }
+    }
     found.sort();
     found
 }
@@ -119,8 +144,8 @@ fn stopped(data: &Value) -> bool {
     block == true || block.as_str().is_some_and(|s| !s.is_empty()) || data["handled"] == true
 }
 
-/// Built-in names an extension may not take.
-fn reserved_tools() -> HashSet<String> {
+/// Built-in tool names (an extension tool of the same name replaces the built-in).
+fn builtin_tools() -> HashSet<String> {
     crate::tools::ToolRegistry::builtin_names().into_iter().map(String::from).collect()
 }
 
@@ -141,6 +166,28 @@ impl Extensions {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Where the default extensions are written (a `disabled` marker there survives rewrites).
+    fn defaults_dir(&self) -> PathBuf {
+        self.dir.join(".runtime/defaults")
+    }
+
+    /// User extensions first, then the defaults.
+    fn dirs(&self) -> [PathBuf; 2] {
+        [self.dir.clone(), self.defaults_dir()]
+    }
+
+    fn write_defaults(&self) -> std::io::Result<()> {
+        for (name, source) in DEFAULTS {
+            let folder = self.defaults_dir().join(name);
+            std::fs::create_dir_all(&folder)?;
+            let entry = folder.join("index.ts");
+            if std::fs::read_to_string(&entry).ok().as_deref() != Some(source) {
+                std::fs::write(entry, source)?;
+            }
+        }
+        Ok(())
     }
 
     /// Writes `host.ts` next to the extensions and returns `(bun, host.ts)`.
@@ -218,7 +265,10 @@ impl Extensions {
 
     /// Stops every extension and starts what is on disk now. Returns the status report.
     pub async fn reload(&self) -> String {
-        let found = discover(&self.dir);
+        if let Err(e) = self.write_defaults() {
+            eprintln!("could not write default extensions: {e}");
+        }
+        let found = discover(&self.dirs());
         let started = futures_util::future::join_all(found.iter().map(|(name, entry)| async move {
             match entry.with_file_name(DISABLED).exists() {
                 true => (0, State::Disabled),
@@ -247,7 +297,7 @@ impl Extensions {
             slots.retain(|s| s.name != name);
             slots.push(slot);
             slots.sort_by(|a, b| a.name.cmp(&b.name));
-            self.describe(slots.iter().find(|s| s.name == name).unwrap(), &reserved_tools())
+            self.describe(slots.iter().find(|s| s.name == name).unwrap(), &builtin_tools())
         };
         if !ok {
             anyhow::bail!("{line}");
@@ -256,8 +306,8 @@ impl Extensions {
     }
 
     fn entry(&self, name: &str) -> Result<PathBuf> {
-        let folder = self.dir.join(name);
-        valid_name(name).then(|| entry_of(&folder)).flatten().ok_or_else(|| anyhow::anyhow!("no extension named `{name}`"))
+        let found = discover(&self.dirs()).into_iter().find(|(n, _)| n == name);
+        found.map(|(_, entry)| entry).ok_or_else(|| anyhow::anyhow!("no extension named `{name}`"))
     }
 
     /// Stops an extension and keeps it from starting until it is enabled or saved again.
@@ -323,15 +373,18 @@ impl Extensions {
         data
     }
 
-    /// Tools of all running extensions; names taken by a built-in or an earlier
-    /// extension are skipped.
+    /// Tools of all running extensions; a name an earlier extension took is skipped.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
-        let mut seen = reserved_tools();
+        let mut seen = HashSet::new();
         self.running()
             .iter()
             .flat_map(|(_, h)| h.manifest.tools.clone())
             .filter(|t| seen.insert(t.name.clone()))
             .collect()
+    }
+
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.running().iter().any(|(_, h)| h.manifest.tools.iter().any(|t| t.name == name))
     }
 
     /// Runs an extension tool; `None` if no extension has it.
@@ -361,7 +414,7 @@ impl Extensions {
         Some(host.request("command", params, COMMAND_TIMEOUT).await.map(|v| v.as_str().map(String::from)))
     }
 
-    fn describe(&self, slot: &Slot, reserved: &HashSet<String>) -> String {
+    fn describe(&self, slot: &Slot, builtin: &HashSet<String>) -> String {
         match &slot.state {
             State::Failed(e) => format!("❌ {} — {}", slot.name, e.trim()),
             State::Disabled => format!("⏸ {} — disabled", slot.name),
@@ -378,9 +431,9 @@ impl Extensions {
                 if !m.events.is_empty() {
                     parts.push(format!("hooks: {}", list(m.events.clone())));
                 }
-                let shadowed: Vec<_> = m.tools.iter().filter(|t| reserved.contains(&t.name)).map(|t| t.name.clone()).collect();
-                if !shadowed.is_empty() {
-                    parts.push(format!("ignored (built-in names): {}", list(shadowed)));
+                let replaced: Vec<_> = m.tools.iter().filter(|t| builtin.contains(&t.name)).map(|t| t.name.clone()).collect();
+                if !replaced.is_empty() {
+                    parts.push(format!("replaces built-in: {}", list(replaced)));
                 }
                 if parts.is_empty() {
                     parts.push("registers nothing".into());
@@ -396,8 +449,8 @@ impl Extensions {
         if slots.is_empty() {
             return format!("No extensions. They live in `{}`.", self.dir.display());
         }
-        let reserved = reserved_tools();
-        slots.iter().map(|s| self.describe(s, &reserved)).collect::<Vec<_>>().join("\n")
+        let builtin = builtin_tools();
+        slots.iter().map(|s| self.describe(s, &builtin)).collect::<Vec<_>>().join("\n")
     }
 }
 

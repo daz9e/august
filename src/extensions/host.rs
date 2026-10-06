@@ -67,6 +67,7 @@ impl Host {
             .arg(entry)
             .arg(name)
             .current_dir(entry.parent().unwrap_or(Path::new(".")))
+            .env("AUGUST_WORKSPACE", crate::config::workspace().unwrap_or_default())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -185,6 +186,18 @@ async fn serve(core: Option<&dyn Core>, method: &str, params: &Value) -> anyhow:
     Ok(match method {
         "send" => core.send(arg("channel")?, arg("chat")?, arg("text")?).await.map(|_| Value::Null)?,
         "prompt" => core.prompt(arg("channel")?, arg("chat")?, arg("text")?).await.map(|_| Value::Null)?,
+        "agent" => {
+            let opts = serde_json::from_value(params["opts"].clone()).unwrap_or_default();
+            json!(core.agent(arg("channel")?, arg("chat")?, arg("task")?, opts).await?)
+        }
+        "ask" => {
+            let options: Vec<String> = serde_json::from_value(params["options"].clone()).unwrap_or_default();
+            if options.is_empty() {
+                anyhow::bail!("ask needs at least one option");
+            }
+            json!(core.ask(arg("channel")?, arg("chat")?, arg("question")?, &options).await?)
+        }
+        "approve" => json!(core.approve(arg("channel")?, arg("chat")?, arg("action")?).await?),
         "callTool" => {
             let (output, is_error) = core.call_tool(arg("channel")?, arg("chat")?, arg("name")?, &params["input"]).await?;
             json!({"output": output, "isError": is_error})

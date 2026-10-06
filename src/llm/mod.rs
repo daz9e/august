@@ -123,6 +123,15 @@ impl Message {
         Some(Message { role, content: blocks.iter().filter_map(Block::from_json).collect() })
     }
 
+    /// `{role, content: [blocks]}`, as extensions see it.
+    pub fn to_json(&self) -> Value {
+        serde_json::json!({"role": self.role.as_str(), "content": self.content.iter().map(Block::to_json).collect::<Vec<_>>()})
+    }
+
+    pub fn from_json(v: &Value) -> Option<Message> {
+        Self::from_parts(v["role"].as_str()?, &v["content"].to_string())
+    }
+
     pub fn content_json(&self) -> String {
         Value::Array(self.content.iter().map(Block::to_json).collect()).to_string()
     }

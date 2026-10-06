@@ -45,15 +45,21 @@ leave it unchanged.
 - `before_turn` `{ text, system }`: once per turn. Return `{ system }` to change the base
   system prompt for this turn, `{ text }` to change the user message.
 - `tool_call` `{ tool, input }`: before any tool runs (built-in or extension). Return
-  `{ block: "reason" }` to stop it, `{ input }` to change its arguments.
+  `{ block: "reason" }` to stop it, `{ input }` to change its arguments, `{ approve: true }`
+  to run it without the usual approval, `{ ask: "question" }` to ask the user first.
 - `tool_result` `{ tool, input, output, isError }`: return `{ output }` to change what the
   model sees.
-- `turn_end` `{ text, reply }`: after a turn; runs in the background, the result is ignored.
+- `turn_end` `{ text, reply, unattended }`: after a turn; runs in the background, the result
+  is ignored. `unattended` is true for scheduled tasks and sub-agents.
 - `llm_call` `{ step, system }`: before every model call of a turn (`step` from 0). Return
   `{ system }` to use another system prompt for that call only. The prompt is otherwise
   byte-stable so the provider can cache it; changing it costs that cache, so prefer
   `before_turn`.
+- `context` `{ step, messages }`: before every model call, the conversation the model is
+  about to see. Return `{ messages }` to change it for that call only (inject recalled notes,
+  drop noise); the stored history stays as is. Keep tool_use/tool_result pairs intact.
 - `llm_result` `{ step, text, toolCalls: [{ name, input }], usage }`: after every model call.
+- `stop` `{}`: the user sent /stop; stop any loop of yours in that chat.
 - `session_start` `{ previous, session }`: the chat started a new conversation (`/new`).
 - `compaction` `{ before, after }`: older history was summarised (estimated tokens).
 
@@ -61,7 +67,8 @@ leave it unchanged.
 background and their result is ignored.
 
 `ctx.chat` is `{ channel, chat }` (`cli` in the terminal); `ctx.send(text)` messages that
-chat, `ctx.prompt(text)` queues a new agent turn there. `august.send(channel, chat, text)`
+chat, `ctx.prompt(text)` hands it a message as if the user sent it (joins a running turn,
+or starts one). `august.send(channel, chat, text)`
 and `august.prompt(...)` do the same for any chat.
 
 Calling into August:
@@ -70,6 +77,14 @@ Calling into August:
   the usual approvals; returns `{ output, isError }`.
 - `await ctx.llm(prompt, { system })` is one completion on the current model, without tools;
   returns the text.
+- `await ctx.agent(task, { system, tools, exclude })` runs a sub-agent with a fresh
+  conversation and returns its final reply (`tools` limits it, `exclude` hides some).
+- `await ctx.ask(question, ["Yes", "Later"])` asks the user with buttons and returns the
+  chosen option, or null after 5 minutes; `await ctx.approve(action)` is a yes/no approval.
+- `august.workspace` is the agent's workspace folder.
+
+A tool with the name of a built-in one (`shell`, `read_file`, ...) replaces it, e.g. to run
+shell commands in a container.
 
 ## Rules
 

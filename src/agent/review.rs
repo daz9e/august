@@ -119,7 +119,6 @@ impl Agent {
                 files: None,
                 extensions: None,
                 unattended: true,
-                delegate: None,
                 notify: ctx.notify.clone(),
                 inbox: None,
             },

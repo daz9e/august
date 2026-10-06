@@ -40,6 +40,9 @@ function context(chat: Chat | null) {
     chat,
     send: (text: string) => (chat ? call("send", { ...chat, text }) : noChat()),
     prompt: (text: string) => (chat ? call("prompt", { ...chat, text }) : noChat()),
+    agent: (task: string, opts: object = {}) => (chat ? call("agent", { ...chat, task, opts }) : noChat()),
+    ask: (question: string, options: string[]) => (chat ? call("ask", { ...chat, question, options }) : noChat()),
+    approve: (action: string) => (chat ? call("approve", { ...chat, action }) : noChat()),
     callTool: (name: string, input: unknown = {}) => (chat ? call("callTool", { ...chat, name, input }) : noChat()),
     llm: (prompt: string, opts: { system?: string } = {}) => call("llm", { prompt, system: opts.system }),
   };
@@ -48,6 +51,7 @@ function context(chat: Chat | null) {
 const api = {
   name,
   dir: dirname(entry),
+  workspace: process.env.AUGUST_WORKSPACE ?? "",
   on(event: string, handler: Function) {
     if (typeof handler !== "function") throw new Error(`on("${event}"): handler must be a function`);
     handlers.set(event, [...(handlers.get(event) ?? []), handler]);

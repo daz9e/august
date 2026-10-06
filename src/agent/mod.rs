@@ -1,7 +1,6 @@
 //! The agent loop: model -> tools -> model ... until the model stops calling tools.
 
 mod compaction;
-mod goal;
 mod inbox;
 mod prompt;
 mod review;
@@ -151,9 +150,24 @@ impl Agent {
                 system = s.to_string();
             }
         }
+        // A `context` hook may change what the model sees for this one call (not the history).
+        let mut rewritten = None;
+        if let Some(ext) = self.tools.extensions().filter(|e| e.listens("context")) {
+            let messages: Vec<Value> = self.history.iter().map(Message::to_json).collect();
+            let data = ext.emit("context", json!({"step": step, "messages": messages}), &ctx.origin).await;
+            if let Some(list) = data["messages"].as_array() {
+                let parsed: Option<Vec<Message>> = list.iter().map(Message::from_json).collect();
+                match parsed {
+                    Some(m) if m.len() != self.history.len() || list != &messages => rewritten = Some(m),
+                    Some(_) => {}
+                    None => eprintln!("context hook returned malformed messages; ignored"),
+                }
+            }
+        }
+        let messages = rewritten.as_deref().unwrap_or(&self.history);
         let completion = {
             let mut on_text = |t: &str| on_event(Event::Text(t));
-            self.provider.complete_stream(&self.session, &system, &self.history, specs, &mut on_text).await?
+            self.provider.complete_stream(&self.session, &system, messages, specs, &mut on_text).await?
         };
         self.last_input_tokens = completion.usage.context_tokens() as usize;
         self.record_usage(&completion.usage);
@@ -256,7 +270,8 @@ impl Agent {
                         });
                     }
                 }
-                self.notify_ext("turn_end", json!({"text": text, "reply": reply}), ctx.origin.clone());
+                let data = json!({"text": text, "reply": reply, "unattended": ctx.unattended});
+                self.notify_ext("turn_end", data, ctx.origin.clone());
             }
             Err(_) => self.rollback_turn(),
         }

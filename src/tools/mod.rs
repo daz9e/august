@@ -1,6 +1,5 @@
 //! Tools the agent can call, plus the approval hook for risky actions.
 
-mod delegate;
 mod extensions;
 mod fs;
 mod media;
@@ -9,7 +8,6 @@ mod search;
 mod shell;
 mod skills;
 mod tasks;
-mod web;
 
 pub use tasks::format_tasks;
 
@@ -42,14 +40,7 @@ pub trait Notifier: Send + Sync {
     async fn notify(&self, text: &str);
 }
 
-/// Runs a task in a sub-agent with a fresh context.
-#[async_trait]
-pub trait Delegate: Send + Sync {
-    /// Starts the subtask; returns what the model should know right away (the result
-    /// itself, or that it will arrive later as a message).
-    async fn delegate(&self, goal: &str, context: &str) -> Result<String>;
-}
-
+#[derive(Clone)]
 pub struct ToolCtx {
     pub workspace: PathBuf,
     pub approver: Arc<dyn Approver>,
@@ -63,8 +54,6 @@ pub struct ToolCtx {
     /// Nobody is following along (a scheduled task or a subtask): no background review,
     /// no scheduling or delegating more work.
     pub unattended: bool,
-    /// Runs subtasks for `delegate_task`; `None` where that's not available.
-    pub delegate: Option<Arc<dyn Delegate>>,
     /// Where the background review reports what it saved.
     pub notify: Option<Arc<dyn Notifier>>,
     /// Messages the user sends while the turn runs.
@@ -79,11 +68,25 @@ pub trait Tool: Send + Sync {
     async fn call(&self, input: &Value, ctx: &ToolCtx) -> Result<String>;
 }
 
+/// Approves everything (a `tool_call` hook already did).
+struct Approved;
+
+#[async_trait]
+impl Approver for Approved {
+    async fn approve(&self, _action: &str) -> bool {
+        true
+    }
+}
+
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
     /// Extension tools and the `tool_call` / `tool_result` hooks.
     ext: Option<Arc<Extensions>>,
     mcp: Option<Arc<Mcp>>,
+    /// Tools (of any kind) the model is not offered and may not call.
+    hidden: HashSet<String>,
+    /// When set, only these tools are offered.
+    only: Option<HashSet<String>>,
 }
 
 impl ToolRegistry {
@@ -98,8 +101,6 @@ impl ToolRegistry {
                 Box::new(media::SendFile),
                 Box::new(search::Grep),
                 Box::new(search::Glob),
-                Box::new(web::WebFetch),
-                Box::new(web::WebSearch),
                 Box::new(memory::Remember),
                 Box::new(memory::Forget),
                 Box::new(memory::SearchHistory),
@@ -110,17 +111,28 @@ impl ToolRegistry {
                 Box::new(tasks::ListTasks),
                 Box::new(tasks::CancelTask),
                 Box::new(extensions::SaveExtension),
-                Box::new(delegate::DelegateTask),
             ],
             ext: None,
             mcp: None,
+            hidden: HashSet::new(),
+            only: None,
         }
     }
 
-    /// Drops built-in tools by name (e.g. what a sub-agent may not use).
-    pub fn without(mut self, names: &[&str]) -> Self {
-        self.tools.retain(|t| !names.contains(&t.name()));
+    /// Hides tools by name, built-in or not (e.g. what a sub-agent may not use).
+    pub fn without<S: AsRef<str>>(mut self, names: &[S]) -> Self {
+        self.hidden.extend(names.iter().map(|n| n.as_ref().to_string()));
         self
+    }
+
+    /// Offers only these tools.
+    pub fn only<S: AsRef<str>>(mut self, names: &[S]) -> Self {
+        self.only = Some(names.iter().map(|n| n.as_ref().to_string()).collect());
+        self
+    }
+
+    fn offered(&self, name: &str) -> bool {
+        !self.hidden.contains(name) && self.only.as_ref().is_none_or(|o| o.contains(name))
     }
 
     pub fn with_extensions(mut self, ext: Arc<Extensions>) -> Self {
@@ -142,9 +154,11 @@ impl ToolRegistry {
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
+        let ext = self.ext.as_ref().map(|e| e.tool_specs()).unwrap_or_default();
         let mut specs: Vec<ToolSpec> = self
             .tools
             .iter()
+            .filter(|t| !ext.iter().any(|e| e.name == t.name())) // replaced by an extension
             .map(|t| ToolSpec {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
@@ -154,21 +168,23 @@ impl ToolRegistry {
         if let Some(mcp) = &self.mcp {
             specs.extend(mcp.tool_specs());
         }
-        if let Some(ext) = &self.ext {
-            specs.extend(ext.tool_specs());
-        }
+        specs.extend(ext);
         let mut seen = HashSet::new();
-        specs.retain(|s| seen.insert(s.name.clone()));
+        specs.retain(|s| self.offered(&s.name) && seen.insert(s.name.clone()));
         specs
     }
 
     /// Runs a tool through the extension hooks; errors become `(message, true)` so the
     /// model can react to them.
     pub async fn call(&self, name: &str, input: &Value, ctx: &ToolCtx) -> (String, bool) {
+        if !self.offered(name) {
+            return (format!("unknown tool: {name}"), true);
+        }
         let Some(ext) = &self.ext else {
             return self.run(name, input, ctx).await;
         };
         let mut input = input.clone();
+        let mut ctx = std::borrow::Cow::Borrowed(ctx);
         if ext.listens("tool_call") {
             let data = ext.emit("tool_call", json!({"tool": name, "input": input}), &ctx.origin).await;
             match &data["block"] {
@@ -179,8 +195,17 @@ impl ToolRegistry {
                 _ => {}
             }
             input = data["input"].clone();
+            // The hook may decide about approval: `approve: true` runs without asking,
+            // `ask: "<question>"` asks first even where the tool wouldn't.
+            if data["approve"] == true {
+                ctx.to_mut().approver = Arc::new(Approved);
+            } else if let Some(q) = data["ask"].as_str().filter(|q| !q.is_empty())
+                && !ctx.approver.approve(q).await
+            {
+                return ("the user denied this".into(), true);
+            }
         }
-        let (mut output, mut is_error) = self.run(name, &input, ctx).await;
+        let (mut output, mut is_error) = self.run(name, &input, &ctx).await;
         if ext.listens("tool_result") {
             let data = json!({"tool": name, "input": input, "output": output, "isError": is_error});
             let data = ext.emit("tool_result", data, &ctx.origin).await;
@@ -195,19 +220,25 @@ impl ToolRegistry {
     }
 
     async fn run(&self, name: &str, input: &Value, ctx: &ToolCtx) -> (String, bool) {
+        if let Some(ext) = &self.ext
+            && ext.has_tool(name)
+            && let Some(r) = ext.call_tool(name, input, &ctx.origin).await
+        {
+            return match r {
+                Ok(out) => (out, false),
+                Err(e) => (format!("error: {e}"), true),
+            };
+        }
         if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
             return match tool.call(input, ctx).await {
                 Ok(out) => (out, false),
                 Err(e) => (format!("error: {e:#}"), true),
             };
         }
-        let mut found = match &self.mcp {
+        let found = match &self.mcp {
             Some(mcp) => mcp.call_tool(name, input).await,
             None => None,
         };
-        if found.is_none() && let Some(ext) = &self.ext {
-            found = ext.call_tool(name, input, &ctx.origin).await;
-        }
         match found {
             Some(Ok(out)) => (out, false),
             Some(Err(e)) => (format!("error: {e}"), true),

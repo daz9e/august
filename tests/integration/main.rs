@@ -18,3 +18,6 @@ mod subtasks;
 mod goal;
 mod usage;
 mod mcp;
+mod browser;
+mod web;
+mod clarify;

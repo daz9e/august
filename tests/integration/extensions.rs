@@ -292,3 +292,75 @@ async fn compaction_event_reaches_extensions() {
     fake.push_updates(vec![message(7, json!({"text": "/compact", "entities": [{"type": "bot_command", "offset": 0, "length": 8}]}))]);
     fake.wait_for(TIMEOUT, |f| sent_any(f, "compaction event: smaller")).await;
 }
+
+const RECALL: &str = r#"
+import type { August } from "august";
+
+export default function (august: August) {
+  august.on("context", ({ messages }) => ({
+    messages: [{ role: "user", content: [{ type: "text", text: "RECALLED: the user likes tea" }] }, ...messages],
+  }));
+}
+"#;
+
+#[tokio::test]
+async fn context_hook_changes_what_the_model_sees_but_not_the_history() {
+    if !have_bun() {
+        return;
+    }
+    let updates = vec![message(1, json!({"text": "hi"})), message(2, json!({"text": "again"}))];
+    let llm: Llm = Box::new(|req| reply_text(&format!("seen {}", messages(req).len())));
+    let fake = Fake::start(updates, HashMap::new(), Some(llm)).await;
+    let _gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[], &[("extensions/recall/index.ts", RECALL)]);
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().filter(|t| t.starts_with("seen")).count() >= 2).await;
+
+    for req in fake.llm_requests() {
+        let all = req.to_string();
+        assert_eq!(all.matches("RECALLED: the user likes tea").count(), 1, "{all}");
+    }
+}
+
+const POLICY: &str = r#"
+import type { August } from "august";
+
+export default function (august: August) {
+  august.registerTool({ name: "list_dir", description: "List a folder", execute: () => "custom listing" });
+  august.on("tool_call", ({ tool, input }) => {
+    if (tool === "shell" && input.command.startsWith("touch ")) return { approve: true };
+    if (tool === "read_file") return { ask: "Let the agent read notes.txt?" };
+  });
+}
+"#;
+
+#[tokio::test]
+async fn extensions_replace_builtin_tools_and_decide_approvals() {
+    if !have_bun() {
+        return;
+    }
+    let pick = |text: &str| match text {
+        t if t.contains("list") => reply_tool("list_dir", json!({"path": "."})),
+        t if t.contains("touch") => reply_tool("shell", json!({"command": "touch made.txt"})),
+        _ => reply_tool("read_file", json!({"path": "notes.txt"})),
+    };
+    let fake = Fake::start(vec![message(1, json!({"text": "list"}))], HashMap::new(), Some(llm(pick))).await;
+    let gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[("notes.txt", b"private")], &[("extensions/policy/index.ts", POLICY)]);
+
+    // An extension tool replaces the built-in of the same name.
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: custom listing")).await;
+
+    // `approve: true` runs a risky command without asking.
+    fake.push_updates(vec![message(2, json!({"text": "touch"}))]);
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: exit code: 0")).await;
+    assert!(gw.workspace.join("made.txt").exists());
+    assert!(!fake.calls("sendMessage").iter().any(|r| r.text().contains("ap:")), "asked anyway");
+
+    // `ask` asks even for a tool that never does; a denial reaches the model.
+    fake.push_updates(vec![message(3, json!({"text": "read"}))]);
+    fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("ap:"))).await;
+    let ask = fake.calls("sendMessage").into_iter().find(|r| r.text().contains("ap:")).unwrap().json();
+    assert!(ask["text"].as_str().unwrap().contains("Let the agent read notes.txt?"));
+    let deny = ask["reply_markup"]["inline_keyboard"][0][1]["callback_data"].as_str().unwrap().to_string();
+    assert!(deny.ends_with(":n"), "{deny}");
+    fake.push_updates(vec![button_press(4, &deny)]);
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: the user denied this")).await;
+}

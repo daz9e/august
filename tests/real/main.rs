@@ -7,6 +7,7 @@ mod support;
 
 mod claude_cli;
 mod extensions;
+mod browser;
 mod mcp;
 mod media;
 mod service;

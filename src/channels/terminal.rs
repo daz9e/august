@@ -49,6 +49,26 @@ impl extensions::Core for TerminalCore {
         anyhow::bail!("queuing turns is not supported in the terminal")
     }
 
+    async fn agent(&self, _channel: &str, _chat: &str, _task: &str, _opts: extensions::AgentOpts) -> Result<String> {
+        anyhow::bail!("sub-agents are not supported in the terminal")
+    }
+
+    async fn ask(&self, _channel: &str, _chat: &str, question: &str, options: &[String]) -> Result<Option<String>> {
+        println!("\n❓ {question}");
+        for (i, o) in options.iter().enumerate() {
+            println!("   {}. {o}", i + 1);
+        }
+        print!("   Choose 1-{}: ", options.len());
+        std::io::stdout().flush().ok();
+        let answer = self.stdin.lock().await.next_line().await.ok().flatten();
+        let pick = answer.and_then(|a| a.trim().parse::<usize>().ok()).and_then(|n| n.checked_sub(1));
+        Ok(pick.and_then(|i| options.get(i).cloned()))
+    }
+
+    async fn approve(&self, _channel: &str, _chat: &str, action: &str) -> Result<bool> {
+        Ok(CliApprover(self.stdin.clone()).approve(action).await)
+    }
+
     async fn call_tool(&self, _channel: &str, _chat: &str, name: &str, input: &Value) -> Result<(String, bool)> {
         let ext = self.ext.upgrade().ok_or_else(|| anyhow::anyhow!("August is shutting down"))?;
         let ctx = ToolCtx {
@@ -59,7 +79,6 @@ impl extensions::Core for TerminalCore {
             files: None,
             extensions: Some(ext.clone()),
             unattended: false,
-            delegate: None,
             notify: None,
             inbox: None,
         };
@@ -129,7 +148,6 @@ pub async fn run() -> Result<()> {
         files: None,
         extensions: Some(ext.clone()),
         unattended: false,
-        delegate: None,
         notify: Some(Arc::new(TerminalNotes)),
         inbox: None,
     };
