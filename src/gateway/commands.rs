@@ -56,11 +56,14 @@ impl Gateway {
                 s
             }
             "stop" => {
+                // The goal goes too, or its loop would start the next turn.
+                let goal = if state.goal.lock().unwrap().take().is_some() { " Goal dropped." } else { "" };
                 match state.cancel.lock().unwrap().as_ref() {
                     Some(n) => {
                         n.notify_one();
-                        "Stopping…".into()
+                        format!("Stopping…{goal}")
                     }
+                    None if !goal.is_empty() => format!("Nothing is running.{goal}"),
                     None => "Nothing is running.".to_string(),
                 }
             }
