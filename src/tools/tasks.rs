@@ -3,8 +3,8 @@ use crate::scheduler::schedule::{Schedule, fmt_time};
 use serde_json::json;
 
 fn origin(ctx: &ToolCtx) -> Result<(&str, &str)> {
-    if ctx.scheduled {
-        anyhow::bail!("scheduled tasks can't manage tasks");
+    if ctx.unattended {
+        anyhow::bail!("tasks can't be managed from a scheduled task or a subtask");
     }
     ctx.origin
         .as_ref()

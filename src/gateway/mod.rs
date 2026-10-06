@@ -5,6 +5,7 @@ mod approval;
 mod commands;
 mod media;
 mod render;
+mod subtasks;
 mod turn;
 
 use crate::agent::{self, Agent};
@@ -46,6 +47,8 @@ pub struct Gateway {
     pub db: Arc<Db>,
     ext: Arc<Extensions>,
     mcp: Arc<Mcp>,
+    /// Numbers subtasks.
+    subtasks: std::sync::atomic::AtomicU64,
 }
 
 /// What extensions can do in the gateway: message chats and start turns.
@@ -100,6 +103,7 @@ impl Gateway {
             db,
             ext,
             mcp,
+            subtasks: Default::default(),
         });
         gw.ext.set_core(Arc::new(ExtCore(Arc::downgrade(&gw))));
         gw

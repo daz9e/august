@@ -1,5 +1,6 @@
 //! Tools the agent can call, plus the approval hook for risky actions.
 
+mod delegate;
 mod extensions;
 mod fs;
 mod media;
@@ -41,6 +42,14 @@ pub trait Notifier: Send + Sync {
     async fn notify(&self, text: &str);
 }
 
+/// Runs a task in a sub-agent with a fresh context.
+#[async_trait]
+pub trait Delegate: Send + Sync {
+    /// Starts the subtask; returns what the model should know right away (the result
+    /// itself, or that it will arrive later as a message).
+    async fn delegate(&self, goal: &str, context: &str) -> Result<String>;
+}
+
 pub struct ToolCtx {
     pub workspace: PathBuf,
     pub approver: Arc<dyn Approver>,
@@ -51,9 +60,11 @@ pub struct ToolCtx {
     pub files: Option<Arc<dyn FileSink>>,
     /// Loaded extensions, for `save_extension`; `None` when they are off.
     pub extensions: Option<Arc<Extensions>>,
-    /// The turn runs a scheduled task: no background review, no scheduling more tasks,
-    /// and only the final reply reaches the chat.
-    pub scheduled: bool,
+    /// Nobody is following along (a scheduled task or a subtask): no background review,
+    /// no scheduling or delegating more work.
+    pub unattended: bool,
+    /// Runs subtasks for `delegate_task`; `None` where that's not available.
+    pub delegate: Option<Arc<dyn Delegate>>,
     /// Where the background review reports what it saved.
     pub notify: Option<Arc<dyn Notifier>>,
     /// Messages the user sends while the turn runs.
@@ -99,10 +110,17 @@ impl ToolRegistry {
                 Box::new(tasks::ListTasks),
                 Box::new(tasks::CancelTask),
                 Box::new(extensions::SaveExtension),
+                Box::new(delegate::DelegateTask),
             ],
             ext: None,
             mcp: None,
         }
+    }
+
+    /// Drops built-in tools by name (e.g. what a sub-agent may not use).
+    pub fn without(mut self, names: &[&str]) -> Self {
+        self.tools.retain(|t| !names.contains(&t.name()));
+        self
     }
 
     pub fn with_extensions(mut self, ext: Arc<Extensions>) -> Self {

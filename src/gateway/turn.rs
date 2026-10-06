@@ -96,18 +96,25 @@ impl Gateway {
         let (tx, rx) = mpsc::unbounded_channel();
         let renderer = tokio::spawn(render(channel.clone(), chat.to_string(), rx));
 
+        let approver: Arc<ChatApprover> = Arc::new(ChatApprover {
+            channel: channel.clone(),
+            chat: chat.to_string(),
+            pending: self.pending.clone(),
+        });
         let ctx = ToolCtx {
             workspace: self.workspace.clone(),
-            approver: Arc::new(ChatApprover {
-                channel: channel.clone(),
-                chat: chat.to_string(),
-                pending: self.pending.clone(),
-            }),
+            approver: approver.clone(),
             db: self.db.clone(),
             origin: Some((id.channel.clone(), chat.to_string())),
             files: Some(Arc::new(ChatFiles(tx.clone()))),
             extensions: Some(self.ext.clone()),
-            scheduled,
+            unattended: scheduled,
+            delegate: Some(Arc::new(super::subtasks::Subtasks {
+                gw: Arc::downgrade(self),
+                channel: channel.clone(),
+                id: ChatId { channel: id.channel.clone(), chat: chat.to_string() },
+                approver,
+            })),
             notify: Some(Arc::new(ChatNotes { channel: channel.clone(), chat: chat.to_string() })),
             inbox: Some(state.inbox.clone()),
         };

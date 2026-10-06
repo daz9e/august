@@ -14,5 +14,6 @@ mod review;
 mod inbox;
 mod limits;
 mod tasks;
+mod subtasks;
 mod usage;
 mod mcp;

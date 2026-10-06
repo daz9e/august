@@ -57,7 +57,7 @@ async fn task_runs_with_skills_and_script_in_its_own_session() {
     assert!(prompt.contains("check the thing") && prompt.contains("PROBE-BODY") && prompt.contains("SCRIPT-OUT"), "{prompt}");
     assert!(!prompt.contains("watch it"), "an isolated task doesn't see the chat");
     let report = fake.sent_texts().into_iter().find(|t| t.contains("report:")).unwrap();
-    assert!(report.contains("scheduled tasks can't manage tasks"), "{report}");
+    assert!(report.contains("tasks can't be managed from a scheduled task"), "{report}");
 }
 
 #[tokio::test]
