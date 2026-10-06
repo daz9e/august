@@ -182,10 +182,16 @@ impl Agent {
                 self.persist();
                 if ctx.review {
                     if let Some(review) = self.review_due(ctx, self.turn_tool_calls) {
+                        let notify = ctx.notify.clone();
                         tokio::spawn(async move {
                             match review.run().await {
                                 Ok(changes) if changes.is_empty() => eprintln!("review: nothing to save"),
-                                Ok(changes) => eprintln!("review: {}", changes.join("; ")),
+                                Ok(changes) => {
+                                    eprintln!("review: {}", changes.join("; "));
+                                    if let (Some(n), Some(text)) = (notify, review::notice(&changes)) {
+                                        n.notify(&text).await;
+                                    }
+                                }
                                 Err(e) => eprintln!("review failed: {e:#}"),
                             }
                         });

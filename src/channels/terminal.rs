@@ -42,6 +42,15 @@ impl extensions::Core for TerminalCore {
     }
 }
 
+struct TerminalNotes;
+
+#[async_trait]
+impl crate::tools::Notifier for TerminalNotes {
+    async fn notify(&self, text: &str) {
+        println!("\n{text}");
+    }
+}
+
 fn print_event(e: Event) {
     match e {
         Event::Text(t) => {
@@ -82,6 +91,7 @@ pub async fn run() -> Result<()> {
         files: None,
         extensions: Some(ext.clone()),
         review: true,
+        notify: Some(Arc::new(TerminalNotes)),
     };
     let mut agent = Agent::new(
         provider.clone(),

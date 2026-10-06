@@ -35,6 +35,12 @@ pub trait FileSink: Send + Sync {
     async fn send_file(&self, path: &std::path::Path, caption: &str) -> Result<()>;
 }
 
+/// Posts a short message to the chat a turn ran in, also after the turn is over.
+#[async_trait]
+pub trait Notifier: Send + Sync {
+    async fn notify(&self, text: &str);
+}
+
 pub struct ToolCtx {
     pub workspace: PathBuf,
     pub approver: Arc<dyn Approver>,
@@ -47,6 +53,8 @@ pub struct ToolCtx {
     pub extensions: Option<Arc<Extensions>>,
     /// Whether this turn counts towards the background review (not for scheduled tasks).
     pub review: bool,
+    /// Where the background review reports what it saved.
+    pub notify: Option<Arc<dyn Notifier>>,
 }
 
 #[async_trait]

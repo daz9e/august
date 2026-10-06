@@ -40,6 +40,9 @@ async fn review_saves_a_correction_after_the_reply() {
     fake.push_updates(vec![command(2, "/memory")]);
     fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("User wants answers without bullet lists"))).await;
 
+    // The chat is told that something was saved.
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t == "💾 Memory updated")).await;
+
     let reqs = fake.llm_requests();
     let (chat, review) = (&reqs[0], reqs.iter().find(|r| is_review(r)).unwrap());
     // The reply went out first; the review reuses the conversation's prompt prefix.
@@ -72,4 +75,22 @@ async fn review_can_only_save_and_read() {
     let review = fake.llm_requests().into_iter().filter(|r| is_review(r)).last().unwrap();
     let out = msgs(&review).last().unwrap()["content"].as_str().unwrap().to_string();
     assert!(out.contains("not available during the review"), "{out}");
+}
+
+#[tokio::test]
+async fn verbose_notes_show_each_change() {
+    let llm: Llm = Box::new(|req| {
+        if !is_review(req) {
+            return reply_text("ok");
+        }
+        if msgs(req).last().unwrap()["role"] == "tool" {
+            reply_text("Saved.")
+        } else {
+            reply_tool("remember", json!({"fact": "User is a night owl"}))
+        }
+    });
+    let fake = Fake::start(vec![message(1, json!({"text": "I work best after midnight"}))], HashMap::new(), Some(llm)).await;
+    let env = [("AUGUST_REVIEW_MEMORY_EVERY", "1"), ("AUGUST_REVIEW_NOTIFY", "verbose")];
+    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &env);
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t == "💾 remembered: User is a night owl")).await;
 }

@@ -119,6 +119,7 @@ impl Agent {
                 files: None,
                 extensions: None,
                 review: false,
+                notify: ctx.notify.clone(),
             },
             recorder,
             memory,
@@ -177,4 +178,28 @@ impl Review {
         }
         Ok(changes)
     }
+}
+
+/// The chat line about what a review saved, per `AUGUST_REVIEW_NOTIFY` (`off`, `on`
+/// (default): what kind of thing changed, `verbose`: every change).
+pub(super) fn notice(changes: &[String]) -> Option<String> {
+    let mode = std::env::var("AUGUST_REVIEW_NOTIFY").unwrap_or_default();
+    if changes.is_empty() || mode == "off" {
+        return None;
+    }
+    if mode == "verbose" {
+        return Some(changes.iter().map(|c| format!("💾 {c}")).collect::<Vec<_>>().join("\n"));
+    }
+    let memory = changes.iter().any(|c| c.starts_with("remembered") || c.starts_with("forgot"));
+    let mut skills: Vec<&str> = changes.iter().filter_map(|c| c.split('`').nth(1).filter(|_| c.contains("skill"))).collect();
+    skills.dedup();
+    let mut parts = Vec::new();
+    if memory {
+        parts.push("memory updated".to_string());
+    }
+    if !skills.is_empty() {
+        parts.push(format!("skill {} updated", skills.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ")));
+    }
+    let line = parts.join(" · ");
+    Some(format!("💾 {}{}", line[..1].to_uppercase(), &line[1..]))
 }
