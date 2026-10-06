@@ -6,3 +6,4 @@ mod support;
 
 mod media;
 mod extensions;
+mod memory;

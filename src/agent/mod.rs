@@ -33,6 +33,8 @@ pub struct Agent {
     system: String,
     /// The system prompt a `before_turn` hook set for the running turn.
     turn_system: Option<String>,
+    /// Facts and skills as shown in the system prompt, fixed for the session.
+    snapshot: Option<String>,
     history: Vec<Message>,
     db: Arc<dyn SessionStore>,
     /// Which chat this is (`telegram:123`, `cli`); sessions are looked up by it.
@@ -66,6 +68,7 @@ impl Agent {
             tools,
             system,
             turn_system: None,
+            snapshot: None,
             history,
             db,
             chat_key: chat_key.to_string(),
@@ -89,6 +92,7 @@ impl Agent {
     pub fn reset(&mut self) -> Result<()> {
         self.session = self.db.new_session(&self.chat_key)?;
         self.history.clear();
+        self.snapshot = None;
         self.stored = 0;
         self.turn_start = 0;
         self.last_input_tokens = 0;

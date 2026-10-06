@@ -24,18 +24,27 @@ pub fn system_prompt(workspace: &std::path::Path, surface: &str) -> String {
 }
 
 impl Agent {
-    /// System prompt plus what changes between calls: saved facts and available skills.
-    pub(super) fn system_now(&self) -> String {
-        let mut s = self.turn_system.as_ref().unwrap_or(&self.system).clone();
-        match self.db.facts() {
-            Ok(facts) if !facts.is_empty() => {
-                s += "\n\n## Memory\nFacts you saved earlier (delete outdated ones with `forget`):\n";
-                for f in facts {
-                    s += &format!("- #{} {}\n", f.id, f.text);
-                }
-            }
-            _ => {}
-        }
-        s + &crate::skills::prompt_section()
+    /// System prompt for the next model call: the base prompt plus a snapshot of saved
+    /// facts and skills. The snapshot is taken once per session (and again after a
+    /// compaction), so the prompt prefix stays byte-identical and provider caching works;
+    /// facts saved meanwhile show up in the next session.
+    pub(super) fn system_now(&mut self) -> String {
+        let snapshot = self.snapshot.get_or_insert_with(|| memory_snapshot(&*self.db)).clone();
+        self.turn_system.as_ref().unwrap_or(&self.system).clone() + &snapshot
     }
+}
+
+fn memory_snapshot(db: &dyn super::SessionStore) -> String {
+    let mut s = String::new();
+    match db.facts() {
+        Ok(facts) if !facts.is_empty() => {
+            s += "\n\n## Memory\nFacts you saved earlier (delete outdated ones with `forget`). Facts \
+                  saved during this conversation appear here from the next one.\n";
+            for f in facts {
+                s += &format!("- #{} {}\n", f.id, f.text);
+            }
+        }
+        _ => {}
+    }
+    s + &crate::skills::prompt_section()
 }

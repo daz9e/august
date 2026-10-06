@@ -49,6 +49,7 @@ impl Agent {
         self.db.replace_live(&self.session, &self.history)?;
         self.stored = self.history.len();
         self.last_input_tokens = 0;
+        self.snapshot = None; // the cached prefix is gone anyway; pick up new facts
         Ok(Some((before, self.estimate_tokens())))
     }
 
