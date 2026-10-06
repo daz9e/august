@@ -265,3 +265,30 @@ async fn extensions_hook_model_calls_call_into_august_and_can_be_disabled() {
     fake.push_updates(vec![command(8, "/peek three")]);
     fake.wait_for(TIMEOUT, |f| sent_any(f, "peek three: note body")).await;
 }
+
+const WATCHER: &str = r#"export default function (august) {
+  august.on("compaction", async ({ before, after }, ctx) => {
+    await ctx.send(`compaction event: ${before > after ? "smaller" : "not smaller"}`);
+  });
+}"#;
+
+#[tokio::test]
+async fn compaction_event_reaches_extensions() {
+    if !have_bun() {
+        return;
+    }
+    let llm: Llm = Box::new(|req| {
+        let system = messages(req)[0]["content"].as_str().unwrap_or("");
+        reply_text(if system.contains("You compress conversations") { "## Goal\nchat" } else { "ok" })
+    });
+    let fake = Fake::start(vec![message(1, json!({"text": "message 1"}))], HashMap::new(), Some(llm)).await;
+    let _gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[], &[("extensions/watcher/index.ts", WATCHER)]);
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().len() >= 1).await;
+    for i in 2..=6 {
+        let n = fake.sent_texts().len();
+        fake.push_updates(vec![message(i, json!({"text": format!("message {i} {}", "x".repeat(300))}))]);
+        fake.wait_for(TIMEOUT, |f| f.sent_texts().len() > n).await;
+    }
+    fake.push_updates(vec![message(7, json!({"text": "/compact", "entities": [{"type": "bot_command", "offset": 0, "length": 8}]}))]);
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "compaction event: smaller")).await;
+}

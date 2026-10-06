@@ -88,3 +88,39 @@ async fn full_memory_makes_the_agent_merge_facts() {
     fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("#2 User has a cat Murzik and a dog Sharik"))).await;
     assert!(!fake.sent_texts().iter().any(|t| t.contains("#1 User has a cat named")));
 }
+
+#[tokio::test]
+async fn compaction_refreshes_the_memory_snapshot() {
+    let llm: Llm = Box::new(|req| {
+        let last = req["messages"].as_array().unwrap().last().unwrap();
+        if system(req).contains("You compress conversations") {
+            return reply_text("## Goal\nchat");
+        }
+        if last["role"] == "tool" {
+            reply_text("noted")
+        } else if last_user_text(req).contains("remember") {
+            reply_tool("remember", json!({"fact": "User plays the cello"}))
+        } else {
+            reply_text("ok")
+        }
+    });
+    let fake = Fake::start(vec![message(1, json!({"text": "remember that I play the cello"}))], HashMap::new(), Some(llm)).await;
+    let _gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("noted"))).await;
+    // Enough history for /compact to summarise something.
+    for i in 2..=6 {
+        let n = fake.sent_texts().len();
+        fake.push_updates(vec![message(i, json!({"text": format!("message {i}")}))]);
+        fake.wait_for(TIMEOUT, |f| f.sent_texts().len() > n).await;
+    }
+    let before = fake.llm_requests().into_iter().find(|r| last_user_text(r).contains("message 6")).unwrap();
+    assert!(!system(&before).contains("cello"));
+
+    fake.push_updates(vec![command(7, "/compact")]);
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("Compacted"))).await;
+    let n = fake.sent_texts().len();
+    fake.push_updates(vec![message(8, json!({"text": "after compaction"}))]);
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().len() > n).await;
+    let after = fake.llm_requests().into_iter().find(|r| last_user_text(r).contains("after compaction")).unwrap();
+    assert!(system(&after).contains("User plays the cello"), "{}", system(&after));
+}

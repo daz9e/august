@@ -94,3 +94,49 @@ async fn verbose_notes_show_each_change() {
     let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &env);
     fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t == "💾 remembered: User is a night owl")).await;
 }
+
+#[tokio::test]
+async fn enough_tool_calls_trigger_a_skill_review_that_writes_a_skill() {
+    let llm: Llm = Box::new(|req| {
+        let last = msgs(req).last().unwrap();
+        if is_review(req) {
+            let ask = msgs(req).iter().rev().find(|m| m["role"] == "user" && m["content"].as_str().is_some_and(|c| c.starts_with("[Background review]"))).unwrap();
+            let ask = ask["content"].as_str().unwrap();
+            assert!(ask.contains("Skills:") && !ask.contains("Memory:"), "{ask}");
+            return if last["role"] == "tool" {
+                reply_text("Saved.")
+            } else {
+                reply_tool("save_skill", json!({"name": "greeting", "description": "How to greet", "body": "Say hi twice."}))
+            };
+        }
+        if last["role"] == "tool" { reply_text("done") } else { reply_tool("shell", json!({"command": "echo hi"})) }
+    });
+    let fake = Fake::start(vec![message(1, json!({"text": "say hi"}))], HashMap::new(), Some(llm)).await;
+    let env = [("AUGUST_REVIEW_MEMORY_EVERY", "0"), ("AUGUST_REVIEW_SKILLS_AFTER", "1")];
+    let gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &env);
+    // No approval button: nobody is asked in the background; the chat is told instead.
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("💾 Skill") && t.contains("greeting"))).await;
+    assert!(std::fs::read_to_string(gw.home.join("skills/greeting/SKILL.md")).unwrap().contains("Say hi twice."));
+}
+
+#[tokio::test]
+async fn scheduled_tasks_do_not_trigger_reviews() {
+    let llm: Llm = Box::new(|req| {
+        let last = msgs(req).last().unwrap();
+        if is_review(req) {
+            return reply_text("Nothing to save.");
+        }
+        let text = msgs(req).iter().rev().find(|m| m["role"] == "user").unwrap()["content"].as_str().unwrap_or("").to_string();
+        if text.contains("Scheduled task") {
+            return reply_text("task ran");
+        }
+        if last["role"] == "tool" { reply_text("scheduled") } else { reply_tool("schedule_task", json!({"schedule": "in 1s", "prompt": "ping"})) }
+    });
+    let fake = Fake::start(vec![message(1, json!({"text": "ping me"}))], HashMap::new(), Some(llm)).await;
+    let env = [("AUGUST_REVIEW_MEMORY_EVERY", "1"), ("AUGUST_SCHEDULER_TICK", "1")];
+    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &env);
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("task ran"))).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    // Only the user's own turn was reviewed.
+    assert_eq!(fake.llm_requests().iter().filter(|r| is_review(r)).count(), 1);
+}
