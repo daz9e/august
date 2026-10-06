@@ -40,6 +40,8 @@ function context(chat: Chat | null) {
     chat,
     send: (text: string) => (chat ? call("send", { ...chat, text }) : noChat()),
     prompt: (text: string) => (chat ? call("prompt", { ...chat, text }) : noChat()),
+    callTool: (name: string, input: unknown = {}) => (chat ? call("callTool", { ...chat, name, input }) : noChat()),
+    llm: (prompt: string, opts: { system?: string } = {}) => call("llm", { prompt, system: opts.system }),
   };
 }
 

@@ -25,6 +25,8 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Restarts after a crash before an extension stays down until `/reload`.
 const MAX_RESTARTS: u32 = 3;
 const ENTRIES: [&str; 3] = ["index.ts", "index.js", "index.mjs"];
+/// Marker file in an extension folder that keeps it from starting.
+const DISABLED: &str = "disabled";
 
 /// What extensions can ask of August.
 #[async_trait]
@@ -33,6 +35,10 @@ pub trait Core: Send + Sync {
     async fn send(&self, channel: &str, chat: &str, text: &str) -> Result<()>;
     /// Queues an agent turn in a chat.
     async fn prompt(&self, channel: &str, chat: &str, text: &str) -> Result<()>;
+    /// Runs an agent tool in a chat (hooks and approvals included): `(output, is_error)`.
+    async fn call_tool(&self, channel: &str, chat: &str, name: &str, input: &Value) -> Result<(String, bool)>;
+    /// One completion without tools on the configured model.
+    async fn llm(&self, prompt: &str, system: &str) -> Result<String>;
 }
 
 /// The chat a hook, tool or command runs for: `(channel, chat)`.
@@ -41,6 +47,7 @@ pub type ChatRef = Option<(String, String)>;
 enum State {
     Running(Arc<Host>),
     Failed(String),
+    Disabled,
 }
 
 struct Slot {
@@ -212,7 +219,13 @@ impl Extensions {
     /// Stops every extension and starts what is on disk now. Returns the status report.
     pub async fn reload(&self) -> String {
         let found = discover(&self.dir);
-        let started = futures_util::future::join_all(found.iter().map(|(name, entry)| self.spawn(name, entry))).await;
+        let started = futures_util::future::join_all(found.iter().map(|(name, entry)| async move {
+            match entry.with_file_name(DISABLED).exists() {
+                true => (0, State::Disabled),
+                false => self.spawn(name, entry).await,
+            }
+        }))
+        .await;
         let slots = found
             .into_iter()
             .zip(started)
@@ -222,9 +235,10 @@ impl Extensions {
         self.status()
     }
 
-    /// (Re)starts one extension after it was saved. Returns its status line.
+    /// (Re)starts one extension after it was saved, enabling it. Returns its status line.
     pub async fn load(&self, name: &str) -> Result<String> {
-        let entry = entry_of(&self.dir.join(name)).ok_or_else(|| anyhow::anyhow!("extension `{name}` has no index.ts"))?;
+        let entry = self.entry(name)?;
+        std::fs::remove_file(entry.with_file_name(DISABLED)).ok();
         let (generation, state) = self.spawn(name, &entry).await;
         let ok = matches!(state, State::Running(_));
         let slot = Slot { name: name.to_string(), entry, state, generation, restarts: 0 };
@@ -241,6 +255,36 @@ impl Extensions {
         Ok(line)
     }
 
+    fn entry(&self, name: &str) -> Result<PathBuf> {
+        let folder = self.dir.join(name);
+        valid_name(name).then(|| entry_of(&folder)).flatten().ok_or_else(|| anyhow::anyhow!("no extension named `{name}`"))
+    }
+
+    /// Stops an extension and keeps it from starting until it is enabled or saved again.
+    pub fn disable(&self, name: &str) -> Result<()> {
+        let entry = self.entry(name)?;
+        std::fs::write(entry.with_file_name(DISABLED), "")?;
+        let mut slots = self.slots.write().unwrap();
+        slots.retain(|s| s.name != name); // the process is killed as it drops
+        slots.push(Slot { name: name.to_string(), entry, state: State::Disabled, generation: 0, restarts: 0 });
+        slots.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(())
+    }
+
+    /// `/extensions [enable|disable <name>]`: the status, after the change if one was asked for.
+    pub async fn command(&self, args: &str) -> String {
+        let r = match args.split_whitespace().collect::<Vec<_>>()[..] {
+            [] => return self.status(),
+            ["enable", name] => self.load(name).await.map(|_| ()),
+            ["disable", name] => self.disable(name),
+            _ => return "Usage: /extensions [enable|disable <name>]".into(),
+        };
+        match r {
+            Ok(()) => self.status(),
+            Err(e) => format!("{e:#}\n\n{}", self.status()),
+        }
+    }
+
     fn running(&self) -> Vec<(String, Arc<Host>)> {
         self.slots
             .read()
@@ -248,7 +292,7 @@ impl Extensions {
             .iter()
             .filter_map(|s| match &s.state {
                 State::Running(h) => Some((s.name.clone(), h.clone())),
-                State::Failed(_) => None,
+                State::Failed(_) | State::Disabled => None,
             })
             .collect()
     }
@@ -320,6 +364,7 @@ impl Extensions {
     fn describe(&self, slot: &Slot, reserved: &HashSet<String>) -> String {
         match &slot.state {
             State::Failed(e) => format!("❌ {} — {}", slot.name, e.trim()),
+            State::Disabled => format!("⏸ {} — disabled", slot.name),
             State::Running(h) => {
                 let m = &h.manifest;
                 let mut parts = Vec::new();

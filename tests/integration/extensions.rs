@@ -184,3 +184,84 @@ async fn crashed_extension_is_restarted() {
     fake.push_updates(vec![message(2, json!({"text": "are you there?"}))]);
     fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: still here")).await;
 }
+
+const PROBE: &str = r#"
+import type { August } from "august";
+
+export default function (august: August) {
+  august.on("llm_call", ({ step, system }) => (step === 1 ? { system: system + "\nSTEP-ONE" } : undefined));
+  august.on("llm_result", async ({ step, text, toolCalls, usage }, ctx) => {
+    await ctx.send(`llm_result ${step}: ${toolCalls.map((c) => c.name).join(",")}|${text}|${typeof usage.inputTokens}`);
+  });
+  august.on("session_start", async ({ previous, session }, ctx) => {
+    await ctx.send(`session_start ${previous !== session ? "fresh" : "same"}`);
+  });
+  august.registerCommand("peek", async (args, ctx) => {
+    const { output, isError } = await ctx.callTool("read_file", { path: "note.txt" });
+    return `peek ${args}: ${output} (error: ${isError})`;
+  });
+  august.registerCommand("ask", async (args, ctx) => `llm says: ${await ctx.llm(args, { system: "SYS-X" })}`);
+}
+"#;
+
+fn command(id: i64, text: &str) -> Value {
+    let len = text.split_whitespace().next().unwrap().len();
+    message(id, json!({"text": text, "entities": [{"type": "bot_command", "offset": 0, "length": len}]}))
+}
+
+#[tokio::test]
+async fn extensions_hook_model_calls_call_into_august_and_can_be_disabled() {
+    if !have_bun() {
+        return;
+    }
+    let pick: fn(&str) -> Value = |text| {
+        if text.contains("read the note") {
+            reply_tool("read_file", json!({"path": "note.txt"}))
+        } else {
+            reply_text("forty-two")
+        }
+    };
+    let fake = Fake::start(vec![message(1, json!({"text": "read the note"}))], HashMap::new(), Some(llm(pick))).await;
+    let gw = spawn_gateway_with_home(
+        &fake,
+        LlmSetup::Fake,
+        &[("note.txt", b"note body")],
+        &[("extensions/probe/index.ts", PROBE)],
+    );
+
+    // llm_result fires after every model call of the turn.
+    fake.wait_for(TIMEOUT, |f| {
+        sent_any(f, "llm_result 0: read_file||number") && sent_any(f, "llm_result 1: |Result: note body")
+    })
+    .await;
+    // llm_call changed the system prompt of the second call only.
+    let reqs = fake.llm_requests();
+    let system = |r: &Value| messages(r)[0]["content"].as_str().unwrap().to_string();
+    let second = reqs.iter().find(|r| messages(r).last().unwrap()["role"] == "tool").unwrap();
+    assert!(system(second).ends_with("\nSTEP-ONE"));
+    assert_eq!(reqs.iter().filter(|r| system(r).contains("STEP-ONE")).count(), 1);
+
+    fake.push_updates(vec![command(2, "/new")]);
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "session_start fresh")).await;
+
+    // ctx.callTool runs a built-in tool in the chat; ctx.llm asks the model without tools.
+    fake.push_updates(vec![command(3, "/peek one")]);
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "peek one: note body (error: false)")).await;
+    fake.push_updates(vec![command(4, "/ask what is six times seven")]);
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "llm says: forty-two")).await;
+    let ask = fake.llm_requests().into_iter().find(|r| last_user_text(r).contains("six times seven")).unwrap();
+    assert_eq!(system(&ask), "SYS-X");
+    assert!(ask["tools"].as_array().is_none_or(|t| t.is_empty()));
+
+    // Disabled: listed as paused, not running, remembered on disk; enabling restores it.
+    fake.push_updates(vec![command(5, "/extensions disable probe")]);
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "⏸ probe")).await;
+    assert!(gw.home.join("extensions/probe/disabled").exists());
+    fake.push_updates(vec![command(6, "/peek two")]);
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "Unknown command /peek")).await;
+    fake.push_updates(vec![command(7, "/extensions enable probe")]);
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "✅ probe")).await;
+    assert!(!gw.home.join("extensions/probe/disabled").exists());
+    fake.push_updates(vec![command(8, "/peek three")]);
+    fake.wait_for(TIMEOUT, |f| sent_any(f, "peek three: note body")).await;
+}

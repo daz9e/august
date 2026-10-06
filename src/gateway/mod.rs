@@ -13,13 +13,14 @@ use crate::channels::bus::Bus;
 use crate::db::Db;
 use crate::extensions::{self, Extensions};
 use crate::channels::{Channel, ChatId, Inbound, InboundKind};
-use crate::llm::LlmProvider;
+use crate::llm::{LlmProvider, Message};
 use crate::llm::providers;
 use crate::mcp::Mcp;
 use crate::scheduler::TaskRunner;
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolCtx, ToolRegistry};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
@@ -65,20 +66,30 @@ pub struct Gateway {
     subtasks: std::sync::atomic::AtomicU64,
 }
 
-/// What extensions can do in the gateway: message chats and start turns.
+/// What extensions can do in the gateway: message chats, start turns, run tools, ask the model.
 struct ExtCore(Weak<Gateway>);
+
+impl ExtCore {
+    fn gateway(&self) -> Result<Arc<Gateway>> {
+        self.0.upgrade().ok_or_else(|| anyhow::anyhow!("August is shutting down"))
+    }
+
+    fn channel(&self, channel: &str) -> Result<(Arc<Gateway>, Arc<dyn Channel>)> {
+        let gw = self.gateway()?;
+        let ch = gw.channels.get(channel).cloned().ok_or_else(|| anyhow::anyhow!("channel `{channel}` is not running"))?;
+        Ok((gw, ch))
+    }
+}
 
 #[async_trait]
 impl extensions::Core for ExtCore {
     async fn send(&self, channel: &str, chat: &str, text: &str) -> Result<()> {
-        let gw = self.0.upgrade().ok_or_else(|| anyhow::anyhow!("August is shutting down"))?;
-        let ch = gw.channels.get(channel).ok_or_else(|| anyhow::anyhow!("channel `{channel}` is not running"))?;
+        let (_, ch) = self.channel(channel)?;
         ch.send(chat, text, &[]).await.map(|_| ())
     }
 
     async fn prompt(&self, channel: &str, chat: &str, text: &str) -> Result<()> {
-        let gw = self.0.upgrade().ok_or_else(|| anyhow::anyhow!("August is shutting down"))?;
-        let ch = gw.channels.get(channel).cloned().ok_or_else(|| anyhow::anyhow!("channel `{channel}` is not running"))?;
+        let (gw, ch) = self.channel(channel)?;
         let (id, chat, text) = (ChatId { channel: channel.into(), chat: chat.into() }, chat.to_string(), text.to_string());
         // Queued, not awaited: the caller may be inside a turn of that very chat.
         tokio::spawn(async move {
@@ -87,6 +98,29 @@ impl extensions::Core for ExtCore {
             }
         });
         Ok(())
+    }
+
+    async fn call_tool(&self, channel: &str, chat: &str, name: &str, input: &Value) -> Result<(String, bool)> {
+        let (gw, ch) = self.channel(channel)?;
+        let ctx = ToolCtx {
+            workspace: gw.workspace.clone(),
+            approver: Arc::new(approval::ChatApprover { channel: ch, chat: chat.into(), pending: gw.pending.clone() }),
+            db: gw.db.clone(),
+            origin: Some((channel.into(), chat.into())),
+            files: None,
+            extensions: Some(gw.ext.clone()),
+            unattended: false,
+            delegate: None,
+            notify: None,
+            inbox: None,
+        };
+        Ok(gw.tools().call(name, input, &ctx).await)
+    }
+
+    async fn llm(&self, prompt: &str, system: &str) -> Result<String> {
+        let provider = self.gateway()?.provider.read().unwrap().clone();
+        let c = provider.complete(&crate::util::new_uuid(), system, &[Message::user_text(prompt)], &[]).await?;
+        Ok(c.message.text())
     }
 }
 
@@ -165,6 +199,10 @@ impl Gateway {
         Ok(())
     }
 
+    fn tools(&self) -> ToolRegistry {
+        ToolRegistry::with_defaults().with_extensions(self.ext.clone()).with_mcp(self.mcp.clone())
+    }
+
     async fn chat(&self, id: &ChatId) -> Result<Arc<Chat>> {
         let mut chats = self.chats.lock().await;
         if let Some(chat) = chats.get(id) {
@@ -172,7 +210,7 @@ impl Gateway {
         }
         let agent = Agent::new(
             self.provider.read().unwrap().clone(),
-            ToolRegistry::with_defaults().with_extensions(self.ext.clone()).with_mcp(self.mcp.clone()),
+            self.tools(),
             agent::system_prompt(&self.workspace, SURFACE),
             self.db.clone(),
             &format!("{}:{}", id.channel, id.chat),

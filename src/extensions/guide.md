@@ -49,16 +49,34 @@ leave it unchanged.
 - `tool_result` `{ tool, input, output, isError }`: return `{ output }` to change what the
   model sees.
 - `turn_end` `{ text, reply }`: after a turn; runs in the background, the result is ignored.
+- `llm_call` `{ step, system }`: before every model call of a turn (`step` from 0). Return
+  `{ system }` to use another system prompt for that call only. The prompt is otherwise
+  byte-stable so the provider can cache it; changing it costs that cache, so prefer
+  `before_turn`.
+- `llm_result` `{ step, text, toolCalls: [{ name, input }], usage }`: after every model call.
+- `session_start` `{ previous, session }`: the chat started a new conversation (`/new`).
+- `compaction` `{ before, after }`: older history was summarised (estimated tokens).
+
+`turn_end`, `llm_result`, `session_start` and `compaction` only observe: they run in the
+background and their result is ignored.
 
 `ctx.chat` is `{ channel, chat }` (`cli` in the terminal); `ctx.send(text)` messages that
 chat, `ctx.prompt(text)` queues a new agent turn there. `august.send(channel, chat, text)`
 and `august.prompt(...)` do the same for any chat.
 
+Calling into August:
+- `await ctx.callTool("read_file", { path: "notes.md" })` runs any agent tool (built-in,
+  MCP or another extension's) in that chat, through the `tool_call`/`tool_result` hooks and
+  the usual approvals; returns `{ output, isError }`.
+- `await ctx.llm(prompt, { system })` is one completion on the current model, without tools;
+  returns the text.
+
 ## Rules
 
 - Install or update an extension with `save_extension`; it loads it at once and reports
   errors. Fix and save again until it loads. The user can see all extensions with
-  `/extensions` and reload them with `/reload`.
+  `/extensions`, reload them with `/reload`, and pause one with
+  `/extensions disable <name>` (`enable` starts it again; saving it also re-enables it).
 - Extensions run with full access to the machine, outside the workspace sandbox and the
   shell approvals. Write only what the user asked for.
 - stdout is reserved for the protocol: log with `console.log`/`console.error` (goes to

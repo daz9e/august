@@ -12,7 +12,8 @@ pub use prompt::system_prompt;
 pub use store::SessionStore;
 use compaction::DEFAULT_CONTEXT_TOKENS;
 
-use crate::llm::{Block, LlmProvider, Message, Role, StopReason, Usage};
+use crate::extensions::ChatRef;
+use crate::llm::{Block, Completion, LlmProvider, Message, Role, StopReason, ToolSpec, Usage};
 use crate::tools::{ToolCtx, ToolRegistry};
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -111,7 +112,8 @@ impl Agent {
 
     /// Starts a new conversation; the old one stays searchable.
     pub fn reset(&mut self) -> Result<()> {
-        self.session = self.db.new_session(&self.chat_key)?;
+        let previous = std::mem::replace(&mut self.session, self.db.new_session(&self.chat_key)?);
+        self.notify_ext("session_start", json!({"previous": previous, "session": self.session}), self.chat_ref());
         self.history.clear();
         self.snapshot = None;
         self.stored = 0;
@@ -119,6 +121,55 @@ impl Agent {
         self.last_input_tokens = 0;
         self.compact_retry_at = 0;
         Ok(())
+    }
+
+    /// The chat for hooks outside a turn: `telegram:5#task1` -> `(telegram, 5)`; `None` for `cli`.
+    fn chat_ref(&self) -> ChatRef {
+        let (channel, chat) = self.chat_key.split_once(':')?;
+        Some((channel.into(), chat.split('#').next().unwrap_or(chat).into()))
+    }
+
+    /// Fires an observe-only extension event in the background.
+    fn notify_ext(&self, event: &'static str, data: Value, chat: ChatRef) {
+        if let Some(ext) = self.tools.extensions().filter(|e| e.listens(event)).cloned() {
+            tokio::spawn(async move { ext.emit(event, data, &chat).await });
+        }
+    }
+
+    /// One model call with the `llm_call` / `llm_result` hooks; `step` counts from 0.
+    async fn call_model(
+        &mut self,
+        step: usize,
+        specs: &[ToolSpec],
+        ctx: &ToolCtx,
+        on_event: &mut (dyn FnMut(Event) + Send),
+    ) -> Result<Completion> {
+        let mut system = self.system_now();
+        if let Some(ext) = self.tools.extensions().filter(|e| e.listens("llm_call")) {
+            let data = ext.emit("llm_call", json!({"step": step, "system": system}), &ctx.origin).await;
+            if let Some(s) = data["system"].as_str() {
+                system = s.to_string();
+            }
+        }
+        let completion = {
+            let mut on_text = |t: &str| on_event(Event::Text(t));
+            self.provider.complete_stream(&self.session, &system, &self.history, specs, &mut on_text).await?
+        };
+        self.last_input_tokens = completion.usage.context_tokens() as usize;
+        self.record_usage(&completion.usage);
+        on_event(Event::Usage(&completion.usage));
+        let u = &completion.usage;
+        let calls: Vec<Value> =
+            completion.message.tool_uses().map(|(_, name, input)| json!({"name": name, "input": input})).collect();
+        let data = json!({
+            "step": step,
+            "text": completion.message.text(),
+            "toolCalls": calls,
+            "usage": {"inputTokens": u.input_tokens, "outputTokens": u.output_tokens,
+                      "cacheReadTokens": u.cache_read_tokens, "cacheWriteTokens": u.cache_write_tokens},
+        });
+        self.notify_ext("llm_result", data, ctx.origin.clone());
+        Ok(completion)
     }
 
     /// Drops what a failed or cancelled turn added, so the history stays consistent.
@@ -205,11 +256,7 @@ impl Agent {
                         });
                     }
                 }
-                if let Some(ext) = ext.filter(|e| e.listens("turn_end")) {
-                    let data = json!({"text": text, "reply": reply});
-                    let chat = ctx.origin.clone();
-                    tokio::spawn(async move { ext.emit("turn_end", data, &chat).await });
-                }
+                self.notify_ext("turn_end", json!({"text": text, "reply": reply}), ctx.origin.clone());
             }
             Err(_) => self.rollback_turn(),
         }
@@ -249,16 +296,7 @@ impl Agent {
                 Ok(None) => {}
                 Err(e) => eprintln!("context compaction failed: {e:#}"),
             }
-            let system = self.system_now();
-            let completion = {
-                let mut on_text = |t: &str| on_event(Event::Text(t));
-                self.provider
-                    .complete_stream(&self.session, &system, &self.history, &specs, &mut on_text)
-                    .await?
-            };
-            self.last_input_tokens = completion.usage.context_tokens() as usize;
-            self.record_usage(&completion.usage);
-            on_event(Event::Usage(&completion.usage));
+            let completion = self.call_model(step, &specs, ctx, on_event).await?;
             let reply = completion.message;
             self.history.push(reply.clone());
 
@@ -305,13 +343,7 @@ impl Agent {
         if let Some(last) = self.history.last_mut() {
             last.content.push(Block::Text(note));
         }
-        let system = self.system_now();
-        let completion = {
-            let mut on_text = |t: &str| on_event(Event::Text(t));
-            self.provider.complete_stream(&self.session, &system, &self.history, &[], &mut on_text).await?
-        };
-        self.record_usage(&completion.usage);
-        on_event(Event::Usage(&completion.usage));
+        let completion = self.call_model(limit, &[], ctx, on_event).await?;
         self.history.push(completion.message.clone());
         Ok(completion.message.text())
     }

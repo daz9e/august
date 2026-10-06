@@ -115,7 +115,7 @@ impl Host {
                             let (method, core, stdin) = (method.to_string(), core.clone(), stdin.clone());
                             tokio::spawn(async move {
                                 let reply = match serve(core.as_deref(), &method, &msg["params"]).await {
-                                    Ok(()) => json!({"id": msg["id"], "result": null}),
+                                    Ok(result) => json!({"id": msg["id"], "result": result}),
                                     Err(e) => json!({"id": msg["id"], "error": {"message": format!("{e:#}")}}),
                                 };
                                 write_line(&stdin, &reply).await.ok();
@@ -179,14 +179,19 @@ impl Host {
 }
 
 /// A call from the extension into August.
-async fn serve(core: Option<&dyn Core>, method: &str, params: &Value) -> anyhow::Result<()> {
+async fn serve(core: Option<&dyn Core>, method: &str, params: &Value) -> anyhow::Result<Value> {
     let core = core.ok_or_else(|| anyhow::anyhow!("August is not ready yet"))?;
     let arg = |k: &str| params[k].as_str().ok_or_else(|| anyhow::anyhow!("missing string `{k}`"));
-    match method {
-        "send" => core.send(arg("channel")?, arg("chat")?, arg("text")?).await,
-        "prompt" => core.prompt(arg("channel")?, arg("chat")?, arg("text")?).await,
+    Ok(match method {
+        "send" => core.send(arg("channel")?, arg("chat")?, arg("text")?).await.map(|_| Value::Null)?,
+        "prompt" => core.prompt(arg("channel")?, arg("chat")?, arg("text")?).await.map(|_| Value::Null)?,
+        "callTool" => {
+            let (output, is_error) = core.call_tool(arg("channel")?, arg("chat")?, arg("name")?, &params["input"]).await?;
+            json!({"output": output, "isError": is_error})
+        }
+        "llm" => json!(core.llm(arg("prompt")?, params["system"].as_str().filter(|s| !s.is_empty()).unwrap_or("You are a helpful assistant.")).await?),
         other => anyhow::bail!("unknown method {other}"),
-    }
+    })
 }
 
 fn parse_manifest(params: &Value) -> Manifest {

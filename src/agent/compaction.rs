@@ -60,7 +60,9 @@ impl Agent {
         self.stored = self.history.len();
         self.last_input_tokens = 0;
         self.snapshot = None; // the cached prefix is gone anyway; pick up new facts
-        Ok(Some((before, self.estimate_tokens())))
+        let after = self.estimate_tokens();
+        self.notify_ext("compaction", serde_json::json!({"before": before, "after": after}), self.chat_ref());
+        Ok(Some((before, after)))
     }
 
     fn prune_old_blocks(&mut self) -> bool {

@@ -12,7 +12,13 @@ declare module "august" {
     send(text: string): Promise<void>;
     /** Queues a new agent turn in that chat with `text` as the user message. */
     prompt(text: string): Promise<void>;
+    /** Runs any agent tool (built-in, MCP or extension) in that chat, with its hooks and approvals. */
+    callTool(name: string, input?: object): Promise<{ output: string; isError: boolean }>;
+    /** One completion on the configured model, without tools; returns the text. */
+    llm(prompt: string, opts?: { system?: string }): Promise<string>;
   }
+
+  export type Usage = { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
 
   /** What each event handler receives. */
   export interface Events {
@@ -26,6 +32,14 @@ declare module "august" {
     tool_result: { tool: string; input: any; output: string; isError: boolean };
     /** A turn finished with `reply` (observe only; runs in the background). */
     turn_end: { text: string; reply: string };
+    /** Before each model call of a turn; `step` counts from 0, `system` is the full prompt. */
+    llm_call: { step: number; system: string };
+    /** After each model call (observe only; background). */
+    llm_result: { step: number; text: string; toolCalls: { name: string; input: any }[]; usage: Usage };
+    /** The chat started a new conversation, e.g. with /new (observe only; background). */
+    session_start: { previous: string; session: string };
+    /** Older history was summarised; estimated tokens (observe only; background). */
+    compaction: { before: number; after: number };
   }
 
   /** What a handler may return; returned fields replace the event's data. */
@@ -37,6 +51,11 @@ declare module "august" {
     tool_call: { input?: any; block?: string };
     tool_result: { output?: string; isError?: boolean };
     turn_end: void;
+    /** `system` replaces the system prompt for this one call (breaks the prompt cache). */
+    llm_call: { system?: string };
+    llm_result: void;
+    session_start: void;
+    compaction: void;
   }
 
   export interface Tool<P = any> {

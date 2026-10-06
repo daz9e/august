@@ -8,6 +8,7 @@ use crate::mcp::Mcp;
 use crate::tools::{Approver, ToolCtx, ToolRegistry};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde_json::Value;
 use std::io::Write;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines, Stdin};
@@ -28,7 +29,14 @@ impl Approver for CliApprover {
 }
 
 /// Extensions in the terminal: messages are printed, turns can't be queued.
-struct TerminalCore;
+struct TerminalCore {
+    provider: Arc<dyn crate::llm::LlmProvider>,
+    workspace: std::path::PathBuf,
+    db: Arc<Db>,
+    ext: std::sync::Weak<Extensions>,
+    mcp: Arc<Mcp>,
+    stdin: StdinLines,
+}
 
 #[async_trait]
 impl extensions::Core for TerminalCore {
@@ -39,6 +47,29 @@ impl extensions::Core for TerminalCore {
 
     async fn prompt(&self, _channel: &str, _chat: &str, _text: &str) -> Result<()> {
         anyhow::bail!("queuing turns is not supported in the terminal")
+    }
+
+    async fn call_tool(&self, _channel: &str, _chat: &str, name: &str, input: &Value) -> Result<(String, bool)> {
+        let ext = self.ext.upgrade().ok_or_else(|| anyhow::anyhow!("August is shutting down"))?;
+        let ctx = ToolCtx {
+            workspace: self.workspace.clone(),
+            approver: Arc::new(CliApprover(self.stdin.clone())),
+            db: self.db.clone(),
+            origin: None,
+            files: None,
+            extensions: Some(ext.clone()),
+            unattended: false,
+            delegate: None,
+            notify: None,
+            inbox: None,
+        };
+        let tools = ToolRegistry::with_defaults().with_extensions(ext).with_mcp(self.mcp.clone());
+        Ok(tools.call(name, input, &ctx).await)
+    }
+
+    async fn llm(&self, prompt: &str, system: &str) -> Result<String> {
+        let messages = [crate::llm::Message::user_text(prompt)];
+        Ok(self.provider.complete(&crate::util::new_uuid(), system, &messages, &[]).await?.message.text())
     }
 }
 
@@ -79,10 +110,17 @@ pub async fn run() -> Result<()> {
     let provider = providers::build(selection).await?;
     let db = Db::open()?;
     let ext = Extensions::new(extensions::dir());
-    ext.set_core(Arc::new(TerminalCore));
-    let status = ext.reload().await;
     let mcp = Mcp::start().await;
     let stdin: StdinLines = Arc::new(Mutex::new(BufReader::new(tokio::io::stdin()).lines()));
+    ext.set_core(Arc::new(TerminalCore {
+        provider: provider.clone(),
+        workspace: workspace.clone(),
+        db: db.clone(),
+        ext: Arc::downgrade(&ext),
+        mcp: mcp.clone(),
+        stdin: stdin.clone(),
+    }));
+    let status = ext.reload().await;
     let ctx = ToolCtx {
         workspace: workspace.clone(),
         approver: Arc::new(CliApprover(stdin.clone())),
@@ -104,7 +142,7 @@ pub async fn run() -> Result<()> {
     )?;
 
     println!(
-        "august · {provider_id} · {} · workspace {}\n/reset — new session, /compact — summarise old messages, /usage — tokens used, /extensions, /reload, /mcp, /exit — quit",
+        "august · {provider_id} · {} · workspace {}\n/reset — new session, /compact — summarise old messages, /usage — tokens used, /extensions [enable|disable <name>], /reload, /mcp, /exit — quit",
         provider.name(),
         workspace.display()
     );
@@ -137,7 +175,9 @@ pub async fn run() -> Result<()> {
                 Ok(r) => println!("{r}"),
                 Err(e) => eprintln!("error: {e:#}"),
             },
-            "/extensions" => println!("{}", ext.status()),
+            cmd if cmd.split_whitespace().next() == Some("/extensions") => {
+                println!("{}", ext.command(&cmd["/extensions".len()..]).await)
+            }
             "/reload" => println!("{}", ext.reload().await),
             "/mcp" => println!("{}", mcp.status()),
             input => {
