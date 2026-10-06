@@ -193,6 +193,16 @@ pub fn reply_tool(name: &str, args: Value) -> Value {
     }]}, "finish_reason": "tool_calls"}]})
 }
 
+/// Adds a chat-completions `usage` object to a fake reply (`prompt` includes `cached`).
+pub fn with_usage(mut reply: Value, prompt: u64, completion: u64, cached: u64) -> Value {
+    reply["usage"] = json!({
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "prompt_tokens_details": {"cached_tokens": cached},
+    });
+    reply
+}
+
 /// The `august gateway` process, killed on drop.
 pub struct Gateway {
     child: Child,

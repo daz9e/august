@@ -10,6 +10,7 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("new", "Start a fresh conversation"),
     CommandSpec::new("stop", "Cancel the current task"),
     CommandSpec::new("compact", "Summarise older messages to free up context"),
+    CommandSpec::new("usage", "Show token usage of this conversation and today"),
     CommandSpec::new("memory", "Show what I remember about you"),
     CommandSpec::new("tasks", "List scheduled tasks"),
     CommandSpec::new("model", "Show or change the model"),
@@ -83,6 +84,7 @@ impl Gateway {
                     facts.iter().map(|f| format!("#{} {}", f.id, f.text)).collect::<Vec<_>>().join("\n")
                 }
             }
+            "usage" => self.db.usage_report(&format!("{}:{}", id.channel, id.chat))?,
             "tasks" => crate::tools::format_tasks(&self.db.tasks(Some((&id.channel, &id.chat)))?),
             "status" => format!(
                 "Model: `{}`\nWorkspace: `{}`\nBusy: {}",

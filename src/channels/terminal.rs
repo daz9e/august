@@ -56,8 +56,8 @@ fn print_event(e: Event) {
         }
         Event::Compacted { before, after } => eprintln!("  · context compacted ~{before} → ~{after} tokens"),
         Event::Usage(u) => eprintln!(
-            "  · tokens in {} (cache {}) / out {}",
-            u.input_tokens, u.cache_read_tokens, u.output_tokens
+            "  · tokens in {} (cache read {}, write {}) / out {}",
+            u.input_tokens, u.cache_read_tokens, u.cache_write_tokens, u.output_tokens
         ),
     }
 }
@@ -85,12 +85,12 @@ pub async fn run() -> Result<()> {
         provider.clone(),
         ToolRegistry::with_defaults().with_extensions(ext.clone()),
         agent::system_prompt(&workspace, "The user reads replies in a terminal (plain text)."),
-        db,
+        db.clone(),
         "cli",
     )?;
 
     println!(
-        "august · {provider_id} · {} · workspace {}\n/reset — new session, /compact — summarise old messages, /extensions, /reload, /exit — quit",
+        "august · {provider_id} · {} · workspace {}\n/reset — new session, /compact — summarise old messages, /usage — tokens used, /extensions, /reload, /exit — quit",
         provider.name(),
         workspace.display()
     );
@@ -114,6 +114,10 @@ pub async fn run() -> Result<()> {
             "/compact" => match agent.compact(true).await {
                 Ok(Some((b, a))) => println!("compacted: ~{b} → ~{a} tokens"),
                 Ok(None) => println!("nothing to compact"),
+                Err(e) => eprintln!("error: {e:#}"),
+            },
+            "/usage" => match db.usage_report("cli") {
+                Ok(r) => println!("{r}"),
                 Err(e) => eprintln!("error: {e:#}"),
             },
             "/extensions" => println!("{}", ext.status()),

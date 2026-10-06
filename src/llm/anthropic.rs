@@ -168,6 +168,9 @@ impl StreamState {
         if let Some(n) = u["cache_read_input_tokens"].as_u64() {
             self.usage.cache_read_tokens = n;
         }
+        if let Some(n) = u["cache_creation_input_tokens"].as_u64() {
+            self.usage.cache_write_tokens = n;
+        }
     }
 
     fn finish(self) -> Completion {
@@ -303,7 +306,7 @@ mod tests {
     #[test]
     fn accumulates_stream() {
         let events = [
-            json!({"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":4,"output_tokens":1}}}),
+            json!({"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":4,"cache_creation_input_tokens":3,"output_tokens":1}}}),
             json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
             json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hm"}}),
             json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}),
@@ -323,7 +326,7 @@ mod tests {
         let c = st.finish();
         assert_eq!(got, "Hello");
         assert_eq!(c.stop_reason, StopReason::ToolUse);
-        assert_eq!((c.usage.input_tokens, c.usage.output_tokens, c.usage.cache_read_tokens), (10, 42, 4));
+        assert_eq!((c.usage.input_tokens, c.usage.output_tokens, c.usage.cache_read_tokens, c.usage.cache_write_tokens), (10, 42, 4, 3));
         match &c.message.content[0] {
             Block::Opaque(v) => {
                 assert_eq!(v["thinking"], "hm");

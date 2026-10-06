@@ -373,6 +373,8 @@ impl<A: TokenSource> Responses<A> {
             (other, _) => StopReason::Other(other.unwrap_or("unknown").to_string()),
         };
         let u = &resp["usage"];
+        // `input_tokens` includes the cached part.
+        let cached = u["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
         Ok(Completion {
             message: Message {
                 role: Role::Assistant,
@@ -380,11 +382,10 @@ impl<A: TokenSource> Responses<A> {
             },
             stop_reason,
             usage: Usage {
-                input_tokens: u["input_tokens"].as_u64().unwrap_or(0),
+                input_tokens: u["input_tokens"].as_u64().unwrap_or(0).saturating_sub(cached),
                 output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
-                cache_read_tokens: u["input_tokens_details"]["cached_tokens"]
-                    .as_u64()
-                    .unwrap_or(0),
+                cache_read_tokens: cached,
+                cache_write_tokens: 0,
             },
         })
     }

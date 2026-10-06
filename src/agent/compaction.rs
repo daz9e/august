@@ -125,7 +125,11 @@ impl Agent {
             None => format!("Transcript to summarise:\n\n{transcript}"),
         };
         let ask = vec![Message::user_text(ask)];
-        let summary = match self.provider.complete(&self.session, SUMMARY_SYSTEM, &ask, &[]).await {
+        let reply = self.provider.complete(&self.session, SUMMARY_SYSTEM, &ask, &[]).await;
+        if let Ok(c) = &reply {
+            self.record_usage(&c.usage);
+        }
+        let summary = match reply {
             Ok(c) if !c.message.text().trim().is_empty() => c.message.text(),
             Ok(_) => anyhow::bail!("the model returned an empty summary"),
             Err(e) => {

@@ -147,6 +147,9 @@ impl Review {
         let mut changes = Vec::new();
         for _ in 0..MAX_STEPS {
             let completion = self.provider.complete(&self.session, &self.system, &self.history, &self.specs).await?;
+            if let Err(e) = self.ctx.db.record_usage(&self.session, &completion.usage) {
+                eprintln!("memory: could not record token usage: {e:#}");
+            }
             let reply = completion.message;
             self.history.push(reply.clone());
             if !matches!(completion.stop_reason, StopReason::ToolUse) || reply.tool_uses().next().is_none() {

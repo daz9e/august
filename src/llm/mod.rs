@@ -170,11 +170,21 @@ pub enum StopReason {
     Other(String),
 }
 
-#[derive(Debug, Clone, Default)]
+/// Tokens of one model call (or a sum of calls). `input_tokens` excludes the
+/// cached part, so the four counts add up to everything billed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
+impl Usage {
+    /// Everything the model read: uncached, cached and newly cached input.
+    pub fn context_tokens(&self) -> u64 {
+        self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
+    }
 }
 
 #[derive(Debug, Clone)]

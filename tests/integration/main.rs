@@ -10,3 +10,4 @@ mod memory;
 mod compaction;
 mod skills;
 mod review;
+mod usage;

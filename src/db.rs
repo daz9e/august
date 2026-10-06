@@ -1,8 +1,8 @@
 //! SQLite storage in `~/.august/august.db`: conversations (with FTS5 search),
-//! long-term facts and scheduled tasks. Calls are short, so one mutex-guarded
+//! token usage, long-term facts and scheduled tasks. Calls are short, so one mutex-guarded
 //! connection is enough.
 
-use crate::llm::{Block, Message};
+use crate::llm::{Block, Message, Usage};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
@@ -62,6 +62,17 @@ CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, id);
 CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(
     text, session_id UNINDEXED, role UNINDEXED, at UNINDEXED
 );
+CREATE TABLE IF NOT EXISTS usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    input INTEGER NOT NULL,
+    output INTEGER NOT NULL,
+    cache_read INTEGER NOT NULL,
+    cache_write INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_session ON usage(session_id);
+CREATE INDEX IF NOT EXISTS usage_time ON usage(created_at);
 CREATE TABLE IF NOT EXISTS facts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     text TEXT NOT NULL,
@@ -111,15 +122,7 @@ impl Db {
 
     /// The newest session of `chat_key` (created if there is none) and its live messages.
     pub fn resume_session(&self, chat_key: &str) -> Result<(String, Vec<Message>)> {
-        let existing: Option<String> = self
-            .conn()
-            .query_row(
-                "SELECT id FROM sessions WHERE chat_key = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                [chat_key],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let id = match existing {
+        let id = match self.latest_session(chat_key)? {
             Some(id) => id,
             None => return Ok((self.new_session(chat_key)?, Vec::new())),
         };
@@ -132,6 +135,18 @@ impl Db {
             .filter_map(|(role, content)| Message::from_parts(&role, &content))
             .collect();
         Ok((id, msgs))
+    }
+
+    /// The chat's current session (the newest one).
+    fn latest_session(&self, chat_key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT id FROM sessions WHERE chat_key = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                [chat_key],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     pub fn new_session(&self, chat_key: &str) -> Result<String> {
@@ -178,6 +193,64 @@ impl Db {
             })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(hits)
+    }
+
+    // ---- token usage ---------------------------------------------------
+
+    pub fn record_usage(&self, session: &str, u: &Usage) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO usage (session_id, input, output, cache_read, cache_write, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                session,
+                u.input_tokens as i64,
+                u.output_tokens as i64,
+                u.cache_read_tokens as i64,
+                u.cache_write_tokens as i64,
+                now()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Number of model calls and their summed usage, for one session or (`None`) all
+    /// sessions, since `since` (unix seconds).
+    fn usage_total(&self, session: Option<&str>, since: i64) -> Result<(u64, Usage)> {
+        let row = self.conn().query_row(
+            "SELECT COUNT(*), TOTAL(input), TOTAL(output), TOTAL(cache_read), TOTAL(cache_write) FROM usage
+             WHERE (?1 IS NULL OR session_id = ?1) AND created_at >= ?2",
+            params![session, since],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?, r.get::<_, f64>(3)?, r.get::<_, f64>(4)?)),
+        )?;
+        let usage = Usage {
+            input_tokens: row.1 as u64,
+            output_tokens: row.2 as u64,
+            cache_read_tokens: row.3 as u64,
+            cache_write_tokens: row.4 as u64,
+        };
+        Ok((row.0 as u64, usage))
+    }
+
+    /// `/usage`: totals of the chat's current session and today's across all chats.
+    pub fn usage_report(&self, chat_key: &str) -> Result<String> {
+        let session = self.latest_session(chat_key)?.unwrap_or_default();
+        let midnight = chrono::Local::now()
+            .date_naive()
+            .and_time(chrono::NaiveTime::MIN)
+            .and_local_timezone(chrono::Local)
+            .earliest()
+            .map_or(0, |t| t.timestamp());
+        let line = |(calls, u): (u64, Usage)| {
+            format!(
+                "{calls} calls · in {} · cache read {} · cache write {} · out {}",
+                u.input_tokens, u.cache_read_tokens, u.cache_write_tokens, u.output_tokens
+            )
+        };
+        Ok(format!(
+            "This session: {}\nToday, all chats: {}",
+            line(self.usage_total(Some(&session), 0)?),
+            line(self.usage_total(None, midnight)?)
+        ))
     }
 
     // ---- facts ---------------------------------------------------------
@@ -331,6 +404,9 @@ impl crate::agent::SessionStore for Db {
     }
     fn facts(&self) -> Result<Vec<Fact>> {
         Db::facts(self)
+    }
+    fn record_usage(&self, session: &str, usage: &Usage) -> Result<()> {
+        Db::record_usage(self, session, usage)
     }
 }
 

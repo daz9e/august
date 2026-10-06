@@ -90,6 +90,13 @@ impl Agent {
         })
     }
 
+    /// Stores the tokens of a model call; accounting never fails a turn.
+    fn record_usage(&self, usage: &Usage) {
+        if let Err(e) = self.db.record_usage(&self.session, usage) {
+            eprintln!("memory: could not record token usage: {e:#}");
+        }
+    }
+
     pub fn set_provider(&mut self, provider: Arc<dyn LlmProvider>) {
         self.provider = provider;
     }
@@ -225,7 +232,8 @@ impl Agent {
                     .complete_stream(&self.session, &system, &self.history, &specs, &mut on_text)
                     .await?
             };
-            self.last_input_tokens = (completion.usage.input_tokens + completion.usage.cache_read_tokens) as usize;
+            self.last_input_tokens = completion.usage.context_tokens() as usize;
+            self.record_usage(&completion.usage);
             on_event(Event::Usage(&completion.usage));
             let reply = completion.message;
             self.history.push(reply.clone());

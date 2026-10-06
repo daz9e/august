@@ -108,12 +108,13 @@ fn finish_reason(r: Option<&str>) -> StopReason {
 }
 
 fn usage_of(u: &Value) -> Usage {
+    // `prompt_tokens` includes the cached part.
+    let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
     Usage {
-        input_tokens: u["prompt_tokens"].as_u64().unwrap_or(0),
+        input_tokens: u["prompt_tokens"].as_u64().unwrap_or(0).saturating_sub(cached),
         output_tokens: u["completion_tokens"].as_u64().unwrap_or(0),
-        cache_read_tokens: u["prompt_tokens_details"]["cached_tokens"]
-            .as_u64()
-            .unwrap_or(0),
+        cache_read_tokens: cached,
+        cache_write_tokens: 0,
     }
 }
 
@@ -357,7 +358,7 @@ mod tests {
         let c = st.finish();
         assert_eq!(got, "Hi there");
         assert_eq!(c.stop_reason, StopReason::ToolUse);
-        assert_eq!((c.usage.input_tokens, c.usage.output_tokens, c.usage.cache_read_tokens), (7, 3, 2));
+        assert_eq!((c.usage.input_tokens, c.usage.output_tokens, c.usage.cache_read_tokens), (5, 3, 2));
         assert!(matches!(&c.message.content[0], Block::Text(t) if t == "Hi there"));
         assert!(matches!(&c.message.content[1], Block::ToolUse { id, input, .. } if id == "c1" && input["a"] == 1));
     }
