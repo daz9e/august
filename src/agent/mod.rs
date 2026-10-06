@@ -17,7 +17,12 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-const MAX_STEPS: usize = 40;
+/// Model calls one turn may make (override: `AUGUST_MAX_STEPS`).
+const MAX_STEPS: usize = 150;
+
+fn max_steps() -> usize {
+    std::env::var("AUGUST_MAX_STEPS").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(MAX_STEPS)
+}
 pub enum Event<'a> {
     /// A fragment of the model's reply, as it streams in.
     Text(&'a str),
@@ -223,7 +228,8 @@ impl Agent {
         self.history.push(user);
         let specs = self.tools.specs();
 
-        for step in 0..MAX_STEPS {
+        let limit = max_steps();
+        for step in 0..limit {
             if step > 0 {
                 on_event(Event::Step);
                 // Messages the user sent meanwhile join the tool results.
@@ -289,7 +295,24 @@ impl Agent {
                 content: results,
             });
         }
-        Ok(format!("[stopped: hit the {MAX_STEPS}-step limit]"))
+        // Out of steps: one last call without tools for a report instead of a dead end.
+        on_event(Event::Step);
+        let note = format!(
+            "[Step limit reached: you used all {limit} steps of this turn. Don't call tools. Tell the \
+             user briefly what you did, what is left, and how to continue.]"
+        );
+        if let Some(last) = self.history.last_mut() {
+            last.content.push(Block::Text(note));
+        }
+        let system = self.system_now();
+        let completion = {
+            let mut on_text = |t: &str| on_event(Event::Text(t));
+            self.provider.complete_stream(&self.session, &system, &self.history, &[], &mut on_text).await?
+        };
+        self.record_usage(&completion.usage);
+        on_event(Event::Usage(&completion.usage));
+        self.history.push(completion.message.clone());
+        Ok(completion.message.text())
     }
 }
 
