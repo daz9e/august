@@ -18,7 +18,7 @@ pub fn system_prompt(workspace: &std::path::Path, surface: &str) -> String {
          user's local time; it is added automatically, don't copy it into replies.\n\
          Tasks: use `schedule_task` for reminders and recurring jobs.\n\
          Skills: after solving a non-trivial, repeatable task, offer to save the procedure with \
-         `save_skill`.\n{surface}",
+         `save_skill`; when a skill turns out wrong or incomplete, fix it with `edit_skill`.\n{surface}",
         ws = workspace.display()
     )
 }

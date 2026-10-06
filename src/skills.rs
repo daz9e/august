@@ -115,17 +115,26 @@ pub fn load(name: &str) -> Result<String> {
         .with_context(|| format!("no skill named `{name}`"))?;
     let (_, body) = parse(&text);
     let mut out = body.to_string();
-    let extra: Vec<String> = std::fs::read_dir(&folder)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name() != "SKILL.md")
-        .map(|e| e.path().display().to_string())
-        .collect();
+    let mut extra = Vec::new();
+    files_under(&folder, &mut extra);
+    extra.retain(|p| p.file_name().is_none_or(|n| n != "SKILL.md") || p.parent() != Some(folder.as_path()));
+    extra.sort();
+    let extra: Vec<String> = extra.iter().map(|p| p.display().to_string()).collect();
     if !extra.is_empty() {
-        out += &format!("\n\n[Other files of this skill]\n{}", extra.join("\n"));
+        out += &format!("\n\n[Supporting files of this skill; read them with read_file when needed]\n{}", extra.join("\n"));
     }
     Ok(out)
+}
+
+fn files_under(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    for e in std::fs::read_dir(dir).into_iter().flatten().filter_map(|e| e.ok()) {
+        let path = e.path();
+        if path.is_dir() {
+            files_under(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
 }
 
 /// Creates or overwrites a skill.
@@ -144,6 +153,71 @@ pub fn save(name: &str, description: &str, body: &str) -> Result<PathBuf> {
     let path = folder.join("SKILL.md");
     std::fs::write(&path, format!("---\nname: {name}\ndescription: {}\n---\n{}\n", description.trim(), body.trim()))?;
     Ok(path)
+}
+
+/// Folder of a skill the agent may change (not a built-in one).
+fn own_folder(name: &str) -> Result<PathBuf> {
+    if !valid_name(name) {
+        bail!("invalid skill name `{name}`");
+    }
+    if builtin().iter().any(|b| b.0 == name) {
+        bail!("`{name}` is a built-in skill and can't be changed");
+    }
+    let folder = dir().join(name);
+    if !folder.join("SKILL.md").is_file() {
+        bail!("no skill named `{name}`");
+    }
+    Ok(folder)
+}
+
+/// Replaces the one occurrence of `old` in a skill's SKILL.md with `new`.
+pub fn patch(name: &str, old: &str, new: &str) -> Result<()> {
+    let path = own_folder(name)?.join("SKILL.md");
+    let text = std::fs::read_to_string(&path)?;
+    match text.matches(old).count() {
+        0 => bail!("`old` was not found in {name}/SKILL.md; load the skill and copy the text exactly"),
+        1 => {}
+        n => bail!("`old` occurs {n} times in {name}/SKILL.md; include more context to make it unique"),
+    }
+    let patched = text.replacen(old, new, 1);
+    if parse(&patched).0.is_none_or(|d| d.is_empty()) {
+        bail!("the patch would break the skill's frontmatter (name/description)");
+    }
+    std::fs::write(&path, patched)?;
+    Ok(())
+}
+
+/// Moves a skill to `skills/.archive/` (recoverable). Returns where it went.
+pub fn archive(name: &str) -> Result<PathBuf> {
+    let folder = own_folder(name)?;
+    let archive = dir().join(".archive");
+    std::fs::create_dir_all(&archive)?;
+    let to = archive.join(format!("{name}-{}", crate::db::now()));
+    std::fs::rename(&folder, &to)?;
+    Ok(to)
+}
+
+/// `references/x.md`-style path inside a skill folder; anything else is refused.
+fn support_path(name: &str, file: &str) -> Result<PathBuf> {
+    let ok_dir = ["references/", "templates/", "scripts/"].iter().any(|d| file.starts_with(d));
+    let parts_ok = file.split('/').all(|p| !p.is_empty() && p != "." && p != "..");
+    if !ok_dir || !parts_ok || file.contains('\\') {
+        bail!("supporting files go under references/, templates/ or scripts/ (e.g. references/api.md)");
+    }
+    Ok(own_folder(name)?.join(file))
+}
+
+/// Creates or replaces a supporting file of a skill.
+pub fn write_file(name: &str, file: &str, content: &str) -> Result<PathBuf> {
+    let path = support_path(name, file)?;
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::write(&path, content)?;
+    Ok(path)
+}
+
+pub fn remove_file(name: &str, file: &str) -> Result<()> {
+    let path = support_path(name, file)?;
+    std::fs::remove_file(&path).with_context(|| format!("no file {file} in skill `{name}`"))
 }
 
 #[cfg(test)]

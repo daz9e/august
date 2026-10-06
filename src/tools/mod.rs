@@ -78,6 +78,7 @@ impl ToolRegistry {
                 Box::new(memory::SearchHistory),
                 Box::new(skills::LoadSkill),
                 Box::new(skills::SaveSkill),
+                Box::new(skills::EditSkill),
                 Box::new(tasks::ScheduleTask),
                 Box::new(tasks::ListTasks),
                 Box::new(tasks::CancelTask),
