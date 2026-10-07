@@ -1,6 +1,6 @@
 //! Turns an agent's event stream into sent and edited chat messages.
 
-use crate::messengers::Messenger;
+use crate::messengers::{Messenger, OutMessage};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,11 +26,14 @@ pub(super) fn tool_line(name: &str, input: &serde_json::Value) -> String {
 
 /// Turns the stream of `Ui` items into sent/edited messages, throttled to the channel's limits.
 pub(super) async fn render(channel: Arc<dyn Messenger>, chat: String, mut rx: mpsc::UnboundedReceiver<Ui>) {
-    let limits = channel.limits();
+    let caps = channel.describe().capabilities;
+    let interval = Duration::from_millis(caps.edit_interval_ms);
+    // Without edits the reply goes out once, when it is complete.
+    let live = caps.edit;
     let mut buf = String::new();
     let mut sent: Vec<(String, String)> = Vec::new(); // (message id, markdown shown)
     let mut dirty = false;
-    let mut last = Instant::now() - limits.edit_interval;
+    let mut last = Instant::now() - interval;
 
     let sep = |buf: &mut String| {
         if !buf.is_empty() && !buf.ends_with("\n\n") {
@@ -39,8 +42,8 @@ pub(super) async fn render(channel: Arc<dyn Messenger>, chat: String, mut rx: mp
     };
 
     loop {
-        let wait = limits.edit_interval.saturating_sub(last.elapsed());
-        match tokio::time::timeout(if dirty { wait } else { Duration::from_secs(3600) }, rx.recv()).await {
+        let wait = interval.saturating_sub(last.elapsed());
+        match tokio::time::timeout(if dirty && live { wait } else { Duration::from_secs(3600) }, rx.recv()).await {
             Ok(Some(ui)) => {
                 match ui {
                     Ui::Text(t) => buf.push_str(&t),
@@ -52,7 +55,7 @@ pub(super) async fn render(channel: Arc<dyn Messenger>, chat: String, mut rx: mp
                     }
                     Ui::File { path, caption, done } => {
                         if dirty {
-                            flush(&*channel, &chat, &buf, &mut sent, limits.max_len).await;
+                            flush(&*channel, &chat, &buf, &mut sent, caps.max_len).await;
                         }
                         done.send(channel.send_file(&chat, &path, &caption).await).ok();
                         buf.clear();
@@ -63,7 +66,7 @@ pub(super) async fn render(channel: Arc<dyn Messenger>, chat: String, mut rx: mp
                     }
                 }
                 dirty = true;
-                if last.elapsed() < limits.edit_interval {
+                if !live || last.elapsed() < interval {
                     continue;
                 }
             }
@@ -71,13 +74,13 @@ pub(super) async fn render(channel: Arc<dyn Messenger>, chat: String, mut rx: mp
             Err(_) => {}
         }
         if dirty {
-            flush(&*channel, &chat, &buf, &mut sent, limits.max_len).await;
+            flush(&*channel, &chat, &buf, &mut sent, caps.max_len).await;
             dirty = false;
             last = Instant::now();
         }
     }
     if dirty {
-        flush(&*channel, &chat, &buf, &mut sent, limits.max_len).await;
+        flush(&*channel, &chat, &buf, &mut sent, caps.max_len).await;
     }
 }
 
@@ -89,13 +92,13 @@ async fn flush(channel: &dyn Messenger, chat: &str, buf: &str, sent: &mut Vec<(S
     for (i, chunk) in crate::messengers::split_markdown(text, max).into_iter().enumerate() {
         if let Some((id, shown)) = sent.get_mut(i) {
             if *shown != chunk {
-                match channel.edit(chat, id, &chunk, &[]).await {
+                match channel.edit(chat, id, &OutMessage::text(chunk.clone())).await {
                     Ok(()) => *shown = chunk,
                     Err(e) => eprintln!("{}: edit failed: {e:#}", channel.id()),
                 }
             }
         } else {
-            match channel.send(chat, &chunk, &[]).await {
+            match channel.send(chat, &OutMessage::text(chunk.clone())).await {
                 Ok(id) => sent.push((id, chunk)),
                 Err(e) => eprintln!("{}: send failed: {e:#}", channel.id()),
             }

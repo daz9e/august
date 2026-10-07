@@ -46,7 +46,7 @@ async fn agent_patches_extends_and_archives_a_skill() {
     let approve_all = |f: &Fake| {
         for req in f.calls("sendMessage") {
             let data = req.json()["reply_markup"]["inline_keyboard"][0][0]["callback_data"].as_str().map(String::from);
-            if let Some(data) = data.filter(|d| d.starts_with("ap:")) {
+            if let Some(data) = data.filter(|d| !d.is_empty()) {
                 let mut seen = pressed.lock().unwrap();
                 if seen.insert(data.clone()) {
                     f.push_updates(vec![button_press(100 + seen.len() as i64, &data)]);

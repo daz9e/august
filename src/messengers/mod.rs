@@ -57,8 +57,9 @@ pub enum InboundKind {
     Message { text: String, files: Vec<Attachment> },
     /// `/name args` (without the slash).
     Command { name: String, args: String },
-    /// A button press; `data` is what the button was created with.
-    Action { id: String, data: String },
+    /// A press of the button with this `id` (given when the message was sent); `ack` is
+    /// the messenger's handle for confirming it (`Messenger::ack`).
+    Press { button: String, ack: String },
 }
 
 #[derive(Debug, Clone)]
@@ -68,10 +69,65 @@ pub struct Inbound {
     pub kind: InboundKind,
 }
 
-#[derive(Debug, Clone)]
+/// A button under a message. `id` is opaque to the messenger: a press comes back with it.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Button {
+    pub id: String,
     pub label: String,
-    pub data: String,
+}
+
+/// A message to send, in the one format every messenger takes and renders its own way.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OutMessage {
+    /// Markdown.
+    pub text: String,
+    pub buttons: Vec<Button>,
+}
+
+impl OutMessage {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self { text: text.into(), buttons: Vec::new() }
+    }
+}
+
+/// What a messenger tells about itself. The core (and extensions) decide by it instead of
+/// assuming what a messenger can do.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Description {
+    pub id: String,
+    /// Human name, e.g. "Telegram".
+    pub name: String,
+    pub capabilities: Capabilities,
+    /// Anything else the messenger offers, free form.
+    pub extra: serde_json::Value,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Capabilities {
+    /// Markdown is rendered (else shown as is).
+    pub markdown: bool,
+    /// Longest message, in Markdown characters.
+    pub max_len: usize,
+    /// Buttons under one message, at most (0: none).
+    pub buttons: usize,
+    /// Sent messages can be edited, so replies stream in place.
+    pub edit: bool,
+    /// Shortest gap between two edits of one message, in milliseconds.
+    pub edit_interval_ms: u64,
+    /// Messages from the user can carry files.
+    pub files_in: bool,
+    /// Files can be sent to the user.
+    pub files_out: bool,
+    /// Images are shown inline.
+    pub images: bool,
+    /// Voice notes and audio files can come in.
+    pub audio_in: bool,
+    /// A menu of `/commands`.
+    pub commands: bool,
+    /// A "typing…" indicator.
+    pub typing: bool,
+    /// More than one thread (several chats or windows).
+    pub threads: bool,
 }
 
 #[derive(Clone)]
@@ -86,43 +142,40 @@ impl CommandSpec {
     }
 }
 
-/// What the system prompt says about how replies are shown, for chat apps.
-pub const CHAT_SURFACE: &str = "The user reads your replies in a chat app that renders Markdown \
-    (bold, italic, `code`, fenced code blocks, lists, links). Avoid tables and headings \
-    unless they really help.";
-
-pub struct Limits {
-    /// Max Markdown characters per message the gateway should send.
-    pub max_len: usize,
-    /// Minimum gap between edits of one message while streaming.
-    pub edit_interval: std::time::Duration,
+/// The system prompt's line on how replies are shown, from the messenger's description.
+pub fn surface(d: &Description) -> String {
+    if d.capabilities.markdown {
+        format!(
+            "The user reads your replies in {}, which renders Markdown (bold, italic, `code`, \
+             fenced code blocks, lists, links). Avoid tables and headings unless they really help.",
+            d.name
+        )
+    } else {
+        format!("The user reads your replies in {}: plain text, Markdown is shown as is.", d.name)
+    }
 }
 
 #[async_trait]
 pub trait Messenger: Send + Sync {
     fn id(&self) -> &str;
-    fn limits(&self) -> Limits;
+    fn describe(&self) -> Description;
 
     /// Receives messages until the connection is lost for good, publishing them on `bus`.
     async fn run(&self, bus: Bus<Inbound>) -> Result<()>;
 
-    /// Sends a new message and returns its id.
-    async fn send(&self, chat: &str, markdown: &str, buttons: &[Button]) -> Result<String>;
-    async fn edit(&self, chat: &str, message: &str, markdown: &str, buttons: &[Button])
-    -> Result<()>;
+    /// Sends a new message to `thread` and returns its id.
+    async fn send(&self, thread: &str, message: &OutMessage) -> Result<String>;
+    /// Replaces a sent message (where `capabilities.edit`).
+    async fn edit(&self, thread: &str, id: &str, message: &OutMessage) -> Result<()>;
     /// "typing…" indicator; best effort.
     async fn typing(&self, chat: &str) -> Result<()>;
     async fn set_commands(&self, commands: &[CommandSpec]) -> Result<()>;
     /// Confirms a button press to the messenger (stops the button spinner).
-    async fn ack_action(&self, action_id: &str) -> Result<()>;
+    async fn ack(&self, press: &str) -> Result<()>;
     /// Fetches the contents of an inbound attachment.
     async fn download(&self, file: &Attachment) -> Result<Vec<u8>>;
     /// Sends a local file; images are shown inline where the messenger can.
     async fn send_file(&self, chat: &str, path: &std::path::Path, caption: &str) -> Result<()>;
-    /// How replies are shown, for the system prompt.
-    fn surface(&self) -> &'static str {
-        CHAT_SURFACE
-    }
     /// The gateway has nothing more to say in `chat` for now (a turn or command is done).
     async fn idle(&self, _chat: &str) {}
 }

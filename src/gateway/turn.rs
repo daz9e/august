@@ -1,7 +1,6 @@
 //! One user turn: runs the agent, streams its events to the chat, handles `/stop`.
 
 use super::Gateway;
-use super::approval::ChatApprover;
 use super::render::{Ui, render, tool_line};
 use crate::agent::Event;
 use crate::messengers::{Messenger, Thread};
@@ -36,7 +35,7 @@ struct ChatNotes {
 #[async_trait::async_trait]
 impl crate::tools::Notifier for ChatNotes {
     async fn notify(&self, text: &str) {
-        if let Err(e) = self.channel.send(&self.chat, text, &[]).await {
+        if let Err(e) = self.channel.send(&self.chat, &crate::messengers::OutMessage::text(text)).await {
             eprintln!("could not post a note to the chat: {e:#}");
         }
     }
@@ -88,8 +87,9 @@ impl Gateway {
 
         let typing = {
             let (ch, chat) = (channel.clone(), chat.to_string());
+            let shows = ch.describe().capabilities.typing;
             tokio::spawn(async move {
-                loop {
+                while shows {
                     ch.typing(&chat).await.ok();
                     tokio::time::sleep(Duration::from_secs(4)).await;
                 }
@@ -98,14 +98,10 @@ impl Gateway {
         let (tx, rx) = mpsc::unbounded_channel();
         let renderer = tokio::spawn(render(channel.clone(), chat.to_string(), rx));
 
-        let approver: Arc<ChatApprover> = Arc::new(ChatApprover {
-            channel: channel.clone(),
-            chat: chat.to_string(),
-            pending: self.pending.clone(),
-        });
+        let approver = Arc::new(self.approver(channel.clone(), id.clone(), Some(state.inbox.clone())));
         let ctx = ToolCtx {
             workspace: self.workspace.clone(),
-            approver: approver.clone(),
+            approver,
             db: self.db.clone(),
             origin: Some((id.messenger.clone(), chat.to_string())),
             files: Some(Arc::new(ChatFiles(tx.clone()))),

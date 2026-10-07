@@ -22,7 +22,10 @@ async fn terminal_chat_runs_approved_tools_commands_and_subagents() {
     let llm: Llm = Box::new(|req| {
         let text = last_text(req);
         let sub_agent = msgs(req)[0]["content"].as_str().is_some_and(|s| s.contains("You are a sub-agent"));
-        if sub_agent {
+        let said = |needle: &str| msgs(req).iter().rev().take(2).any(|m| m["content"].to_string().contains(needle));
+        if said("call it other.txt") {
+            reply_text("Understood: other.txt, not made.txt.")
+        } else if sub_agent {
             reply_text("Report: counted 3 files.")
         } else if text.contains("Subtask #1 finished") {
             reply_text("The sub-agent counted 3 files.")
@@ -45,6 +48,13 @@ async fn terminal_chat_runs_approved_tools_commands_and_subagents() {
     term.wait_for(TIMEOUT, "Done:").await;
     assert!(term.workspace.join("made.txt").exists(), "{}", term.output());
     assert!(term.output().contains("✅ Allowed"), "{}", term.output());
+
+    // Answering an approval in words denies it, and the words reach the agent.
+    term.send("make a file again");
+    term.wait_for_count(TIMEOUT, "Approval needed", 2).await;
+    term.send("no, call it other.txt");
+    term.wait_for(TIMEOUT, "Understood: other.txt").await;
+    assert!(term.output().contains("❌ Denied"), "{}", term.output());
 
     // Built-in commands go through the gateway.
     term.send("/status");

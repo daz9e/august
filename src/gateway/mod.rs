@@ -7,12 +7,13 @@ mod media;
 mod render;
 mod subagents;
 mod turn;
+mod waits;
 
 use crate::agent::{self, Agent};
 use crate::messengers::bus::Bus;
 use crate::db::Db;
 use crate::extensions::{self, Extensions};
-use crate::messengers::{Messenger, Thread, Inbound, InboundKind};
+use crate::messengers::{Inbound, InboundKind, Messenger, OutMessage, Thread};
 use crate::llm::{LlmProvider, Message};
 use crate::llm::providers;
 use crate::scheduler::TaskRunner;
@@ -24,6 +25,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
 use tokio::sync::{Mutex, Notify};
+
+/// How long `ctx.ask` waits for an answer.
+const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 struct Chat {
     agent: Mutex<Agent>,
@@ -38,7 +42,8 @@ struct Chat {
 pub struct Gateway {
     channels: HashMap<String, Arc<dyn Messenger>>,
     chats: Mutex<HashMap<Thread, Arc<Chat>>>,
-    pending: approval::Pending,
+    /// Waits for what threads send next (answers to questions).
+    waits: Arc<waits::Waits>,
     provider: RwLock<Arc<dyn LlmProvider>>,
     provider_label: RwLock<String>,
     workspace: PathBuf,
@@ -67,7 +72,7 @@ impl ExtCore {
 impl extensions::Core for ExtCore {
     async fn send(&self, channel: &str, chat: &str, text: &str) -> Result<()> {
         let (_, ch) = self.channel(channel)?;
-        ch.send(chat, text, &[]).await.map(|_| ())
+        ch.send(chat, &OutMessage::text(text)).await.map(|_| ())
     }
 
     async fn prompt(&self, channel: &str, chat: &str, text: &str) -> Result<()> {
@@ -85,25 +90,32 @@ impl extensions::Core for ExtCore {
 
     async fn approve(&self, channel: &str, chat: &str, action: &str) -> Result<bool> {
         let (gw, ch) = self.channel(channel)?;
-        let approver = approval::ChatApprover { channel: ch, chat: chat.into(), pending: gw.pending.clone() };
+        let approver = gw.approver(ch, Thread::new(channel, chat), None);
         Ok(crate::tools::Approver::approve(&approver, action).await)
     }
 
     async fn ask(&self, channel: &str, chat: &str, question: &str, options: &[String]) -> Result<Option<String>> {
         let (gw, ch) = self.channel(channel)?;
-        let asker = approval::ChatApprover { channel: ch, chat: chat.into(), pending: gw.pending.clone() };
-        let values: Vec<String> = (0..options.len()).map(|i| i.to_string()).collect();
-        let pairs: Vec<(&str, &str)> = options.iter().zip(&values).map(|(o, v)| (o.as_str(), v.as_str())).collect();
-        let done = |label: Option<&str>| format!("❓ {question}\n→ {}", label.unwrap_or("⌛ no answer"));
-        let answer = asker.ask(&format!("❓ {question}"), &pairs, done).await;
-        Ok(answer.and_then(|i| options.get(i.parse::<usize>().ok()?).cloned()))
+        let thread = Thread::new(channel, chat);
+        let text = format!("❓ {question}");
+        let (message, answer) = approval::ask(&*ch, &gw.waits, &thread, &text, options, ASK_TIMEOUT).await?;
+        let answer = match answer {
+            Some(approval::Answer::Option(i)) => options.get(i).cloned(),
+            Some(approval::Answer::Text(t)) => Some(t),
+            None => None,
+        };
+        if ch.describe().capabilities.edit {
+            let done = format!("{text}\n→ {}", answer.as_deref().unwrap_or("⌛ no answer"));
+            ch.edit(chat, &message, &OutMessage::text(done)).await.ok();
+        }
+        Ok(answer)
     }
 
     async fn call_tool(&self, channel: &str, chat: &str, name: &str, input: &Value) -> Result<(String, bool)> {
         let (gw, ch) = self.channel(channel)?;
         let ctx = ToolCtx {
             workspace: gw.workspace.clone(),
-            approver: Arc::new(approval::ChatApprover { channel: ch, chat: chat.into(), pending: gw.pending.clone() }),
+            approver: Arc::new(gw.approver(ch, Thread::new(channel, chat), None)),
             db: gw.db.clone(),
             origin: Some((channel.into(), chat.into())),
             files: None,
@@ -141,7 +153,7 @@ impl Gateway {
         let gw = Arc::new(Self {
             channels: channels.into_iter().map(|c| (c.id().to_string(), c)).collect(),
             chats: Mutex::new(HashMap::new()),
-            pending: Arc::default(),
+            waits: Arc::default(),
             provider: RwLock::new(provider),
             provider_label: RwLock::new(label),
             workspace,
@@ -195,6 +207,11 @@ impl Gateway {
         Ok(())
     }
 
+    /// Approvals asked in `thread`; with `inbox`, a text answer also reaches the running turn.
+    fn approver(&self, messenger: Arc<dyn Messenger>, thread: Thread, inbox: Option<Arc<agent::Inbox>>) -> approval::ChatApprover {
+        approval::ChatApprover { messenger, thread, waits: self.waits.clone(), inbox }
+    }
+
     fn tools(&self) -> ToolRegistry {
         ToolRegistry::with_defaults().with_extensions(self.ext.clone())
     }
@@ -207,7 +224,7 @@ impl Gateway {
         let agent = Agent::new(
             self.provider.read().unwrap().clone(),
             self.tools(),
-            agent::system_prompt(&self.workspace, self.channels.get(&id.messenger).map_or(crate::messengers::CHAT_SURFACE, |c| c.surface())),
+            agent::system_prompt(&self.workspace, &self.channels.get(&id.messenger).map(|m| crate::messengers::surface(&m.describe())).unwrap_or_default()),
             self.db.clone(),
             &format!("{}:{}", id.messenger, id.id),
         )?;
@@ -270,16 +287,17 @@ impl Gateway {
             return Ok(());
         };
         let chat = ev.thread.id.clone();
+        // What something waits for (the answer to a question) goes there first.
+        if self.waits.offer(&ev) {
+            if let InboundKind::Press { ack, .. } = &ev.kind {
+                channel.ack(ack).await.ok();
+            }
+            return Ok(());
+        }
         match ev.kind {
-            InboundKind::Action { id, data } => {
-                channel.ack_action(&id).await.ok();
-                // "ap:<approval id>:<y|n>"
-                let mut parts = data.splitn(3, ':');
-                if let (Some("ap"), Some(key), Some(answer)) = (parts.next(), parts.next(), parts.next()) {
-                    if let Some(tx) = self.pending.lock().unwrap().remove(key) {
-                        tx.send(answer.to_string()).ok();
-                    }
-                }
+            // A button of a question nobody waits for any more.
+            InboundKind::Press { ack, .. } => {
+                channel.ack(&ack).await.ok();
             }
             InboundKind::Command { name, args } => self.command(&channel, &ev.thread, &name, &args).await?,
             InboundKind::Message { text, files } if text.is_empty() && files.is_empty() => {}
@@ -293,7 +311,7 @@ impl Gateway {
                     let data = self.ext.emit("message_in", serde_json::json!({"text": text, "files": saved}), &origin).await;
                     if data["handled"] == true {
                         if let Some(reply) = data["reply"].as_str().filter(|r| !r.is_empty()) {
-                            channel.send(&chat, reply, &[]).await?;
+                            channel.send(&chat, &OutMessage::text(reply)).await?;
                         }
                         channel.idle(&chat).await;
                         return Ok(());
@@ -305,7 +323,7 @@ impl Gateway {
                 // While a turn runs, plain text goes to it instead of waiting for it to end.
                 if images.is_empty() && state.inbox.offer(&text) {
                     drop(intake);
-                    channel.send(&chat, "↪️ Got it, I'll take this into account.", &[]).await?;
+                    channel.send(&chat, &OutMessage::text("↪️ Got it, I'll take this into account.")).await?;
                     return Ok(());
                 }
                 // Busy from here, so the next message joins this turn instead of racing it.

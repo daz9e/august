@@ -5,8 +5,8 @@ mod api;
 mod markdown;
 
 use super::{
-    Attachment, Button, Messenger, MessengerDef, Thread, CommandSpec, Inbound, InboundKind, Limits, User,
-    parse_command,
+    Attachment, Button, Capabilities, CommandSpec, Description, Inbound, InboundKind, Messenger, MessengerDef,
+    OutMessage, Thread, User, parse_command,
 };
 use crate::messengers::bus::Bus;
 use crate::config;
@@ -114,9 +114,9 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
                 id: user.to_string(),
                 name: display_name(&cb["from"]),
             },
-            kind: InboundKind::Action {
-                id: id.to_string(),
-                data: cb["data"].as_str().unwrap_or("").to_string(),
+            kind: InboundKind::Press {
+                button: cb["data"].as_str().unwrap_or("").to_string(),
+                ack: id.to_string(),
             },
         });
     }
@@ -196,12 +196,12 @@ fn attachments(m: &Value) -> Vec<Attachment> {
 
 // ---------------------------------------------------------------- channel
 
-pub struct TelegramChannel {
+pub struct Telegram {
     api: Api,
     allowed: Vec<i64>,
 }
 
-impl TelegramChannel {
+impl Telegram {
     pub fn new(cfg: &Config) -> Self {
         Self {
             api: Api::new(&cfg.token),
@@ -223,7 +223,7 @@ fn markup(buttons: &[Button]) -> Option<Value> {
     (!buttons.is_empty()).then(|| {
         let row: Vec<Value> = buttons
             .iter()
-            .map(|b| json!({"text": b.label, "callback_data": b.data}))
+            .map(|b| json!({"text": b.label, "callback_data": b.id}))
             .collect();
         json!({"inline_keyboard": [row]})
     })
@@ -234,16 +234,35 @@ fn plain(md: &str) -> String {
 }
 
 #[async_trait]
-impl Messenger for TelegramChannel {
+impl Messenger for Telegram {
     fn id(&self) -> &str {
         ID
     }
 
-    fn limits(&self) -> Limits {
-        Limits {
-            max_len: MAX_LEN,
-            // Telegram allows about one edit per second per chat.
-            edit_interval: Duration::from_millis(1100),
+    fn describe(&self) -> Description {
+        Description {
+            id: ID.into(),
+            name: "Telegram".into(),
+            capabilities: Capabilities {
+                markdown: true,
+                max_len: MAX_LEN,
+                buttons: 8,
+                edit: true,
+                // Telegram allows about one edit per second per chat.
+                edit_interval_ms: 1100,
+                files_in: true,
+                files_out: true,
+                images: true,
+                audio_in: true,
+                commands: true,
+                typing: true,
+                threads: true,
+            },
+            extra: json!({
+                "groups": "the bot answers in groups only when mentioned, replied to or given a command",
+                "max_download_mb": MAX_DOWNLOAD / 1024 / 1024,
+                "max_upload_mb": MAX_UPLOAD / 1024 / 1024,
+            }),
         }
     }
 
@@ -291,7 +310,8 @@ impl Messenger for TelegramChannel {
         }
     }
 
-    async fn send(&self, chat: &str, markdown: &str, buttons: &[Button]) -> Result<String> {
+    async fn send(&self, chat: &str, message: &OutMessage) -> Result<String> {
+        let (markdown, buttons) = (message.text.as_str(), &message.buttons);
         let mut params = json!({
             "chat_id": chat_id(chat),
             "text": markdown::to_html(markdown),
@@ -318,16 +338,11 @@ impl Messenger for TelegramChannel {
         Ok(sent["message_id"].as_i64().context("no message_id")?.to_string())
     }
 
-    async fn edit(
-        &self,
-        chat: &str,
-        message: &str,
-        markdown: &str,
-        buttons: &[Button],
-    ) -> Result<()> {
+    async fn edit(&self, chat: &str, id: &str, message: &OutMessage) -> Result<()> {
+        let (markdown, buttons) = (message.text.as_str(), &message.buttons);
         let mut params = json!({
             "chat_id": chat_id(chat),
-            "message_id": message.parse::<i64>().context("bad message id")?,
+            "message_id": id.parse::<i64>().context("bad message id")?,
             "text": markdown::to_html(markdown),
             "parse_mode": "HTML",
             "link_preview_options": {"is_disabled": true},
@@ -372,9 +387,9 @@ impl Messenger for TelegramChannel {
             .map(|_| ())
     }
 
-    async fn ack_action(&self, action_id: &str) -> Result<()> {
+    async fn ack(&self, press: &str) -> Result<()> {
         self.api
-            .call("answerCallbackQuery", json!({"callback_query_id": action_id}))
+            .call("answerCallbackQuery", json!({"callback_query_id": press}))
             .await
             .map(|_| ())
     }
@@ -438,7 +453,7 @@ impl MessengerDef for TelegramDef {
         if cfg.allowed.is_empty() {
             eprintln!("telegram: no allowed users, nobody can talk to the bot (run `august connect telegram`)");
         }
-        Ok(Some(Arc::new(TelegramChannel::new(&cfg))))
+        Ok(Some(Arc::new(Telegram::new(&cfg))))
     }
 
     async fn setup(&self) -> Result<()> {
@@ -564,9 +579,9 @@ mod tests {
     #[test]
     fn callbacks() {
         let u = json!({"update_id": 2, "callback_query": {"id": "cb1", "from": {"id": 7, "first_name": "A"},
-            "message": {"chat": {"id": 5}}, "data": "ap:1:y"}});
+            "message": {"chat": {"id": 5}}, "data": "k1.0"}});
         let Parsed::Event(e) = parse_update(&u, &bot(), &[7]) else { panic!() };
-        assert!(matches!(e.kind, InboundKind::Action { ref id, ref data } if id == "cb1" && data == "ap:1:y"));
+        assert!(matches!(e.kind, InboundKind::Press { ref button, ref ack } if button == "k1.0" && ack == "cb1"));
         assert!(matches!(parse_update(&u, &bot(), &[1]), Parsed::Deny(5, 7)));
     }
 
@@ -593,8 +608,8 @@ mod tests {
                 s.write_all(resp.as_bytes()).await.unwrap();
             }
         });
-        let ch = TelegramChannel::with_api(Api::with_host(&format!("http://{addr}"), "T"), vec![]);
-        let id = ch.send("5", "**hi**", &[]).await.unwrap();
+        let ch = Telegram::with_api(Api::with_host(&format!("http://{addr}"), "T"), vec![]);
+        let id = ch.send("5", &OutMessage::text("**hi**")).await.unwrap();
         assert_eq!(id, "42");
         let seen = seen.lock().unwrap();
         assert!(seen[0].contains("parse_mode") && seen[0].contains("<b>hi</b>"));

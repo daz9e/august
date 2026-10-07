@@ -1,7 +1,7 @@
 //! Slash commands (`/new`, `/stop`, `/model`, ...).
 
 use super::Gateway;
-use crate::messengers::{Messenger, Thread, CommandSpec};
+use crate::messengers::{Messenger, Thread, CommandSpec, OutMessage};
 use crate::llm::providers;
 use anyhow::Result;
 use std::sync::Arc;
@@ -36,6 +36,9 @@ impl Gateway {
     pub(super) async fn publish_commands(&self) {
         let list = self.command_list();
         for ch in self.channels.values() {
+            if !ch.describe().capabilities.commands {
+                continue;
+            }
             if let Err(e) = ch.set_commands(&list).await {
                 eprintln!("{}: could not register commands: {e:#}", ch.id());
             }
@@ -54,6 +57,7 @@ impl Gateway {
                 s
             }
             "stop" => {
+                self.waits.cancel(id);
                 // Extensions hear it first, so a loop of theirs doesn't start the next turn.
                 let origin = Some((id.messenger.clone(), id.id.clone()));
                 self.ext.emit("stop", serde_json::json!({}), &origin).await;
@@ -76,6 +80,7 @@ impl Gateway {
                 "📋 Queued.".into()
             }
             "new" | "reset" => {
+                self.waits.cancel(id);
                 if let Some(n) = state.cancel.lock().unwrap().as_ref() {
                     n.notify_one();
                 }
@@ -138,7 +143,7 @@ impl Gateway {
                 }
             }
         };
-        channel.send(chat, &reply, &[]).await?;
+        channel.send(chat, &OutMessage::text(reply)).await?;
         channel.idle(chat).await;
         Ok(())
     }

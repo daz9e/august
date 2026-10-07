@@ -31,7 +31,7 @@ async fn model_writes_a_working_extension() {
     let approve_all = |f: &Fake| {
         for req in f.calls("sendMessage") {
             let data = req.json()["reply_markup"]["inline_keyboard"][0][0]["callback_data"].as_str().map(String::from);
-            if let Some(data) = data.filter(|d| d.starts_with("ap:")) {
+            if let Some(data) = data.filter(|d| !d.is_empty()) {
                 if pressed.lock().unwrap().insert(data.clone()) {
                     let mut id = next_update.lock().unwrap();
                     *id += 1;

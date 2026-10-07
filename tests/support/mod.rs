@@ -383,6 +383,17 @@ impl Terminal {
         }
     }
 
+    /// Waits until `needle` appears `n` times in the output.
+    pub async fn wait_for_count(&self, timeout: Duration, needle: &str, n: usize) {
+        let start = Instant::now();
+        while self.output().matches(needle).count() < n {
+            if start.elapsed() > timeout {
+                panic!("timed out waiting for {n}× {needle:?}; output so far:\n{}", self.output());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     /// Waits for the process to end (after `/exit`).
     pub async fn exited(&mut self, timeout: Duration) -> bool {
         let start = Instant::now();

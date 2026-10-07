@@ -1,17 +1,16 @@
 //! The terminal as a channel: one local chat (`cli:local`) run by the same gateway as the
 //! messengers, so commands, turns, approvals, extensions and sub-agents all work the same.
 //! Lines from stdin become messages and commands; replies are printed as they stream (an
-//! edit prints only what it adds). A message with buttons is a question: its options are
-//! numbered and the next line answers the oldest open one.
+//! edit prints only what it adds). Buttons are numbered: a number answers the oldest open
+//! message with buttons by pressing that button; any other line is a message.
 
-use super::{Attachment, Button, Messenger, Thread, CommandSpec, Inbound, InboundKind, Limits, User, bus::Bus};
+use super::{Attachment, Button, Capabilities, CommandSpec, Description, Inbound, InboundKind, Messenger, OutMessage, Thread, User, bus::Bus};
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{IsTerminal, Write};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 pub const ID: &str = "cli";
@@ -86,18 +85,12 @@ impl Terminal {
         s.mid_line = false;
     }
 
-    /// For the oldest open question: the button `line` picks (its number, or y/n for an
-    /// approval), `Some(None)` if it picks none; `None` when nothing is asked.
-    fn answer(&self, line: &str) -> Option<Option<String>> {
+    /// The button a number picks on the oldest open message with buttons.
+    fn pick(&self, line: &str) -> Option<String> {
         let s = self.screen.lock().unwrap();
         let (_, buttons) = s.open.front()?;
-        let by_number = line.parse::<usize>().ok().and_then(|n| n.checked_sub(1)).and_then(|i| buttons.get(i));
-        let yes_no = match line.to_lowercase().as_str() {
-            "y" | "yes" => buttons.iter().find(|b| b.data.ends_with(":y")),
-            "n" | "no" => buttons.iter().find(|b| b.data.ends_with(":n")),
-            _ => None,
-        };
-        Some(by_number.or(yes_no).map(|b| b.data.clone()))
+        let i = line.parse::<usize>().ok()?.checked_sub(1)?;
+        buttons.get(i).map(|b| b.id.clone())
     }
 }
 
@@ -107,12 +100,26 @@ impl Messenger for Terminal {
         ID
     }
 
-    fn limits(&self) -> Limits {
-        Limits { max_len: 1_000_000, edit_interval: Duration::from_millis(30) }
-    }
-
-    fn surface(&self) -> &'static str {
-        "The user reads your replies in a terminal: plain text, Markdown is shown as is."
+    fn describe(&self) -> Description {
+        Description {
+            id: ID.into(),
+            name: "a terminal".into(),
+            capabilities: Capabilities {
+                markdown: false,
+                max_len: 1_000_000,
+                buttons: 9,
+                edit: true,
+                edit_interval_ms: 30,
+                files_in: false,
+                files_out: true,
+                images: false,
+                audio_in: false,
+                commands: false,
+                typing: false,
+                threads: false,
+            },
+            extra: serde_json::json!({"buttons": "shown numbered; the user answers with the number"}),
+        }
     }
 
     async fn run(&self, bus: Bus<Inbound>) -> Result<()> {
@@ -128,15 +135,10 @@ impl Messenger for Terminal {
                 s.at_prompt = false;
                 s.mid_line = false;
             }
-            let kind = match self.answer(&line) {
-                Some(Some(data)) => {
+            let kind = match self.pick(&line) {
+                Some(button) => {
                     self.screen.lock().unwrap().open.pop_front();
-                    InboundKind::Action { id: String::new(), data }
-                }
-                Some(None) => {
-                    let n = self.screen.lock().unwrap().open.front().map_or(0, |q| q.1.len());
-                    self.print(&format!("Answer with a number from 1 to {n}."), true);
-                    continue;
+                    InboundKind::Press { button, ack: String::new() }
                 }
                 None if line.is_empty() => {
                     self.prompt();
@@ -153,7 +155,8 @@ impl Messenger for Terminal {
         Ok(())
     }
 
-    async fn send(&self, _chat: &str, markdown: &str, buttons: &[Button]) -> Result<String> {
+    async fn send(&self, _thread: &str, message: &OutMessage) -> Result<String> {
+        let (markdown, buttons) = (message.text.as_str(), &message.buttons);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         {
             let mut s = self.screen.lock().unwrap();
@@ -167,7 +170,8 @@ impl Messenger for Terminal {
         Ok(id)
     }
 
-    async fn edit(&self, _chat: &str, message: &str, markdown: &str, _buttons: &[Button]) -> Result<()> {
+    async fn edit(&self, _thread: &str, message: &str, new: &OutMessage) -> Result<()> {
+        let markdown = new.text.as_str();
         let (old, asked) = {
             let mut s = self.screen.lock().unwrap();
             s.open.retain(|(id, _)| id != message); // an edit settles a question (answered or timed out)
@@ -189,7 +193,7 @@ impl Messenger for Terminal {
         Ok(())
     }
 
-    async fn ack_action(&self, _action_id: &str) -> Result<()> {
+    async fn ack(&self, _press: &str) -> Result<()> {
         Ok(())
     }
 

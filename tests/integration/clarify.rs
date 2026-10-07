@@ -19,8 +19,8 @@ async fn agent_asks_with_buttons_and_gets_the_choice() {
     let _gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
 
     let t = Duration::from_secs(30);
-    fake.wait_for(t, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("ap:"))).await;
-    let ask = fake.calls("sendMessage").into_iter().find(|r| r.text().contains("ap:")).unwrap().json();
+    fake.wait_for(t, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("callback_data"))).await;
+    let ask = fake.calls("sendMessage").into_iter().find(|r| r.text().contains("callback_data")).unwrap().json();
     assert!(ask["text"].as_str().unwrap().contains("Which colour?"));
     let row = &ask["reply_markup"]["inline_keyboard"][0];
     assert_eq!((row[0]["text"].as_str(), row[1]["text"].as_str()), (Some("Red"), Some("Blue")));

@@ -142,12 +142,12 @@ async fn agent_installs_an_extension_with_approval() {
     let gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[], &[]);
 
     // The install waits for the owner's approval, which shows the code.
-    fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("ap:"))).await;
-    let ask = fake.calls("sendMessage").into_iter().find(|r| r.text().contains("ap:")).unwrap().json();
+    fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("callback_data"))).await;
+    let ask = fake.calls("sendMessage").into_iter().find(|r| r.text().contains("callback_data")).unwrap().json();
     assert!(ask["text"].as_str().unwrap().contains("greeter"));
     assert!(ask["text"].as_str().unwrap().contains("Hello, ${name}!"));
+    assert_eq!(ask["reply_markup"]["inline_keyboard"][0][0]["text"], "✅ Allow");
     let allow = ask["reply_markup"]["inline_keyboard"][0][0]["callback_data"].as_str().unwrap().to_string();
-    assert!(allow.ends_with(":y"));
     fake.push_updates(vec![button_press(2, &allow)]);
 
     fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: saved")).await;
@@ -352,15 +352,15 @@ async fn extensions_replace_builtin_tools_and_decide_approvals() {
     fake.push_updates(vec![message(2, json!({"text": "touch"}))]);
     fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: exit code: 0")).await;
     assert!(gw.workspace.join("made.txt").exists());
-    assert!(!fake.calls("sendMessage").iter().any(|r| r.text().contains("ap:")), "asked anyway");
+    assert!(!fake.calls("sendMessage").iter().any(|r| r.text().contains("callback_data")), "asked anyway");
 
     // `ask` asks even for a tool that never does; a denial reaches the model.
     fake.push_updates(vec![message(3, json!({"text": "read"}))]);
-    fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("ap:"))).await;
-    let ask = fake.calls("sendMessage").into_iter().find(|r| r.text().contains("ap:")).unwrap().json();
+    fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("callback_data"))).await;
+    let ask = fake.calls("sendMessage").into_iter().find(|r| r.text().contains("callback_data")).unwrap().json();
     assert!(ask["text"].as_str().unwrap().contains("Let the agent read notes.txt?"));
+    assert_eq!(ask["reply_markup"]["inline_keyboard"][0][1]["text"], "❌ Deny");
     let deny = ask["reply_markup"]["inline_keyboard"][0][1]["callback_data"].as_str().unwrap().to_string();
-    assert!(deny.ends_with(":n"), "{deny}");
     fake.push_updates(vec![button_press(4, &deny)]);
     fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: the user denied this")).await;
 }

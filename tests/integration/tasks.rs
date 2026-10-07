@@ -43,7 +43,7 @@ async fn task_runs_with_skills_and_script_in_its_own_session() {
     fake.wait_for(TIMEOUT, |f| {
         for req in f.calls("sendMessage") {
             let data = req.json()["reply_markup"]["inline_keyboard"][0][0]["callback_data"].as_str().map(String::from);
-            if let Some(d) = data.filter(|d| d.starts_with("ap:") && pressed.lock().unwrap().insert(d.clone())) {
+            if let Some(d) = data.filter(|d| !d.is_empty() && pressed.lock().unwrap().insert(d.clone())) {
                 f.push_updates(vec![button_press(50, &d)]);
             }
         }

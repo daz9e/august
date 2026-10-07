@@ -2,7 +2,6 @@
 //! with the chat's approvals, unattended, returning the final reply.
 
 use super::Gateway;
-use super::approval::ChatApprover;
 use crate::agent::{self, Agent};
 use crate::messengers::{Messenger, Thread};
 use crate::extensions::AgentOpts;
@@ -24,7 +23,7 @@ impl Gateway {
         let mut agent = Agent::new(provider, tools, system, self.db.clone(), &key)?;
         let ctx = ToolCtx {
             workspace: self.workspace.clone(),
-            approver: Arc::new(ChatApprover { channel, chat: id.id.clone(), pending: self.pending.clone() }),
+            approver: Arc::new(self.approver(channel, id.clone(), None)),
             db: self.db.clone(),
             origin: Some((id.messenger, id.id)),
             files: None,
