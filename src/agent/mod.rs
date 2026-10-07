@@ -315,7 +315,17 @@ impl Agent {
                 Ok(None) => {}
                 Err(e) => eprintln!("context compaction failed: {e:#}"),
             }
-            let completion = self.call_model(step, &specs, ctx, on_event).await?;
+            let completion = match self.call_model(step, &specs, ctx, on_event).await {
+                // Too long for the model after all: summarise older history and try once more.
+                Err(e) if crate::llm::error::ErrorKind::of(&e) == crate::llm::error::ErrorKind::ContextTooLong => {
+                    eprintln!("context too long for the model; compacting and retrying");
+                    if self.compact(true).await?.is_some() {
+                        on_event(Event::Compacted);
+                    }
+                    self.call_model(step, &specs, ctx, on_event).await?
+                }
+                r => r?,
+            };
             let reply = completion.message;
             self.history.push(reply.clone());
 

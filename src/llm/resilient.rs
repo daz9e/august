@@ -22,26 +22,10 @@ impl Resilient {
     }
 }
 
-/// Whether trying again (or another provider) can help: rate limits, server errors,
-/// dropped connections and broken streams do; auth, quota and bad-request errors don't.
+/// Whether trying again (or another provider) can help: rate limits, overload and broken
+/// connections do; auth, quota, refusals and bad requests don't.
 pub fn is_transient(e: &anyhow::Error) -> bool {
-    let msg = format!("{e:#}").to_lowercase();
-    if let Some(rest) = msg.split("http ").nth(1) {
-        let code: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        if let Ok(code) = code.parse::<u16>() {
-            return matches!(code, 408 | 425 | 429) || (500..600).contains(&code);
-        }
-    }
-    const FATAL: &[&str] = &["unauthorized", "expired", "no credentials", "invalid_api_key", "refused"];
-    if FATAL.iter().any(|f| msg.contains(f)) {
-        return false;
-    }
-    const TRANSIENT: &[&str] = &[
-        "stream ended", "stream error", "overloaded", "timed out", "timeout", "connection",
-        "error sending request", "error decoding", "rate limit", "unexpected eof", "reset by peer",
-        "incomplete message", "temporarily",
-    ];
-    TRANSIENT.iter().any(|t| msg.contains(t))
+    super::error::ErrorKind::of(e).transient()
 }
 
 /// Runs `attempt` up to `tries` times while errors are transient and nothing has been

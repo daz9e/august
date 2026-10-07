@@ -2,7 +2,7 @@
 //! later compaction updates the earlier summary instead of summarising it again.
 
 use crate::support::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -53,4 +53,29 @@ async fn long_conversation_is_summarised_and_the_summary_updated() {
     let last = reqs.iter().rev().find(|r| !is_summary(r)).unwrap().to_string();
     let newest = format!("SUMMARY-{}", sums.len());
     assert!(last.contains(&newest) && !last.contains("SUMMARY-1\\n"), "{last}");
+}
+
+#[tokio::test]
+async fn context_too_long_compacts_and_retries() {
+    let failed = Arc::new(AtomicUsize::new(0));
+    let f = failed.clone();
+    let llm: Llm = Box::new(move |req| {
+        if is_summary(req) {
+            return reply_text("## Goal\nSUMMARY");
+        }
+        // The provider rejects the long history once, as context_length_exceeded.
+        if user_text(req).contains("last one") && !req.to_string().contains("SUMMARY") && f.fetch_add(1, Ordering::SeqCst) == 0 {
+            return json!({"error": {"message": "This model's maximum context length is 1000 tokens", "code": "context_length_exceeded"}});
+        }
+        reply_text("ok")
+    });
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    for i in 1..=5 {
+        chat.ask(&format!("message {i}"), "ok").await;
+    }
+    chat.ask("last one", "ok").await;
+    assert_eq!(failed.load(Ordering::SeqCst), 1);
+    assert!(fake.llm_requests().iter().any(is_summary), "no compaction");
 }

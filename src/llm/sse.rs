@@ -74,7 +74,7 @@ pub(crate) async fn post_stream(
                 let text = r.text().await.unwrap_or_default();
                 let retryable = status.as_u16() == 429 || status.is_server_error();
                 if !retryable || attempt == 3 {
-                    anyhow::bail!("HTTP {status}: {text}");
+                    return Err(super::error::ProviderError::http(status.as_u16(), &text).into());
                 }
             }
             Err(e) if attempt == 3 => return Err(e.into()),

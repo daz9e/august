@@ -116,7 +116,10 @@ impl LlmProvider for ClaudeCli {
         if r["is_error"].as_bool().unwrap_or(false) {
             let msg = r["result"].as_str().unwrap_or("unknown error");
             match r["api_error_status"].as_u64() {
-                Some(code) => bail!("claude: HTTP {code}: {msg}"),
+                Some(code) => {
+                    let kind = super::error::ErrorKind::of_http(code as u16, msg);
+                    return Err(super::error::ProviderError { kind, message: format!("claude: HTTP {code}: {msg}") }.into());
+                }
                 None => bail!("claude: {msg}"),
             }
         }
