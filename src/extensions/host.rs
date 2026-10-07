@@ -1,11 +1,11 @@
-//! One extension process (`bun run host.ts <entry> <name>`) and the JSON-RPC link to it:
-//! one JSON object per line on stdin/stdout, requests in both directions.
+//! One extension process (`bun run host.ts <entry> <name>`, or a default extension's binary)
+//! and the JSON-RPC link to it: one JSON object per line on stdin/stdout, requests in both
+//! directions.
 
 use super::Core;
 use crate::llm::ToolSpec;
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock, RwLockReadGuard};
@@ -54,19 +54,13 @@ impl Host {
     /// Starts the extension and waits until it has registered everything. `on_exit` runs
     /// (with the last stderr lines) if the process dies after a successful start.
     pub async fn start(
-        bun: &Path,
-        host_ts: &Path,
+        mut command: Command,
         name: &str,
-        entry: &Path,
         core: Option<Arc<dyn Core>>,
         on_exit: Box<dyn FnOnce(String) + Send>,
     ) -> Result<Host, String> {
-        let mut child = Command::new(bun)
-            .arg("run")
-            .arg(host_ts)
-            .arg(entry)
-            .arg(name)
-            .current_dir(entry.parent().unwrap_or(Path::new(".")))
+        let program = command.as_std().get_program().to_string_lossy().to_string();
+        let mut child = command
             .env("AUGUST_WORKSPACE", crate::config::workspace().unwrap_or_default())
             .env("AUGUST_HOME", crate::config::home())
             .stdin(Stdio::piped())
@@ -74,7 +68,7 @@ impl Host {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| format!("could not run {}: {e}", bun.display()))?;
+            .map_err(|e| format!("could not run {program}: {e}"))?;
         let stdin = Arc::new(Mutex::new(child.stdin.take().expect("piped stdin")));
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");

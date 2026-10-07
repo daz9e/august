@@ -2,8 +2,10 @@
 name = "august"
 version = "0.1.0"
 edition = "2024"
+default-run = "august"
 
 [dependencies]
+august-ext = { path = "extensions/sdk" }
 anyhow = "1"
 async-trait = "0.1"
 base64 = "0.23.1"
@@ -21,6 +23,39 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11.0"
 tokio = { version = "1", features = ["full"] }
+
+[[bin]]
+name = "august"
+path = "src/main.rs"
+
+# Default extensions: each its own process, started by the gateway.
+[[bin]]
+name = "august-ext-browser"
+path = "extensions/browser/main.rs"
+
+[[bin]]
+name = "august-ext-clarify"
+path = "extensions/clarify/main.rs"
+
+[[bin]]
+name = "august-ext-goal"
+path = "extensions/goal/main.rs"
+
+[[bin]]
+name = "august-ext-mcp"
+path = "extensions/mcp/main.rs"
+
+[[bin]]
+name = "august-ext-subagents"
+path = "extensions/subagents/main.rs"
+
+[[bin]]
+name = "august-ext-voice"
+path = "extensions/voice/main.rs"
+
+[[bin]]
+name = "august-ext-web"
+path = "extensions/web/main.rs"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

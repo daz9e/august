@@ -1,0 +1,10 @@
+[package]
+name = "august-ext"
+version = "0.1.0"
+edition = "2024"
+description = "SDK for August's default extensions: the extension protocol over stdio"
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["io-std", "io-util", "rt", "sync"] }

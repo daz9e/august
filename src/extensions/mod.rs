@@ -1,7 +1,9 @@
-//! Extensions: TypeScript files in `~/.august/extensions/<name>/index.ts` that add tools,
-//! slash commands and hooks. Default extensions (the repo's `extensions/`) are built in and
-//! written to `.runtime/defaults/` on load; a user extension of the same name replaces one. Each runs in its own bun process (see `host.rs`), so a
-//! broken or hanging extension can't take the gateway down.
+//! Extensions add tools, slash commands and hooks. User extensions are TypeScript files in
+//! `~/.august/extensions/<name>/index.ts`, run by bun through `host.ts`. Default extensions
+//! (the repo's `extensions/<name>/main.rs`) are Rust binaries `august-ext-<name>` next to
+//! `august`, speaking the same protocol; a user extension of the same name replaces one.
+//! Each extension is its own process (see `host.rs`), so a broken or hanging one can't take
+//! the gateway down.
 
 mod host;
 
@@ -19,16 +21,8 @@ use std::time::Duration;
 const HOST_TS: &str = include_str!("host.ts");
 const TYPES: &str = include_str!("august.d.ts");
 const GUIDE: &str = include_str!("guide.md");
-/// `(name, index.ts)` of the extensions that ship with August.
-const DEFAULTS: &[(&str, &str)] = &[
-    ("browser", include_str!("../../extensions/browser/index.ts")),
-    ("web", include_str!("../../extensions/web/index.ts")),
-    ("goal", include_str!("../../extensions/goal/index.ts")),
-    ("subagents", include_str!("../../extensions/subagents/index.ts")),
-    ("clarify", include_str!("../../extensions/clarify/index.ts")),
-    ("mcp", include_str!("../../extensions/mcp/index.ts")),
-    ("voice", include_str!("../../extensions/voice/index.ts")),
-];
+/// The extensions that ship with August, as binaries `august-ext-<name>` next to `august`.
+const DEFAULTS: &[&str] = &["browser", "clarify", "goal", "mcp", "subagents", "voice", "web"];
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message_in` may do real work on attachments (e.g. transcribe a voice note).
@@ -81,9 +75,27 @@ enum State {
     Disabled,
 }
 
+/// How an extension is started.
+#[derive(Clone)]
+enum Launch {
+    /// A TypeScript or JavaScript entry file, run by bun through `host.ts`.
+    Script(PathBuf),
+    /// A default extension's binary; `dir` is its folder (state, the `disabled` marker).
+    Binary { exe: PathBuf, dir: PathBuf },
+}
+
+impl Launch {
+    fn dir(&self) -> PathBuf {
+        match self {
+            Launch::Script(entry) => entry.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            Launch::Binary { dir, .. } => dir.clone(),
+        }
+    }
+}
+
 struct Slot {
     name: String,
-    entry: PathBuf,
+    launch: Launch,
     state: State,
     /// Identifies the process; exits of replaced processes are ignored.
     generation: u64,
@@ -129,18 +141,10 @@ fn entry_of(folder: &Path) -> Option<PathBuf> {
     ENTRIES.iter().map(|e| folder.join(e)).find(|p| p.is_file())
 }
 
-/// `(name, entry file)` of every extension folder in `dirs`, sorted by name; the first
-/// folder of a name wins.
-fn discover(dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
-    let mut found: Vec<(String, PathBuf)> = Vec::new();
-    for e in dirs.iter().flat_map(std::fs::read_dir).flatten().filter_map(|e| e.ok()) {
-        let name = e.file_name().to_string_lossy().to_string();
-        if valid_name(&name) && !found.iter().any(|(n, _)| *n == name) && let Some(entry) = entry_of(&e.path()) {
-            found.push((name, entry));
-        }
-    }
-    found.sort();
-    found
+/// `august-ext-<name>` next to the running binary.
+fn default_binary(name: &str) -> PathBuf {
+    let exe = std::env::current_exe().unwrap_or_default();
+    exe.parent().unwrap_or(Path::new(".")).join(format!("august-ext-{name}"))
 }
 
 fn stopped(data: &Value) -> bool {
@@ -177,19 +181,31 @@ impl Extensions {
         self.dir.join(".runtime/defaults")
     }
 
-    /// User extensions first, then the defaults.
-    fn dirs(&self) -> [PathBuf; 2] {
-        [self.dir.clone(), self.defaults_dir()]
+    /// Every extension, sorted by name: the user's ones, then the defaults they don't replace.
+    fn discover(&self) -> Vec<(String, Launch)> {
+        let mut found: Vec<(String, Launch)> = Vec::new();
+        for e in std::fs::read_dir(&self.dir).into_iter().flatten().filter_map(|e| e.ok()) {
+            let name = e.file_name().to_string_lossy().to_string();
+            if valid_name(&name) && let Some(entry) = entry_of(&e.path()) {
+                found.push((name, Launch::Script(entry)));
+            }
+        }
+        for name in DEFAULTS {
+            if !found.iter().any(|(n, _)| n == name) {
+                let launch = Launch::Binary { exe: default_binary(name), dir: self.defaults_dir().join(name) };
+                found.push((name.to_string(), launch));
+            }
+        }
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
     }
 
-    fn write_defaults(&self) -> std::io::Result<()> {
-        for (name, source) in DEFAULTS {
+    /// Folders of the defaults; drops the TypeScript copies earlier versions wrote there.
+    fn prepare_defaults(&self) -> std::io::Result<()> {
+        for name in DEFAULTS {
             let folder = self.defaults_dir().join(name);
             std::fs::create_dir_all(&folder)?;
-            let entry = folder.join("index.ts");
-            if std::fs::read_to_string(&entry).ok().as_deref() != Some(source) {
-                std::fs::write(entry, source)?;
-            }
+            std::fs::remove_file(folder.join("index.ts")).ok();
         }
         Ok(())
     }
@@ -213,11 +229,25 @@ impl Extensions {
         Ok((bun, host))
     }
 
-    async fn spawn(&self, name: &str, entry: &Path) -> (u64, State) {
+    async fn spawn(&self, name: &str, launch: &Launch) -> (u64, State) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let (bun, host_ts) = match self.runtime() {
-            Ok(r) => r,
-            Err(e) => return (generation, State::Failed(e)),
+        let command = match launch {
+            Launch::Script(entry) => match self.runtime() {
+                Ok((bun, host_ts)) => {
+                    let mut c = tokio::process::Command::new(bun);
+                    c.arg("run").arg(host_ts).arg(entry).arg(name).current_dir(launch.dir());
+                    c
+                }
+                Err(e) => return (generation, State::Failed(e)),
+            },
+            Launch::Binary { exe, dir } => {
+                if !exe.is_file() {
+                    return (generation, State::Failed(format!("{} is missing; build it with `cargo build`", exe.display())));
+                }
+                let mut c = tokio::process::Command::new(exe);
+                c.current_dir(dir).env("AUGUST_EXTENSION_DIR", dir);
+                c
+            }
         };
         let core = self.core.read().unwrap().clone();
         let (me, n) = (self.me.clone(), name.to_string());
@@ -226,7 +256,7 @@ impl Extensions {
                 me.crashed(&n, generation, tail);
             }
         });
-        let state = match Host::start(&bun, &host_ts, name, entry, core, on_exit).await {
+        let state = match Host::start(command, name, core, on_exit).await {
             Ok(h) => State::Running(Arc::new(h)),
             Err(e) => State::Failed(e),
         };
@@ -252,38 +282,38 @@ impl Extensions {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(1 << restarts)).await;
             let Some(me) = me.upgrade() else { return };
-            let Some(entry) = me.slot_entry(&name, generation) else { return };
-            let (new_gen, state) = me.spawn(&name, &entry).await;
+            let Some(launch) = me.slot_launch(&name, generation) else { return };
+            let (new_gen, state) = me.spawn(&name, &launch).await;
             let mut slots = me.slots.write().unwrap();
             if let Some(slot) = slots.iter_mut().find(|s| s.name == name && s.generation == generation) {
                 eprintln!("extension {name}: restarted");
-                *slot = Slot { name, entry, state, generation: new_gen, restarts: restarts + 1 };
+                *slot = Slot { name, launch, state, generation: new_gen, restarts: restarts + 1 };
             }
         });
     }
 
-    fn slot_entry(&self, name: &str, generation: u64) -> Option<PathBuf> {
+    fn slot_launch(&self, name: &str, generation: u64) -> Option<Launch> {
         let slots = self.slots.read().unwrap();
-        slots.iter().find(|s| s.name == name && s.generation == generation).map(|s| s.entry.clone())
+        slots.iter().find(|s| s.name == name && s.generation == generation).map(|s| s.launch.clone())
     }
 
     /// Stops every extension and starts what is on disk now. Returns the status report.
     pub async fn reload(&self) -> String {
-        if let Err(e) = self.write_defaults() {
-            eprintln!("could not write default extensions: {e}");
+        if let Err(e) = self.prepare_defaults() {
+            eprintln!("could not prepare default extensions: {e}");
         }
-        let found = discover(&self.dirs());
-        let started = futures_util::future::join_all(found.iter().map(|(name, entry)| async move {
-            match entry.with_file_name(DISABLED).exists() {
+        let found = self.discover();
+        let started = futures_util::future::join_all(found.iter().map(|(name, launch)| async move {
+            match launch.dir().join(DISABLED).exists() {
                 true => (0, State::Disabled),
-                false => self.spawn(name, entry).await,
+                false => self.spawn(name, launch).await,
             }
         }))
         .await;
         let slots = found
             .into_iter()
             .zip(started)
-            .map(|((name, entry), (generation, state))| Slot { name, entry, state, generation, restarts: 0 })
+            .map(|((name, launch), (generation, state))| Slot { name, launch, state, generation, restarts: 0 })
             .collect();
         *self.slots.write().unwrap() = slots; // old processes are killed as they drop
         self.status()
@@ -291,11 +321,11 @@ impl Extensions {
 
     /// (Re)starts one extension after it was saved, enabling it. Returns its status line.
     pub async fn load(&self, name: &str) -> Result<String> {
-        let entry = self.entry(name)?;
-        std::fs::remove_file(entry.with_file_name(DISABLED)).ok();
-        let (generation, state) = self.spawn(name, &entry).await;
+        let launch = self.launch(name)?;
+        std::fs::remove_file(launch.dir().join(DISABLED)).ok();
+        let (generation, state) = self.spawn(name, &launch).await;
         let ok = matches!(state, State::Running(_));
-        let slot = Slot { name: name.to_string(), entry, state, generation, restarts: 0 };
+        let slot = Slot { name: name.to_string(), launch, state, generation, restarts: 0 };
         let line = {
             let mut slots = self.slots.write().unwrap();
             slots.retain(|s| s.name != name);
@@ -309,18 +339,18 @@ impl Extensions {
         Ok(line)
     }
 
-    fn entry(&self, name: &str) -> Result<PathBuf> {
-        let found = discover(&self.dirs()).into_iter().find(|(n, _)| n == name);
-        found.map(|(_, entry)| entry).ok_or_else(|| anyhow::anyhow!("no extension named `{name}`"))
+    fn launch(&self, name: &str) -> Result<Launch> {
+        let found = self.discover().into_iter().find(|(n, _)| n == name);
+        found.map(|(_, launch)| launch).ok_or_else(|| anyhow::anyhow!("no extension named `{name}`"))
     }
 
     /// Stops an extension and keeps it from starting until it is enabled or saved again.
     pub fn disable(&self, name: &str) -> Result<()> {
-        let entry = self.entry(name)?;
-        std::fs::write(entry.with_file_name(DISABLED), "")?;
+        let launch = self.launch(name)?;
+        std::fs::write(launch.dir().join(DISABLED), "")?;
         let mut slots = self.slots.write().unwrap();
         slots.retain(|s| s.name != name); // the process is killed as it drops
-        slots.push(Slot { name: name.to_string(), entry, state: State::Disabled, generation: 0, restarts: 0 });
+        slots.push(Slot { name: name.to_string(), launch, state: State::Disabled, generation: 0, restarts: 0 });
         slots.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(())
     }

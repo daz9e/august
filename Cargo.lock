@@ -49,6 +49,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "august-ext",
  "axum",
  "base64 0.23.1",
  "chrono",
@@ -65,6 +66,15 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "august-ext"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
  "tokio",
 ]
 
