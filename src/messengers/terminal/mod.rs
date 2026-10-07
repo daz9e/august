@@ -8,9 +8,9 @@
 //! - client → August: `{"type":"hello"}` first, then `{"type":"text","text":...}` (a
 //!   message or `/command`) and `{"type":"press","button":...}`.
 //! - August → client: `{"type":"hello","thread":...}`, `{"type":"send","id":...,"text":...,
-//!   "buttons":[{"id":...,"label":...}]}`, `{"type":"edit","id":...,"text":...,"buttons":[...]}`,
-//!   `{"type":"file","path":...,"caption":...}` and `{"type":"idle"}` (nothing more to say
-//!   for now).
+//!   "buttons":[[{"id":...,"label":...}]],"files":[path...]}` (button rows; files with the
+//!   text as caption), `{"type":"edit","id":...,"text":...,"buttons":[[...]]}` and
+//!   `{"type":"idle"}` (nothing more to say for now).
 
 pub mod client;
 
@@ -46,10 +46,14 @@ pub struct WireButton {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ToClient {
     Hello { thread: String },
-    Send { id: String, text: String, buttons: Vec<WireButton> },
-    Edit { id: String, text: String, buttons: Vec<WireButton> },
-    File { path: String, caption: String },
+    /// `buttons` in rows; `files` are local paths (the text is their caption).
+    Send { id: String, text: String, buttons: Vec<Vec<WireButton>>, files: Vec<String> },
+    Edit { id: String, text: String, buttons: Vec<Vec<WireButton>> },
     Idle,
+}
+
+fn wire(rows: &[Vec<super::Button>]) -> Vec<Vec<WireButton>> {
+    rows.iter().map(|r| r.iter().map(|b| WireButton { id: b.id.clone(), label: b.label.clone() }).collect()).collect()
 }
 
 /// Where terminals connect.
@@ -108,7 +112,7 @@ impl Clients {
                     Some((name, args)) => InboundKind::Command { name, args },
                     None => InboundKind::Message { text: text.trim().to_string(), files: Vec::new() },
                 },
-                Ok(ToAugust::Press { button }) => InboundKind::Press { button, ack: String::new() },
+                Ok(ToAugust::Press { button }) => InboundKind::Press { button },
                 Ok(ToAugust::Hello) | Err(_) => continue,
             };
             bus.publish(Inbound { thread: thread.clone(), user: user.clone(), kind });
@@ -179,14 +183,13 @@ impl Messenger for Terminal {
 
     async fn send(&self, thread: &str, message: &OutMessage) -> Result<String> {
         let id = self.0.next_message.fetch_add(1, Ordering::Relaxed).to_string();
-        let buttons = message.buttons.iter().map(|b| WireButton { id: b.id.clone(), label: b.label.clone() }).collect();
-        self.0.to(thread, ToClient::Send { id: id.clone(), text: message.text.clone(), buttons })?;
+        let files = message.files.iter().map(|p| p.display().to_string()).collect();
+        self.0.to(thread, ToClient::Send { id: id.clone(), text: message.text.clone(), buttons: wire(&message.buttons), files })?;
         Ok(id)
     }
 
     async fn edit(&self, thread: &str, id: &str, message: &OutMessage) -> Result<()> {
-        let buttons = message.buttons.iter().map(|b| WireButton { id: b.id.clone(), label: b.label.clone() }).collect();
-        self.0.to(thread, ToClient::Edit { id: id.into(), text: message.text.clone(), buttons })
+        self.0.to(thread, ToClient::Edit { id: id.into(), text: message.text.clone(), buttons: wire(&message.buttons) })
     }
 
     async fn typing(&self, _thread: &str) -> Result<()> {
@@ -197,16 +200,8 @@ impl Messenger for Terminal {
         Ok(())
     }
 
-    async fn ack(&self, _press: &str) -> Result<()> {
-        Ok(())
-    }
-
     async fn download(&self, _file: &Attachment) -> Result<Vec<u8>> {
         bail!("the terminal has no attachments")
-    }
-
-    async fn send_file(&self, thread: &str, path: &std::path::Path, caption: &str) -> Result<()> {
-        self.0.to(thread, ToClient::File { path: path.display().to_string(), caption: caption.into() })
     }
 
     async fn idle(&self, thread: &str) {

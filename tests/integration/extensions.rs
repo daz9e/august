@@ -537,3 +537,29 @@ async fn extensions_run_quiet_fork_and_fresh_turns() {
     chat.ask("/stop", "Stopping…").await;
     chat.wait_for("spawned cancelled").await;
 }
+
+const CARD: &str = r#"export default function (august) {
+  august.registerCommand("card", async (_, ctx) => {
+    await ctx.send({
+      text: "Pick one",
+      buttons: [[{ id: "a", label: "Alpha" }], [{ id: "b", label: "Beta" }]],
+      files: [`${august.workspace}/note.txt`],
+    });
+  });
+}"#;
+
+#[tokio::test]
+async fn one_message_carries_text_button_rows_and_files() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("ok"))).await;
+    let setup = Setup { seed: &[("note.txt", b"hi")], home: &[("extensions/card/index.ts", CARD)], ..Default::default() };
+    let gw = august(&fake, setup).await;
+    let mut chat = gw.chat().await;
+    chat.say("/card").await;
+    let card = chat.wait_for("Pick one").await;
+    let labels: Vec<&str> = card.buttons.iter().map(|(_, l)| l.as_str()).collect();
+    assert_eq!(labels, ["Alpha", "Beta"]);
+    assert!(chat.files().iter().any(|(p, c)| p.ends_with("note.txt") && c == "Pick one"), "{:?}", chat.files());
+}

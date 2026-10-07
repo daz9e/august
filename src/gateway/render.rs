@@ -58,7 +58,8 @@ pub(super) async fn render(channel: Arc<dyn Messenger>, chat: String, mut rx: mp
                         if dirty {
                             flush(&*channel, &chat, &buf, &mut sent, caps.max_len).await;
                         }
-                        done.send(channel.send_file(&chat, &path, &caption).await).ok();
+                        let file = OutMessage { text: caption, files: vec![path], ..Default::default() };
+                        done.send(channel.send(&chat, &file).await.map(drop)).ok();
                         buf.clear();
                         sent.clear();
                         dirty = false;

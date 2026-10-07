@@ -5,8 +5,8 @@ mod api;
 mod markdown;
 
 use super::{
-    Attachment, Button, Capabilities, CommandSpec, Description, Inbound, InboundKind, Messenger, MessengerDef,
-    OutMessage, Thread, User, parse_command,
+    Attachment, Button, Capabilities, CommandSpec, Description, FileKind, Inbound, InboundKind, Messenger,
+    MessengerDef, OutMessage, Thread, User, parse_command,
 };
 use crate::messengers::bus::Bus;
 use crate::config;
@@ -80,6 +80,8 @@ enum Parsed {
     /// Sender is not on the allowlist: `(chat id, user id)`.
     Deny(i64, i64),
     Event(Inbound),
+    /// A button press, with the callback id to confirm it.
+    Press(Inbound, String),
 }
 
 fn display_name(from: &Value) -> String {
@@ -108,17 +110,15 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
         if !allowed.contains(&user) {
             return Parsed::Deny(chat, user);
         }
-        return Parsed::Event(Inbound {
+        let press = Inbound {
             thread: chat_of(chat),
             user: User {
                 id: user.to_string(),
                 name: display_name(&cb["from"]),
             },
-            kind: InboundKind::Press {
-                button: cb["data"].as_str().unwrap_or("").to_string(),
-                ack: id.to_string(),
-            },
-        });
+            kind: InboundKind::Press { button: cb["data"].as_str().unwrap_or("").to_string() },
+        };
+        return Parsed::Press(press, id.to_string());
     }
 
     let m = &u["message"];
@@ -173,9 +173,10 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
 /// Files attached to a message: the largest size of a photo, or a document,
 /// video, audio, voice note or animation.
 fn attachments(m: &Value) -> Vec<Attachment> {
-    let file = |f: &Value, mime: Option<&str>| {
+    let file = |f: &Value, mime: Option<&str>, kind: FileKind| {
         Some(Attachment {
             id: f["file_id"].as_str()?.to_string(),
+            kind,
             name: f["file_name"].as_str().map(str::to_string),
             mime: f["mime_type"].as_str().or(mime).map(str::to_string),
             size: f["file_size"].as_u64(),
@@ -184,11 +185,27 @@ fn attachments(m: &Value) -> Vec<Attachment> {
     let mut out = Vec::new();
     if let Some(sizes) = m["photo"].as_array() {
         let largest = sizes.iter().max_by_key(|p| p["width"].as_u64().unwrap_or(0) * p["height"].as_u64().unwrap_or(0));
-        out.extend(largest.and_then(|p| file(p, Some("image/jpeg"))));
+        out.extend(largest.and_then(|p| file(p, Some("image/jpeg"), FileKind::Image)));
     }
-    for key in ["document", "video", "audio", "voice", "animation"] {
+    let kinds = [
+        ("document", FileKind::Document),
+        ("video", FileKind::Video),
+        ("audio", FileKind::Audio),
+        ("voice", FileKind::Voice),
+        ("animation", FileKind::Video),
+    ];
+    for (key, kind) in kinds {
         if m[key].is_object() {
-            out.extend(file(&m[key], None));
+            out.extend(file(&m[key], None, kind));
+        }
+    }
+    // A document that is an image or audio is that, for whoever reads the message.
+    for a in &mut out {
+        let mime = a.mime.as_deref().unwrap_or("");
+        if a.kind == FileKind::Document && mime.starts_with("image/") {
+            a.kind = FileKind::Image;
+        } else if a.kind == FileKind::Document && mime.starts_with("audio/") {
+            a.kind = FileKind::Audio;
         }
     }
     out
@@ -215,17 +232,62 @@ impl Telegram {
     }
 }
 
+impl Telegram {
+    /// Uploads one file (a photo where it can be), with an optional caption; its message id.
+    async fn upload_file(&self, chat: &str, path: &std::path::Path, caption: &str) -> Result<String> {
+        let bytes = tokio::fs::read(path).await.with_context(|| format!("read {}", path.display()))?;
+        let size = bytes.len() as u64;
+        if size > MAX_UPLOAD {
+            bail!("file is larger than the 50 MB Telegram lets bots upload");
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+        let mut params = json!({"chat_id": chat_id(chat)});
+        if !caption.is_empty() {
+            params["caption"] = caption.chars().take(MAX_CAPTION).collect::<String>().into();
+        }
+        let photo = matches!(crate::util::mime_for(&name), "image/jpeg" | "image/png" | "image/webp");
+        if photo && size <= MAX_PHOTO {
+            match self.api.upload("sendPhoto", params.clone(), "photo", &name, &bytes).await {
+                Ok(sent) => return Ok(sent["message_id"].to_string()),
+                // e.g. unusual dimensions: still deliver it, as a file
+                Err(e) => eprintln!("telegram: sendPhoto failed, sending as a document: {e:#}"),
+            }
+        }
+        let sent = self.api.upload("sendDocument", params, "document", &name, &bytes).await?;
+        Ok(sent["message_id"].to_string())
+    }
+
+    /// A message with files: a short text without buttons is the caption of a single file;
+    /// otherwise the text (with its buttons) goes first. Returns the first message's id.
+    async fn send_files(&self, chat: &str, message: &OutMessage) -> Result<String> {
+        let caption_fits = message.files.len() == 1 && message.buttons.is_empty() && message.text.chars().count() <= MAX_CAPTION;
+        let mut first = None;
+        let caption = if caption_fits || message.text.trim().is_empty() {
+            message.text.clone()
+        } else {
+            let text = OutMessage { files: Vec::new(), ..message.clone() };
+            first = Some(self.send(chat, &text).await?);
+            String::new()
+        };
+        for (i, path) in message.files.iter().enumerate() {
+            let id = self.upload_file(chat, path, if i == 0 { &caption } else { "" }).await?;
+            first.get_or_insert(id);
+        }
+        Ok(first.unwrap_or_default())
+    }
+}
+
 fn chat_id(chat: &str) -> Value {
     chat.parse::<i64>().map(Value::from).unwrap_or_else(|_| chat.into())
 }
 
-fn markup(buttons: &[Button]) -> Option<Value> {
-    (!buttons.is_empty()).then(|| {
-        let row: Vec<Value> = buttons
+fn markup(rows: &[Vec<Button>]) -> Option<Value> {
+    (rows.iter().any(|r| !r.is_empty())).then(|| {
+        let rows: Vec<Vec<Value>> = rows
             .iter()
-            .map(|b| json!({"text": b.label, "callback_data": b.id}))
+            .map(|row| row.iter().map(|b| json!({"text": b.label, "callback_data": b.id})).collect())
             .collect();
-        json!({"inline_keyboard": [row]})
+        json!({"inline_keyboard": rows})
     })
 }
 
@@ -299,6 +361,11 @@ impl Messenger for Telegram {
                         eprintln!("telegram · {} ({}): {:?}", e.user.name, e.user.id, e.kind);
                         bus.publish(e)
                     }
+                    Parsed::Press(e, callback) => {
+                        // Stops the button's spinner.
+                        self.api.call("answerCallbackQuery", json!({"callback_query_id": callback})).await.ok();
+                        bus.publish(e)
+                    }
                     Parsed::Deny(chat, user) => {
                         eprintln!("telegram: rejected user {user}");
                         let text = format!(
@@ -316,6 +383,9 @@ impl Messenger for Telegram {
     }
 
     async fn send(&self, chat: &str, message: &OutMessage) -> Result<String> {
+        if !message.files.is_empty() {
+            return self.send_files(chat, message).await;
+        }
         let (markdown, buttons) = (message.text.as_str(), &message.buttons);
         let mut params = json!({
             "chat_id": chat_id(chat),
@@ -323,6 +393,9 @@ impl Messenger for Telegram {
             "parse_mode": "HTML",
             "link_preview_options": {"is_disabled": true},
         });
+        if let Some(to) = message.reply_to.as_deref().and_then(|id| id.parse::<i64>().ok()) {
+            params["reply_parameters"] = json!({"message_id": to, "allow_sending_without_reply": true});
+        }
         if let Some(m) = markup(buttons) {
             params["reply_markup"] = m;
         }
@@ -392,13 +465,6 @@ impl Messenger for Telegram {
             .map(|_| ())
     }
 
-    async fn ack(&self, press: &str) -> Result<()> {
-        self.api
-            .call("answerCallbackQuery", json!({"callback_query_id": press}))
-            .await
-            .map(|_| ())
-    }
-
     async fn download(&self, file: &Attachment) -> Result<Vec<u8>> {
         if file.size.is_some_and(|s| s > MAX_DOWNLOAD) {
             bail!("file is larger than the 20 MB Telegram lets bots download");
@@ -406,27 +472,6 @@ impl Messenger for Telegram {
         self.api.download(&file.id).await
     }
 
-    async fn send_file(&self, chat: &str, path: &std::path::Path, caption: &str) -> Result<()> {
-        let bytes = tokio::fs::read(path).await.with_context(|| format!("read {}", path.display()))?;
-        let size = bytes.len() as u64;
-        if size > MAX_UPLOAD {
-            bail!("file is larger than the 50 MB Telegram lets bots upload");
-        }
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
-        let mut params = json!({"chat_id": chat_id(chat)});
-        if !caption.is_empty() {
-            params["caption"] = caption.chars().take(MAX_CAPTION).collect::<String>().into();
-        }
-        let photo = matches!(crate::util::mime_for(&name), "image/jpeg" | "image/png" | "image/webp");
-        if photo && size <= MAX_PHOTO {
-            match self.api.upload("sendPhoto", params.clone(), "photo", &name, &bytes).await {
-                Ok(_) => return Ok(()),
-                // e.g. unusual dimensions: still deliver it, as a file
-                Err(e) => eprintln!("telegram: sendPhoto failed, sending as a document: {e:#}"),
-            }
-        }
-        self.api.upload("sendDocument", params, "document", &name, &bytes).await.map(|_| ())
-    }
 }
 
 // ---------------------------------------------------------------- vendor / setup
@@ -585,8 +630,9 @@ mod tests {
     fn callbacks() {
         let u = json!({"update_id": 2, "callback_query": {"id": "cb1", "from": {"id": 7, "first_name": "A"},
             "message": {"chat": {"id": 5}}, "data": "k1.0"}});
-        let Parsed::Event(e) = parse_update(&u, &bot(), &[7]) else { panic!() };
-        assert!(matches!(e.kind, InboundKind::Press { ref button, ref ack } if button == "k1.0" && ack == "cb1"));
+        let Parsed::Press(e, callback) = parse_update(&u, &bot(), &[7]) else { panic!() };
+        assert!(matches!(e.kind, InboundKind::Press { ref button } if button == "k1.0"));
+        assert_eq!(callback, "cb1");
         assert!(matches!(parse_update(&u, &bot(), &[1]), Parsed::Deny(5, 7)));
     }
 

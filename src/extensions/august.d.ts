@@ -8,8 +8,10 @@ declare module "august" {
 
   /** A button under a message; a press comes back with its `id`. */
   export type Button = { id: string; label: string };
-  /** What to send: Markdown text, optionally with buttons. Each messenger renders it its own way. */
-  export type OutMessage = string | { text: string; buttons?: Button[] };
+  /** What to send: Markdown text, optionally with buttons (one row, or rows), local files (the
+   *  text is their caption) and the id of a message it answers. Each messenger renders all of
+   *  it its own way, degrading what it can't show. */
+  export type OutMessage = string | { text: string; buttons?: Button[] | Button[][]; files?: string[]; reply_to?: string };
 
   /** What a messenger says about itself. */
   export interface Messenger {
@@ -98,7 +100,10 @@ declare module "august" {
   export interface Events {
     /** A user message arrived (before the agent sees it). `files`: its attachments, already
      *  saved in the workspace (`path` is absolute); `voice` marks a recorded voice note. */
-    message_in: { text: string; files: { path: string; mime: string; voice: boolean }[] };
+    message_in: {
+      text: string;
+      files: { path: string; mime: string; kind: "voice" | "audio" | "image" | "video" | "document"; voice: boolean }[];
+    };
     /** A turn is about to start; `system` is the base system prompt. */
     before_turn: { text: string; system: string };
     /** The model wants to run a tool. */

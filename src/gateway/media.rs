@@ -14,7 +14,7 @@ pub(super) const INBOX: &str = "inbox";
 impl Gateway {
     /// Downloads `files` into the inbox. Returns a note for the model (where each
     /// file is, or why it is missing), image blocks for the ones it can see, and the
-    /// saved files for `message_in` (`{path, mime, voice}`).
+    /// saved files for `message_in` (`{path, mime, kind, voice}`).
     pub(super) async fn receive(&self, channel: &dyn Messenger, files: &[Attachment]) -> (String, Vec<Block>, Vec<Value>) {
         let mut notes = Vec::new();
         let mut images = Vec::new();
@@ -26,9 +26,8 @@ impl Gateway {
                     let mime = file.mime.clone().unwrap_or_else(|| mime_for(&name).to_string());
                     let rel = path.strip_prefix(&self.workspace).unwrap_or(&path).display().to_string();
                     notes.push(format!("[Attached file saved to {rel} ({mime}, {})]", human_size(size)));
-                    // Voice notes carry no file name; audio files do.
-                    let voice = mime.starts_with("audio/") && file.name.is_none();
-                    saved.push(json!({"path": path, "mime": mime, "voice": voice}));
+                    let voice = file.kind == crate::messengers::FileKind::Voice;
+                    saved.push(json!({"path": path, "mime": mime, "kind": file.kind, "voice": voice}));
                     if IMAGE_TYPES.contains(&mime.as_str()) && size as usize <= MAX_IMAGE_BYTES {
                         images.push(Block::Image { media_type: mime, path: path.display().to_string() });
                     }

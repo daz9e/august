@@ -305,16 +305,11 @@ impl Gateway {
         self.activity.lock().unwrap().insert(ev.thread.clone(), chrono::Utc::now().timestamp_millis());
         // What something waits for (the answer to a question) goes there first.
         if self.waits.offer(&ev) {
-            if let InboundKind::Press { ack, .. } = &ev.kind {
-                channel.ack(ack).await.ok();
-            }
             return Ok(());
         }
         match ev.kind {
             // A button of a question nobody waits for any more.
-            InboundKind::Press { ack, .. } => {
-                channel.ack(&ack).await.ok();
-            }
+            InboundKind::Press { .. } => {}
             InboundKind::Command { name, args } => self.command(&channel, &ev.thread, &name, &args).await?,
             InboundKind::Message { text, files } if text.is_empty() && files.is_empty() => {}
             InboundKind::Message { text, files } => {

@@ -78,15 +78,19 @@ impl Screen {
     fn show(&mut self, msg: ToClient) {
         match msg {
             ToClient::Hello { .. } => {}
-            ToClient::Send { id, text, buttons } => {
+            ToClient::Send { id, text, buttons, files } => {
                 self.shown.insert(id.clone(), text.clone());
+                let buttons: Vec<WireButton> = buttons.into_iter().flatten().collect();
                 if !buttons.is_empty() {
                     self.asked.insert(id.clone());
                     self.open.push_back((id, buttons));
                 }
+                let files: Vec<String> = files.iter().map(|f| format!("📎 {f}")).collect();
+                let text = [text, files.join("\n")].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n");
                 self.print(&text, true);
             }
             ToClient::Edit { id, text, buttons } => {
+                let buttons: Vec<WireButton> = buttons.into_iter().flatten().collect();
                 // An edit without buttons settles a question (answered or timed out); one with
                 // buttons asks (again).
                 self.open.retain(|(open, _)| *open != id);
@@ -109,10 +113,6 @@ impl Screen {
                         None => self.print(&text, true),
                     }
                 }
-            }
-            ToClient::File { path, caption } => {
-                let caption = if caption.is_empty() { String::new() } else { format!(" — {caption}") };
-                self.print(&format!("📎 {path}{caption}"), true);
             }
             ToClient::Idle => self.prompt(),
         }

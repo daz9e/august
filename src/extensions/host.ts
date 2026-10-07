@@ -20,7 +20,7 @@ const write = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n")
 
 type Thread = { messenger: string; id: string };
 type Button = { id: string; label: string };
-type Message = string | { text: string; buttons?: Button[] };
+type Message = string | { text: string; buttons?: Button[] | Button[][]; files?: string[]; reply_to?: string };
 
 let nextId = 1;
 const waiting = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();

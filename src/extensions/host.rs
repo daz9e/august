@@ -201,16 +201,20 @@ fn thread(params: &Value) -> anyhow::Result<Thread> {
 fn message(params: &Value) -> anyhow::Result<OutMessage> {
     let m = &params["message"];
     let text = m.as_str().or(m["text"].as_str()).ok_or_else(|| anyhow::anyhow!("missing `message.text`"))?;
-    let buttons = m["buttons"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|b| match (b["id"].as_str(), b["label"].as_str()) {
-            (Some(id), Some(label)) => Ok(Button { id: id.into(), label: label.into() }),
-            _ => Err(anyhow::anyhow!("a button needs `id` and `label`")),
-        })
-        .collect::<anyhow::Result<_>>()?;
-    Ok(OutMessage { text: text.into(), buttons })
+    let button = |b: &Value| match (b["id"].as_str(), b["label"].as_str()) {
+        (Some(id), Some(label)) => Ok(Button { id: id.into(), label: label.into() }),
+        _ => Err(anyhow::anyhow!("a button needs `id` and `label`")),
+    };
+    // Rows of buttons, or one flat list as a single row.
+    let list = m["buttons"].as_array().cloned().unwrap_or_default();
+    let buttons = if list.iter().all(Value::is_array) {
+        list.iter().map(|row| row.as_array().into_iter().flatten().map(button).collect()).collect::<anyhow::Result<_>>()?
+    } else {
+        vec![list.iter().map(button).collect::<anyhow::Result<_>>()?]
+    };
+    let files = m["files"].as_array().into_iter().flatten().filter_map(Value::as_str).map(std::path::PathBuf::from).collect();
+    let reply_to = m["reply_to"].as_str().map(String::from);
+    Ok(OutMessage { text: text.into(), buttons, files, reply_to })
 }
 
 /// A call from extension `name` into August.

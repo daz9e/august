@@ -381,7 +381,10 @@ impl Seen {
     fn apply(&mut self, ev: Value) {
         match ev["type"].as_str().unwrap_or("") {
             "send" => {
-                let buttons = ev["buttons"].as_array().into_iter().flatten()
+                for f in ev["files"].as_array().into_iter().flatten() {
+                    self.files.push((f.as_str().unwrap().into(), ev["text"].as_str().unwrap_or("").into()));
+                }
+                let buttons = ev["buttons"].as_array().into_iter().flatten().flat_map(|row| row.as_array().cloned().unwrap_or_default())
                     .map(|b| (b["id"].as_str().unwrap().to_string(), b["label"].as_str().unwrap().to_string())).collect();
                 self.msgs.push(Msg { id: ev["id"].as_str().unwrap().into(), text: ev["text"].as_str().unwrap().into(), buttons, edited: false });
                 self.history.push(ev["text"].as_str().unwrap().into());
@@ -389,13 +392,12 @@ impl Seen {
             "edit" => {
                 if let Some(m) = self.msgs.iter_mut().find(|m| m.id == ev["id"]) {
                     m.text = ev["text"].as_str().unwrap().into();
-                    m.buttons = ev["buttons"].as_array().into_iter().flatten()
+                    m.buttons = ev["buttons"].as_array().into_iter().flatten().flat_map(|row| row.as_array().cloned().unwrap_or_default())
                         .map(|b| (b["id"].as_str().unwrap().to_string(), b["label"].as_str().unwrap().to_string())).collect();
                     m.edited = m.buttons.is_empty();
                 }
                 self.history.push(ev["text"].as_str().unwrap().into());
             }
-            "file" => self.files.push((ev["path"].as_str().unwrap().into(), ev["caption"].as_str().unwrap_or("").into())),
             "idle" => self.idle += 1,
             _ => {}
         }

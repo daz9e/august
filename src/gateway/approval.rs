@@ -24,8 +24,7 @@ pub(super) enum Answer {
     Cancelled,
 }
 
-/// Sends `text` to `thread` with `options` (as buttons where the messenger has enough,
-/// else as a numbered list) and waits up to `timeout`. Returns the sent message's id and
+/// Sends `text` to `thread` with `options` as buttons and waits up to `timeout`. Returns the sent message's id and
 /// the answer, `None` if there was none in time.
 pub(super) async fn ask(
     messenger: &dyn Messenger,
@@ -37,14 +36,9 @@ pub(super) async fn ask(
 ) -> Result<(String, Option<Answer>)> {
     let key: String = crate::util::new_uuid().chars().take(8).collect();
     let ids: Vec<String> = (0..options.len()).map(|i| format!("{key}.{i}")).collect();
-    let fits = (1..=messenger.describe().capabilities.buttons).contains(&options.len());
-    let message = if fits {
-        let buttons = ids.iter().zip(options).map(|(id, label)| Button { id: id.clone(), label: label.clone() }).collect();
-        OutMessage { text: text.into(), buttons }
-    } else {
-        let list: Vec<String> = options.iter().enumerate().map(|(i, o)| format!("{}. {o}", i + 1)).collect();
-        OutMessage::text(format!("{text}\n{}", list.join("\n")))
-    };
+    // One row; a messenger without buttons shows them its own way (numbers, names).
+    let row = ids.iter().zip(options).map(|(id, label)| Button { id: id.clone(), label: label.clone() }).collect();
+    let message = OutMessage { text: text.into(), buttons: vec![row], ..Default::default() };
     let (wait, rx) = waits.add(thread.clone(), Accept { buttons: ids.clone(), text: true });
     let sent = messenger.send(&thread.id, &message).await;
     let reply = match &sent {

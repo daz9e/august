@@ -40,11 +40,24 @@ pub struct User {
     pub name: String,
 }
 
+/// What kind of file came in.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileKind {
+    /// A voice note recorded in the messenger.
+    Voice,
+    Audio,
+    Image,
+    Video,
+    Document,
+}
+
 /// A file that came with a message; the messenger downloads it on request.
 #[derive(Debug, Clone)]
 pub struct Attachment {
-    /// Vendor handle for `Messenger::download`.
+    /// The messenger's handle for `Messenger::download`.
     pub id: String,
+    pub kind: FileKind,
     /// Original file name, if the messenger has one (photos don't).
     pub name: Option<String>,
     pub mime: Option<String>,
@@ -57,9 +70,9 @@ pub enum InboundKind {
     Message { text: String, files: Vec<Attachment> },
     /// `/name args` (without the slash).
     Command { name: String, args: String },
-    /// A press of the button with this `id` (given when the message was sent); `ack` is
-    /// the messenger's handle for confirming it (`Messenger::ack`).
-    Press { button: String, ack: String },
+    /// A press of the button with this `id` (given when the message was sent). The
+    /// messenger confirms the press itself.
+    Press { button: String },
 }
 
 #[derive(Debug, Clone)]
@@ -76,17 +89,30 @@ pub struct Button {
     pub label: String,
 }
 
-/// A message to send, in the one format every messenger takes and renders its own way.
+/// A message to send, in the one format every messenger takes. A messenger renders all of
+/// it its own way, degrading what it can't show (e.g. buttons as a numbered list, files as
+/// their paths) rather than failing.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OutMessage {
     /// Markdown.
     pub text: String,
-    pub buttons: Vec<Button>,
+    /// Rows of buttons.
+    pub buttons: Vec<Vec<Button>>,
+    /// Local files to send with it (images shown inline where the messenger can); the text
+    /// is their caption.
+    pub files: Vec<std::path::PathBuf>,
+    /// The id of a message this one answers.
+    pub reply_to: Option<String>,
 }
 
 impl OutMessage {
     pub fn text(text: impl Into<String>) -> Self {
-        Self { text: text.into(), buttons: Vec::new() }
+        Self { text: text.into(), ..Default::default() }
+    }
+
+    /// Every button, row after row.
+    pub fn all_buttons(&self) -> impl Iterator<Item = &Button> {
+        self.buttons.iter().flatten()
     }
 }
 
@@ -175,12 +201,8 @@ pub trait Messenger: Send + Sync {
     /// "typing…" indicator; best effort.
     async fn typing(&self, chat: &str) -> Result<()>;
     async fn set_commands(&self, commands: &[CommandSpec]) -> Result<()>;
-    /// Confirms a button press to the messenger (stops the button spinner).
-    async fn ack(&self, press: &str) -> Result<()>;
     /// Fetches the contents of an inbound attachment.
     async fn download(&self, file: &Attachment) -> Result<Vec<u8>>;
-    /// Sends a local file; images are shown inline where the messenger can.
-    async fn send_file(&self, chat: &str, path: &std::path::Path, caption: &str) -> Result<()>;
     /// The gateway has nothing more to say in `chat` for now (a turn or command is done).
     async fn idle(&self, _chat: &str) {}
 }

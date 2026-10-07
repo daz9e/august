@@ -35,7 +35,8 @@ pub(super) struct ThreadFiles {
 #[async_trait::async_trait]
 impl FileSink for ThreadFiles {
     async fn send_file(&self, path: &std::path::Path, caption: &str) -> Result<()> {
-        self.messenger.send_file(&self.thread, path, caption).await
+        let file = crate::messengers::OutMessage { text: caption.into(), files: vec![path.to_path_buf()], ..Default::default() };
+        self.messenger.send(&self.thread, &file).await.map(drop)
     }
 }
 
