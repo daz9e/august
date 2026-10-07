@@ -66,22 +66,29 @@ async fn transcribe(http: &reqwest::Client, path: &Path, mime: &str) -> Result<S
 async fn main() {
     let http = reqwest::Client::builder().timeout(TIMEOUT).build().expect("http client");
     let august = August::new();
+    let workspace = august.workspace().clone();
     august.on("message_in", move |data, _| {
-        let http = http.clone();
+        let (http, workspace) = (http.clone(), workspace.clone());
         async move {
             let audio: Vec<&Value> = data["files"].as_array().into_iter().flatten().filter(|f| f["mime"].as_str().is_some_and(|m| m.starts_with("audio/"))).collect();
             if audio.is_empty() {
                 return Ok(None);
             }
-            let mut parts: Vec<String> = data["text"].as_str().filter(|t| !t.is_empty()).map(String::from).into_iter().collect();
-            for f in audio {
+            // All at once: the hook has two minutes for the whole message.
+            let transcripts = audio.iter().map(|f| {
                 let path = Path::new(f["path"].as_str().unwrap_or_default());
+                let name = path.strip_prefix(&workspace).unwrap_or(path).display();
                 let kind = if f["voice"] == true { "Voice message" } else { "Audio" };
-                parts.push(match transcribe(&http, path, f["mime"].as_str().unwrap_or_default()).await {
-                    Ok(text) => format!("[{kind} transcript]\n{text}"),
-                    Err(e) => format!("[No transcript: {e:#}]"),
-                });
-            }
+                let http = &http;
+                async move {
+                    match transcribe(http, path, f["mime"].as_str().unwrap_or_default()).await {
+                        Ok(text) => format!("[{kind} transcript, {name}]\n{text}"),
+                        Err(e) => format!("[No transcript of {name}: {e:#}]"),
+                    }
+                }
+            });
+            let mut parts: Vec<String> = data["text"].as_str().filter(|t| !t.is_empty()).map(String::from).into_iter().collect();
+            parts.extend(futures_util::future::join_all(transcripts).await);
             Ok(Some(json!({"text": parts.join("\n")})))
         }
     });

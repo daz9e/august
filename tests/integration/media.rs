@@ -141,8 +141,10 @@ fn voice_note() -> (Value, HashMap<String, Vec<u8>>) {
 }
 
 #[tokio::test]
-async fn voice_note_is_transcribed_for_the_agent() {
-    let (update, files) = voice_note();
+async fn voice_note_and_audio_are_transcribed_for_the_agent() {
+    let (mut update, mut files) = voice_note();
+    update["message"]["audio"] = json!({"file_id": "a1", "file_name": "memo.mp3", "mime_type": "audio/mpeg", "file_size": 3});
+    files.insert("a1".into(), b"mp3".to_vec());
     let llm: Llm = Box::new(|_| reply_text("Will do."));
     let fake = Fake::start(vec![update], files, Some(llm)).await;
     let url = format!("{}/stt/v1", fake.url);
@@ -157,19 +159,19 @@ async fn voice_note_is_transcribed_for_the_agent() {
 
     // The audio went to the configured endpoint with its model.
     let stt: Vec<Req> = fake.requests().into_iter().filter(|r| r.path == "/stt/v1/audio/transcriptions").collect();
-    assert_eq!(stt.len(), 1);
+    assert_eq!(stt.len(), 2);
     let ogg = fixture("voice.ogg");
-    assert!(stt[0].text().contains("whisper-large-v3-turbo"));
-    assert!(stt[0].body.windows(ogg.len()).any(|w| w == ogg.as_slice()));
+    assert!(stt.iter().all(|r| r.text().contains("whisper-large-v3-turbo")));
+    assert!(stt.iter().any(|r| r.body.windows(ogg.len()).any(|w| w == ogg.as_slice())));
 
-    // The file is kept, and the model sees the transcript and where the file is.
+    // The files are kept, and the model sees each transcript with the file it belongs to.
     let saved = gw.inbox();
-    assert_eq!(saved.len(), 1, "{saved:?}");
-    let name = saved[0].file_name().unwrap().to_string_lossy().to_string();
-    assert!(name.ends_with("-voice.ogg"), "{name}");
+    let names: Vec<String> = saved.iter().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+    let voice = names.iter().find(|n| n.ends_with("-voice.ogg")).expect("voice note saved");
+    let memo = names.iter().find(|n| n.ends_with("-memo.mp3")).expect("audio saved");
     let (text, _) = last_user(&fake.llm_requests()[0]);
-    assert!(text.contains(&format!("inbox/{name}")), "{text}");
-    assert!(text.contains(&format!("[Voice message transcript]\n{TRANSCRIPT}")), "{text}");
+    assert!(text.contains(&format!("[Voice message transcript, inbox/{voice}]\n{TRANSCRIPT}")), "{text}");
+    assert!(text.contains(&format!("[Audio transcript, inbox/{memo}]\n{TRANSCRIPT}")), "{text}");
 }
 
 #[tokio::test]
@@ -185,5 +187,5 @@ async fn voice_note_without_transcription_is_still_saved() {
     assert_eq!(gw.inbox().len(), 1);
     let (text, _) = last_user(&fake.llm_requests()[0]);
     assert!(text.contains("inbox/") && text.contains("voice.ogg"), "{text}");
-    assert!(text.contains("No transcript: transcription is not configured"), "{text}");
+    assert!(text.contains("-voice.ogg: transcription is not configured"), "{text}");
 }
