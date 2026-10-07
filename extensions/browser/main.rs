@@ -101,7 +101,8 @@ async fn run(august: &August, mut args: Vec<String>, ctx: Ctx) -> Result<String>
     };
     let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     if !out.status.success() {
-        bail!("{}", truncate(format!("{stdout}{stderr}").trim().to_string(), MAX_OUTPUT));
+        let said = format!("{stdout}{stderr}").trim().to_string();
+        bail!("{}", if said.is_empty() { format!("`{cmd}` failed ({}) without saying why", out.status) } else { truncate(said, MAX_OUTPUT) });
     }
     Ok(truncate(if stdout.trim().is_empty() { "ok".into() } else { stdout.into_owned() }, MAX_OUTPUT))
 }

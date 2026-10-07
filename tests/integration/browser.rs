@@ -10,7 +10,7 @@ async fn browser_commands_run_in_a_per_chat_session() {
     let log = dir.path().join("calls.log");
     let bin = dir.path().join("agent-browser");
     let script = format!(
-        "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$3\" in\n  snapshot) echo '- button \"Reveal\" [ref=e1]' ;;\n  click) echo 'boom' >&2; exit 1 ;;\nesac\n",
+        "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$3\" in\n  snapshot) echo '- button \"Reveal\" [ref=e1]' ;;\n  click) echo 'boom' >&2; exit 1 ;;\n  press) exit 3 ;;\nesac\n",
         log.display()
     );
     std::fs::write(&bin, script).unwrap();
@@ -20,6 +20,7 @@ async fn browser_commands_run_in_a_per_chat_session() {
         json!(["open", "https://example.com"]),
         json!(["snapshot", "-i"]),
         json!(["click", "@e1"]),
+        json!(["press", "Enter"]),
         json!(["screenshot", "shots/page.png"]),
         json!(["screenshot", "../../outside.png"]),
         json!(["open", "https://example.com", "--profile", "/tmp/p"]),
@@ -48,18 +49,20 @@ async fn browser_commands_run_in_a_per_chat_session() {
         format!("{session} open https://example.com"),
         format!("{session} snapshot -i"),
         format!("{session} click @e1"),
+        format!("{session} press Enter"),
         format!("{session} screenshot {}", shot.display()),
     ];
     assert_eq!(calls.lines().collect::<Vec<_>>(), expected, "{calls}");
 
-    // The model saw the output, the browser's error, and why the rest were refused.
+    // The model saw the output, the browser's errors, and why the rest were refused.
     let reqs = fake.llm_requests();
     let results: Vec<String> = reqs.last().unwrap()["messages"].as_array().unwrap().iter()
         .filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap().to_string()).collect();
     assert_eq!(results[0], "ok");
     assert!(results[1].contains("[ref=e1]"), "{results:?}");
     assert_eq!(results[2], "error: boom");
-    assert!(results[4].contains("outside the workspace"), "{results:?}");
-    assert!(results[5].contains("--profile is not allowed"), "{results:?}");
-    assert!(results[6].contains("unsupported browser command `connect`"), "{results:?}");
+    assert!(results[3].contains("`press` failed (exit status: 3)"), "{results:?}");
+    assert!(results[5].contains("outside the workspace"), "{results:?}");
+    assert!(results[6].contains("--profile is not allowed"), "{results:?}");
+    assert!(results[7].contains("unsupported browser command `connect`"), "{results:?}");
 }
