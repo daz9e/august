@@ -60,3 +60,9 @@ pub fn human_size(bytes: u64) -> String {
         b => format!("{b} B"),
     }
 }
+
+/// A Unix time as local `YYYY-MM-DD HH:MM`.
+pub fn fmt_time(ts: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local.timestamp_opt(ts, 0).single().map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| ts.to_string())
+}

@@ -126,7 +126,7 @@ impl Tool for SearchHistory {
             .iter()
             .map(|h| {
                 let text: String = h.text.chars().take(500).collect();
-                format!("[{} {}] {}", crate::scheduler::schedule::fmt_time(h.at), h.role, text)
+                format!("[{} {}] {}", crate::util::fmt_time(h.at), h.role, text)
             })
             .collect();
         Ok(out.join("\n---\n"))

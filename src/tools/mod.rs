@@ -7,9 +7,7 @@ mod memory;
 mod search;
 mod shell;
 mod skills;
-mod tasks;
 
-pub use tasks::format_tasks;
 
 use crate::db::Db;
 use crate::extensions::Extensions;
@@ -44,8 +42,6 @@ pub struct ToolCtx {
     pub files: Option<Arc<dyn FileSink>>,
     /// Loaded extensions, for `save_extension`; `None` when they are off.
     pub extensions: Option<Arc<Extensions>>,
-    /// Nobody is following along (a quiet, fork or fresh turn): no scheduling more work.
-    pub unattended: bool,
     /// Messages the user sends while the turn runs.
     pub inbox: Option<Arc<crate::agent::Inbox>>,
 }
@@ -97,9 +93,6 @@ impl ToolRegistry {
                 Arc::new(skills::LoadSkill),
                 Arc::new(skills::SaveSkill),
                 Arc::new(skills::EditSkill),
-                Arc::new(tasks::ScheduleTask),
-                Arc::new(tasks::ListTasks),
-                Arc::new(tasks::CancelTask),
                 Arc::new(extensions::SaveExtension),
             ],
             ext: None,

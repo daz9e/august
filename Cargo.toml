@@ -51,6 +51,10 @@ name = "august-ext-review"
 path = "extensions/review/main.rs"
 
 [[bin]]
+name = "august-ext-scheduler"
+path = "extensions/scheduler/main.rs"
+
+[[bin]]
 name = "august-ext-subagents"
 path = "extensions/subagents/main.rs"
 

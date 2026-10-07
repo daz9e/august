@@ -14,7 +14,6 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("compact", "Summarise older messages to free up context"),
     CommandSpec::new("usage", "Show token usage of this conversation and today"),
     CommandSpec::new("memory", "Show what I remember about you"),
-    CommandSpec::new("tasks", "List scheduled tasks"),
     CommandSpec::new("model", "Show or change the model"),
     CommandSpec::new("status", "Show provider, model and workspace"),
     CommandSpec::new("extensions", "List extensions; enable or disable one"),
@@ -71,7 +70,7 @@ impl Gateway {
             "queue" => {
                 let (gw, ch, id, chat, text) = (self.clone(), channel.clone(), id.clone(), chat.to_string(), args.to_string());
                 tokio::spawn(async move {
-                    if let Err(e) = gw.turn(ch, id, &chat, &text, Vec::new(), false).await {
+                    if let Err(e) = gw.turn(ch, id, &chat, &text, Vec::new()).await {
                         eprintln!("gateway: {e:#}");
                     }
                 });
@@ -100,7 +99,6 @@ impl Gateway {
                 }
             }
             "usage" => self.db.usage_report(&format!("{}:{}", id.messenger, id.id))?,
-            "tasks" => crate::tools::format_tasks(&self.db.tasks(Some((&id.messenger, &id.id)))?),
             "status" => format!(
                 "Model: `{}`\nWorkspace: `{}`\nBusy: {}",
                 self.provider_label.read().unwrap(),

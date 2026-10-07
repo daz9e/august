@@ -49,14 +49,13 @@ impl Gateway {
         chat: &str,
         text: &str,
         images: Vec<Block>,
-        scheduled: bool,
     ) -> Result<()> {
         let state = self.chat(&id).await?;
         let mut agent = state.agent.lock().await; // turns in one chat run in order
         state.inbox.start();
         let (mut text, mut images) = (text.to_string(), images);
         loop {
-            let r = self.turn_once(&state, &mut agent, channel.clone(), &id, chat, &text, images, scheduled).await;
+            let r = self.turn_once(&state, &mut agent, channel.clone(), &id, chat, &text, images).await;
             let left = state.inbox.finish();
             if !left.is_empty() {
                 (text, images) = (left.join("\n"), Vec::new());
@@ -77,11 +76,8 @@ impl Gateway {
         chat: &str,
         text: &str,
         images: Vec<Block>,
-        scheduled: bool,
     ) -> Result<Option<String>> {
-        let mode = if scheduled { crate::agent::TurnMode::Quiet } else { crate::agent::TurnMode::Visible };
-        let source = scheduled.then(|| "scheduler".to_string());
-        let (tag, cancel) = self.turns.begin(id, mode, source, None);
+        let (tag, cancel) = self.turns.begin(id, crate::agent::TurnMode::Visible, None, None);
         agent.set_provider(self.provider.read().unwrap().clone());
 
         let typing = {
@@ -105,16 +101,12 @@ impl Gateway {
             origin: crate::extensions::Origin { thread: Some(id.clone()), turn: Some(tag.clone()) },
             files: Some(Arc::new(ChatFiles(tx.clone()))),
             extensions: Some(self.ext.clone()),
-            unattended: scheduled,
             inbox: Some(state.inbox.clone()),
         };
         let streamed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let streamed2 = streamed.clone();
         let tx2 = tx.clone();
         let mut on_event = move |e: Event| {
-            if scheduled {
-                return; // only the final reply of a task reaches the chat
-            }
             let ui = match e {
                 Event::Text(t) => {
                     streamed2.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -137,7 +129,6 @@ impl Gateway {
             vec![serde_json::Value::Null; agent.tool_calls()],
         );
         match outcome {
-            Some(Ok(reply)) if scheduled && reply.trim_start().starts_with("[SILENT]") => {}
             Some(Ok(reply)) => {
                 if !streamed.load(std::sync::atomic::Ordering::Relaxed) {
                     tx.send(Ui::Text(if reply.is_empty() { "(empty reply)".into() } else { reply })).ok();

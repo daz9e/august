@@ -17,7 +17,6 @@ use crate::extensions::{self, Extensions};
 use crate::messengers::{Inbound, InboundKind, Messenger, OutMessage, Thread};
 use crate::llm::{LlmProvider, Message};
 use crate::llm::providers;
-use crate::scheduler::TaskRunner;
 use crate::tools::{ToolCtx, ToolRegistry};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -184,7 +183,6 @@ impl extensions::Core for ExtCore {
             origin: extensions::Origin::thread(thread.clone()),
             files: Some(Arc::new(files)),
             extensions: Some(gw.ext.clone()),
-            unattended: false,
             inbox: None,
         };
         Ok(gw.tools().call(name, input, &ctx).await)
@@ -204,13 +202,6 @@ impl extensions::Core for ExtCore {
         let provider = self.gateway()?.provider.read().unwrap().clone();
         let c = provider.complete(&crate::util::new_uuid(), system, &[Message::user_text(prompt)], &[]).await?;
         Ok(c.message.text())
-    }
-}
-
-#[async_trait]
-impl TaskRunner for Arc<Gateway> {
-    async fn run_task(&self, task: crate::db::Task) -> Result<()> {
-        self.run_task_in_chat(task).await
     }
 }
 
@@ -258,8 +249,6 @@ impl Gateway {
         drop(bus);
 
         let me = self.clone();
-        let channels = self.channels.keys().cloned().collect();
-        let scheduler = tokio::spawn(crate::scheduler::run(self.db.clone(), Arc::new(self.clone()), channels));
         let dispatcher = tokio::spawn(async move {
             while let Some(ev) = events.recv().await {
                 let me = me.clone();
@@ -278,7 +267,6 @@ impl Gateway {
                 Err(e) => eprintln!("{id}: stopped: {e:#}"),
             }
         }
-        scheduler.abort();
         dispatcher.await.ok();
         Ok(())
     }
@@ -307,55 +295,6 @@ impl Gateway {
         let chat = Arc::new(Chat { agent: Mutex::new(agent), inbox: Arc::default(), intake: Mutex::new(()) });
         chats.insert(id.clone(), chat.clone());
         Ok(chat)
-    }
-
-    /// Runs a due scheduled task as a turn in the chat it was created in.
-    async fn run_task_in_chat(self: &Arc<Self>, task: crate::db::Task) -> Result<()> {
-        let Some(channel) = self.channels.get(&task.channel).cloned() else {
-            anyhow::bail!("task #{}: channel `{}` is not running", task.id, task.channel);
-        };
-        eprintln!("task #{} fires in {}:{}", task.id, task.channel, task.chat);
-        let mut text = format!(
-            "[Scheduled task #{} fired; your reply goes to the user, or reply exactly [SILENT] if \
-             there is nothing worth telling them]\n{}",
-            task.id, task.prompt
-        );
-        for name in &task.skills {
-            match crate::skills::load(name) {
-                Ok(body) => text += &format!("\n\n[Skill `{name}`]\n{body}"),
-                Err(e) => text += &format!("\n\n[Skill `{name}` could not be loaded: {e:#}]"),
-            }
-        }
-        if let Some(script) = &task.script {
-            text += &format!("\n\n[Output of the task's script `{script}`]\n{}", self.run_script(script).await);
-        }
-        // An isolated task gets a fresh conversation of its own on every run.
-        let mut id = Thread { messenger: task.channel.clone(), id: task.chat.clone() };
-        if task.isolated {
-            id.id = format!("{}#task{}", task.chat, task.id);
-            self.chat(&id).await?.agent.lock().await.reset()?;
-        }
-        self.turn(channel, id, &task.chat, &text, Vec::new(), true).await
-    }
-
-    async fn run_script(&self, script: &str) -> String {
-        let run = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(script)
-            .current_dir(&self.workspace)
-            .kill_on_drop(true)
-            .output();
-        match tokio::time::timeout(std::time::Duration::from_secs(120), run).await {
-            Ok(Ok(out)) => {
-                let mut s = String::from_utf8_lossy(&out.stdout).to_string();
-                if !out.status.success() {
-                    s += &format!("\n[exit status {}] {}", out.status, String::from_utf8_lossy(&out.stderr));
-                }
-                crate::tools::truncate(s, 20_000)
-            }
-            Ok(Err(e)) => format!("[could not run the script: {e}]"),
-            Err(_) => "[the script timed out after 120 s]".into(),
-        }
     }
 
     async fn handle(self: Arc<Self>, ev: Inbound) -> Result<()> {
@@ -405,7 +344,7 @@ impl Gateway {
                 // Busy from here, so the next message joins this turn instead of racing it.
                 state.inbox.start();
                 drop(intake);
-                self.turn(channel, ev.thread, &chat, &text, images, false).await?
+                self.turn(channel, ev.thread, &chat, &text, images).await?
             }
         }
         Ok(())

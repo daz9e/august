@@ -35,7 +35,7 @@ impl Gateway {
         };
         if !offered {
             let chat = id.id.clone();
-            if let Err(e) = self.turn(channel, id, &chat, text, Vec::new(), false).await {
+            if let Err(e) = self.turn(channel, id, &chat, text, Vec::new()).await {
                 eprintln!("gateway: {e:#}");
             }
         }

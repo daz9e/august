@@ -1,5 +1,5 @@
 //! SQLite storage in `~/.august/august.db`: conversations (with FTS5 search),
-//! token usage, long-term facts and scheduled tasks. Calls are short, so one mutex-guarded
+//! token usage, long-term facts and extensions' key-value storage. Calls are short, so one mutex-guarded
 //! connection is enough.
 
 use crate::llm::{Block, Message, Usage};
@@ -23,31 +23,6 @@ pub struct Hit {
     pub role: String,
     pub text: String,
     pub at: i64,
-}
-
-#[derive(Debug, Clone)]
-pub struct Task {
-    pub id: i64,
-    pub channel: String,
-    pub chat: String,
-    pub schedule: String,
-    pub prompt: String,
-    pub next_run: Option<i64>,
-    pub last_run: Option<i64>,
-    /// Skills whose instructions come with the prompt.
-    pub skills: Vec<String>,
-    /// Shell command run before the task; its output comes with the prompt.
-    pub script: Option<String>,
-    /// Runs in a fresh session of its own instead of the chat's conversation.
-    pub isolated: bool,
-}
-
-/// Extra settings of a scheduled task.
-#[derive(Debug, Clone, Default)]
-pub struct TaskOptions {
-    pub skills: Vec<String>,
-    pub script: Option<String>,
-    pub isolated: bool,
 }
 
 pub fn now() -> i64 {
@@ -98,16 +73,6 @@ CREATE TABLE IF NOT EXISTS kv (
     value TEXT NOT NULL,
     PRIMARY KEY (scope, key)
 );
-CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel TEXT NOT NULL,
-    chat TEXT NOT NULL,
-    schedule TEXT NOT NULL,
-    prompt TEXT NOT NULL,
-    next_run INTEGER,
-    last_run INTEGER,
-    created_at INTEGER NOT NULL
-);
 ";
 
 impl Db {
@@ -131,14 +96,6 @@ impl Db {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
-        // Columns added after the first release; "duplicate column" means already there.
-        for col in ["skills TEXT NOT NULL DEFAULT ''", "script TEXT", "isolated INTEGER NOT NULL DEFAULT 0"] {
-            if let Err(e) = conn.execute(&format!("ALTER TABLE tasks ADD COLUMN {col}"), []) {
-                if !e.to_string().contains("duplicate column") {
-                    return Err(e.into());
-                }
-            }
-        }
         Ok(Arc::new(Self { conn: Mutex::new(conn) }))
     }
 
@@ -337,73 +294,6 @@ impl Db {
         let rows = stmt.query_map(params![scope, prefix], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
         Ok(rows)
     }
-
-    // ---- scheduled tasks -----------------------------------------------
-
-    pub fn add_task(&self, channel: &str, chat: &str, schedule: &str, prompt: &str, next_run: i64, opts: &TaskOptions) -> Result<i64> {
-        let conn = self.conn();
-        conn.execute(
-            "INSERT INTO tasks (channel, chat, schedule, prompt, next_run, created_at, skills, script, isolated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![channel, chat, schedule, prompt, next_run, now(), opts.skills.join(","), opts.script, opts.isolated],
-        )?;
-        Ok(conn.last_insert_rowid())
-    }
-
-    /// Tasks of one chat, or of every chat when `chat` is `None`.
-    pub fn tasks(&self, chat: Option<(&str, &str)>) -> Result<Vec<Task>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, channel, chat, schedule, prompt, next_run, last_run, skills, script, isolated FROM tasks
-             WHERE (?1 IS NULL OR (channel = ?1 AND chat = ?2)) ORDER BY id",
-        )?;
-        let (c, h) = chat.unzip();
-        let tasks = stmt.query_map(params![c, h], row_task)?.collect::<rusqlite::Result<_>>()?;
-        Ok(tasks)
-    }
-
-    pub fn due_tasks(&self, at: i64) -> Result<Vec<Task>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, channel, chat, schedule, prompt, next_run, last_run, skills, script, isolated FROM tasks
-             WHERE next_run IS NOT NULL AND next_run <= ?1 ORDER BY next_run",
-        )?;
-        let tasks = stmt.query_map([at], row_task)?.collect::<rusqlite::Result<_>>()?;
-        Ok(tasks)
-    }
-
-    /// Records a run; `next_run: None` finishes the task (one-shot).
-    pub fn finish_run(&self, id: i64, next_run: Option<i64>) -> Result<()> {
-        self.conn().execute(
-            "UPDATE tasks SET last_run = ?2, next_run = ?3 WHERE id = ?1",
-            params![id, now(), next_run],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_task(&self, id: i64, chat: Option<(&str, &str)>) -> Result<bool> {
-        let (c, h) = chat.unzip();
-        let n = self.conn().execute(
-            "DELETE FROM tasks WHERE id = ?1 AND (?2 IS NULL OR (channel = ?2 AND chat = ?3))",
-            params![id, c, h],
-        )?;
-        Ok(n > 0)
-    }
-}
-
-fn row_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
-    Ok(Task {
-        id: r.get(0)?,
-        channel: r.get(1)?,
-        chat: r.get(2)?,
-        schedule: r.get(3)?,
-        prompt: r.get(4)?,
-        next_run: r.get(5)?,
-        last_run: r.get(6)?,
-        skills: r.get::<_, String>(7)?.split(',').filter(|s| !s.is_empty()).map(String::from).collect(),
-        script: r.get(8)?,
-        isolated: r.get(9)?,
-    })
 }
 
 fn insert_messages(tx: &rusqlite::Transaction, session: &str, msgs: &[Message], index: bool) -> Result<()> {
@@ -505,22 +395,11 @@ mod tests {
     }
 
     #[test]
-    fn facts_and_tasks() {
+    fn facts() {
         let db = Db::in_memory();
         let id = db.replace_facts(&[], "user lives in Berlin").unwrap();
         assert_eq!(db.facts().unwrap().len(), 1);
         assert!(db.delete_fact(id).unwrap());
         assert!(!db.delete_fact(id).unwrap());
-
-        let t = db.add_task("telegram", "42", "every 1h", "ping", 100, &TaskOptions::default()).unwrap();
-        assert!(db.due_tasks(99).unwrap().is_empty());
-        assert_eq!(db.due_tasks(100).unwrap().len(), 1);
-        assert!(!db.delete_task(t, Some(("telegram", "7"))).unwrap());
-        db.finish_run(t, Some(200)).unwrap();
-        assert!(db.due_tasks(150).unwrap().is_empty());
-        db.finish_run(t, None).unwrap();
-        assert!(db.due_tasks(1000).unwrap().is_empty());
-        assert_eq!(db.tasks(Some(("telegram", "42"))).unwrap().len(), 1);
-        assert!(db.delete_task(t, Some(("telegram", "42"))).unwrap());
     }
 }

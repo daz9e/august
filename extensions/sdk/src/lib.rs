@@ -324,6 +324,12 @@ impl August {
         Ok(self.0.link.call("turn_cancel", json!({"id": id})).await? == true)
     }
 
+    /// Runs an agent tool for `thread`, with its hooks and approvals: `(output, is_error)`.
+    pub async fn call_tool(&self, thread: &Thread, name: &str, input: Value) -> Result<(String, bool)> {
+        let v = self.0.link.call("callTool", json!({"thread": thread, "name": name, "input": input})).await?;
+        Ok((v["output"].as_str().unwrap_or_default().to_string(), v["isError"] == true))
+    }
+
     /// Hands `thread` a message as if the user sent it.
     pub async fn prompt(&self, thread: &Thread, text: &str) -> Result<()> {
         self.0.link.call("prompt", json!({"thread": thread, "text": text})).await.map(drop)
