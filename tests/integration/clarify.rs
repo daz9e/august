@@ -3,8 +3,6 @@
 
 use crate::support::*;
 use serde_json::json;
-use std::collections::HashMap;
-use std::time::Duration;
 
 #[tokio::test]
 async fn agent_asks_with_buttons_and_gets_the_choice() {
@@ -15,18 +13,38 @@ async fn agent_asks_with_buttons_and_gets_the_choice() {
         }
         reply_tool("clarify", json!({"question": "Which colour?", "options": ["Red", "Blue"]}))
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "paint it"}))], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.say("paint it").await;
 
-    let t = Duration::from_secs(30);
-    fake.wait_for(t, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("callback_data"))).await;
-    let ask = fake.calls("sendMessage").into_iter().find(|r| r.text().contains("callback_data")).unwrap().json();
-    assert!(ask["text"].as_str().unwrap().contains("Which colour?"));
-    let row = &ask["reply_markup"]["inline_keyboard"][0];
-    assert_eq!((row[0]["text"].as_str(), row[1]["text"].as_str()), (Some("Red"), Some("Blue")));
-    fake.push_updates(vec![button_press(2, row[1]["callback_data"].as_str().unwrap())]);
+    let ask = chat.question().await;
+    assert!(ask.text.contains("Which colour?"));
+    let labels: Vec<&str> = ask.buttons.iter().map(|(_, l)| l.as_str()).collect();
+    assert_eq!(labels, ["Red", "Blue"]);
+    chat.press(&ask.button("Blue")).await;
 
-    fake.wait_for(t, |f| f.sent_texts().iter().any(|t| t.contains("Noted: The user chose: Blue"))).await;
+    chat.wait_for("Noted: The user chose: Blue").await;
     // The question is edited to show the answer.
-    assert!(fake.calls("editMessageText").iter().any(|r| r.text().contains("→ Blue")));
+    chat.wait_for("→ Blue").await;
+}
+
+#[tokio::test]
+async fn the_user_can_answer_in_their_own_words() {
+    let llm: Llm = Box::new(|req| {
+        let last = req["messages"].as_array().unwrap().last().unwrap().clone();
+        if last["role"] == "tool" {
+            return reply_text(&format!("Noted: {}", last["content"].as_str().unwrap()));
+        }
+        reply_tool("clarify", json!({"question": "Which colour?", "options": ["Red", "Blue"]}))
+    });
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.say("paint it").await;
+    chat.question().await;
+    // Typing instead of pressing answers the open question; it doesn't start a new turn.
+    chat.say("green, actually").await;
+    chat.wait_for("Noted: The user chose: green, actually").await;
+    assert_eq!(fake.llm_requests().len(), 2);
 }

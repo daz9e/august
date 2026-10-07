@@ -3,10 +3,7 @@
 
 use crate::support::*;
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::time::Duration;
-
-const TIMEOUT: Duration = Duration::from_secs(30);
 
 fn msgs(req: &Value) -> &Vec<Value> {
     req["messages"].as_array().unwrap()
@@ -14,10 +11,6 @@ fn msgs(req: &Value) -> &Vec<Value> {
 
 fn is_review(req: &Value) -> bool {
     msgs(req).iter().any(|m| m["role"] == "user" && m["content"].as_str().is_some_and(|c| c.starts_with("[Background review]")))
-}
-
-fn command(id: i64, text: &str) -> Value {
-    message(id, json!({"text": text, "entities": [{"type": "bot_command", "offset": 0, "length": text.len()}]}))
 }
 
 #[tokio::test]
@@ -33,15 +26,16 @@ async fn review_saves_a_correction_after_the_reply() {
         }
         reply_text("Sure, no lists from now on.")
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "stop using bullet lists please"}))], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &[("AUGUST_REVIEW_MEMORY_EVERY", "1")]);
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { env: &[("AUGUST_REVIEW_MEMORY_EVERY", "1")], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("stop using bullet lists please").await;
 
     fake.wait_for(TIMEOUT, |f| f.llm_requests().iter().filter(|r| is_review(r)).count() >= 2).await;
-    fake.push_updates(vec![command(2, "/memory")]);
-    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("User wants answers without bullet lists"))).await;
+    chat.ask("/memory", "User wants answers without bullet lists").await;
 
     // The chat is told that something was saved.
-    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t == "💾 Memory updated")).await;
+    chat.wait_until("a note", |c| c.texts().iter().any(|t| t == "💾 Memory updated")).await;
 
     let reqs = fake.llm_requests();
     let (chat, review) = (&reqs[0], reqs.iter().find(|r| is_review(r)).unwrap());
@@ -66,8 +60,10 @@ async fn review_can_only_save_and_read() {
         }
         reply_text("hello")
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "hi"}))], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &[("AUGUST_REVIEW_MEMORY_EVERY", "1")]);
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { env: &[("AUGUST_REVIEW_MEMORY_EVERY", "1")], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("hi").await;
     fake.wait_for(TIMEOUT, |f| {
         f.llm_requests().iter().any(|r| is_review(r) && msgs(r).last().unwrap()["role"] == "tool")
     })
@@ -89,10 +85,12 @@ async fn verbose_notes_show_each_change() {
             reply_tool("remember", json!({"fact": "User is a night owl"}))
         }
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "I work best after midnight"}))], HashMap::new(), Some(llm)).await;
+    let fake = Fake::llm(llm).await;
     let env = [("AUGUST_REVIEW_MEMORY_EVERY", "1"), ("AUGUST_REVIEW_NOTIFY", "verbose")];
-    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &env);
-    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t == "💾 remembered: User is a night owl")).await;
+    let gw = august(&fake, Setup { env: &env, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("I work best after midnight").await;
+    chat.wait_until("a note", |c| c.texts().iter().any(|t| t == "💾 remembered: User is a night owl")).await;
 }
 
 #[tokio::test]
@@ -111,11 +109,13 @@ async fn enough_tool_calls_trigger_a_skill_review_that_writes_a_skill() {
         }
         if last["role"] == "tool" { reply_text("done") } else { reply_tool("shell", json!({"command": "echo hi"})) }
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "say hi"}))], HashMap::new(), Some(llm)).await;
+    let fake = Fake::llm(llm).await;
     let env = [("AUGUST_REVIEW_MEMORY_EVERY", "0"), ("AUGUST_REVIEW_SKILLS_AFTER", "1")];
-    let gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &env);
+    let gw = august(&fake, Setup { env: &env, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("say hi").await;
     // No approval button: nobody is asked in the background; the chat is told instead.
-    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("💾 Skill") && t.contains("greeting"))).await;
+    chat.wait_until("a note", |c| c.texts().iter().any(|t| t.contains("💾 Skill") && t.contains("greeting"))).await;
     assert!(std::fs::read_to_string(gw.home.join("skills/greeting/SKILL.md")).unwrap().contains("Say hi twice."));
 }
 
@@ -132,10 +132,12 @@ async fn scheduled_tasks_do_not_trigger_reviews() {
         }
         if last["role"] == "tool" { reply_text("scheduled") } else { reply_tool("schedule_task", json!({"schedule": "in 1s", "prompt": "ping"})) }
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "ping me"}))], HashMap::new(), Some(llm)).await;
+    let fake = Fake::llm(llm).await;
     let env = [("AUGUST_REVIEW_MEMORY_EVERY", "1"), ("AUGUST_SCHEDULER_TICK", "1")];
-    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &env);
-    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("task ran"))).await;
+    let gw = august(&fake, Setup { env: &env, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("ping me").await;
+    chat.wait_until("a note", |c| c.texts().iter().any(|t| t.contains("task ran"))).await;
     tokio::time::sleep(Duration::from_millis(800)).await;
     // Only the user's own turn was reviewed.
     assert_eq!(fake.llm_requests().iter().filter(|r| is_review(r)).count(), 1);

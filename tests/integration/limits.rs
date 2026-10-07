@@ -3,8 +3,6 @@
 
 use crate::support::*;
 use serde_json::json;
-use std::collections::HashMap;
-use std::time::Duration;
 
 #[tokio::test]
 async fn out_of_steps_the_agent_reports_progress() {
@@ -16,9 +14,11 @@ async fn out_of_steps_the_agent_reports_progress() {
             reply_text("Did 3 steps; the rest is left for next time.")
         }
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "loop forever"}))], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &[("AUGUST_MAX_STEPS", "3")]);
-    fake.wait_for(Duration::from_secs(30), |f| f.sent_texts().iter().any(|t| t.contains("Did 3 steps"))).await;
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { env: &[("AUGUST_MAX_STEPS", "3")], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("loop forever").await;
+    chat.wait_for("Did 3 steps").await;
 
     let reqs = fake.llm_requests();
     assert_eq!(reqs.len(), 4);

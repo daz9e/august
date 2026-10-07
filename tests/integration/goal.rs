@@ -2,16 +2,11 @@
 //! the turn budget for the goal runs out.
 
 use crate::support::*;
-use serde_json::{Value, json};
-use std::collections::HashMap;
+use serde_json::Value;
 use std::time::Duration;
 
 fn is_judge(req: &Value) -> bool {
     req["messages"][0]["content"].as_str().is_some_and(|s| s.contains("You check whether an AI assistant has reached a goal"))
-}
-
-fn goal(id: i64, text: &str) -> Value {
-    message(id, json!({"text": format!("/goal {text}"), "entities": [{"type": "bot_command", "offset": 0, "length": 5}]}))
 }
 
 /// Main model: "step N" for its N-th reply. Judge: done once a reply says `done_at`.
@@ -29,11 +24,13 @@ fn llm(done_at: &'static str) -> Llm {
 
 #[tokio::test]
 async fn goal_keeps_the_agent_working_until_reached() {
-    let fake = Fake::start(vec![goal(1, "count to three")], HashMap::new(), Some(llm("step 3"))).await;
-    let _gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
-    fake.wait_for(Duration::from_secs(30), |f| f.sent_texts().iter().any(|t| t.contains("Goal reached"))).await;
+    let fake = Fake::llm(llm("step 3")).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.say("/goal count to three").await;
+    chat.wait_for("Goal reached").await;
 
-    let texts = fake.sent_texts();
+    let texts = chat.texts();
     assert!(texts.iter().any(|t| t.contains("step 3")) && !texts.iter().any(|t| t.contains("step 4")));
     let reqs = fake.llm_requests();
     assert_eq!(reqs.iter().filter(|r| is_judge(r)).count(), 3);
@@ -42,28 +39,28 @@ async fn goal_keeps_the_agent_working_until_reached() {
 
 #[tokio::test]
 async fn goal_pauses_when_its_turns_run_out() {
-    let fake = Fake::start(vec![goal(1, "never ends")], HashMap::new(), Some(llm("unreachable"))).await;
-    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &[("AUGUST_GOAL_TURNS", "2")]);
-    fake.wait_for(Duration::from_secs(30), |f| f.sent_texts().iter().any(|t| t.contains("Goal paused after 2 turns"))).await;
-    assert!(!fake.sent_texts().iter().any(|t| t.contains("step 3")));
+    let fake = Fake::llm(llm("unreachable")).await;
+    let gw = august(&fake, Setup { env: &[("AUGUST_GOAL_TURNS", "2")], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("/goal never ends").await;
+    chat.wait_for("Goal paused after 2 turns").await;
+    assert!(!chat.texts().iter().any(|t| t.contains("step 3")));
 }
 
 /// A goal that never completes, on a model slow enough to interrupt.
-async fn endless_goal() -> (Fake, Gateway) {
+async fn endless_goal() -> (Fake, Gateway, Chat) {
     let slow: Llm = Box::new(|req| {
         if !is_judge(req) {
             std::thread::sleep(Duration::from_millis(400));
         }
         llm("unreachable")(req)
     });
-    let fake = Fake::start(vec![goal(1, "never ends")], HashMap::new(), Some(slow)).await;
-    let gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &[("AUGUST_GOAL_TURNS", "100")]);
-    fake.wait_for(Duration::from_secs(30), |f| f.sent_texts().iter().any(|t| t.contains("step 2"))).await;
-    (fake, gw)
-}
-
-fn command(id: i64, text: &str) -> Value {
-    message(id, json!({"text": text, "entities": [{"type": "bot_command", "offset": 0, "length": text.split(' ').next().unwrap().len()}]}))
+    let fake = Fake::llm(slow).await;
+    let gw = august(&fake, Setup { env: &[("AUGUST_GOAL_TURNS", "100")], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("/goal never ends").await;
+    chat.wait_for("step 2").await;
+    (fake, gw, chat)
 }
 
 async fn assert_work_stops(fake: &Fake) {
@@ -76,17 +73,15 @@ async fn assert_work_stops(fake: &Fake) {
 #[tokio::test(flavor = "multi_thread")]
 async fn goal_clear_and_new_drop_the_goal() {
     for (cmd, reply) in [("/goal clear", "Goal dropped."), ("/new", "Started a new conversation.")] {
-        let (fake, _gw) = endless_goal().await;
-        fake.push_updates(vec![command(2, cmd)]);
-        fake.wait_for(Duration::from_secs(30), |f| f.sent_texts().iter().any(|t| t.contains(reply))).await;
+        let (fake, _gw, mut chat) = endless_goal().await;
+        chat.ask(cmd, reply).await;
         assert_work_stops(&fake).await;
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_drops_the_goal() {
-    let (fake, _gw) = endless_goal().await;
-    fake.push_updates(vec![command(2, "/stop")]);
-    fake.wait_for(Duration::from_secs(30), |f| f.sent_texts().iter().any(|t| t.contains("Goal dropped."))).await;
+    let (fake, _gw, mut chat) = endless_goal().await;
+    chat.ask("/stop", "Goal dropped.").await;
     assert_work_stops(&fake).await;
 }

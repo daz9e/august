@@ -2,22 +2,7 @@
 //! recorded per session, and `/usage` reports the sums.
 
 use crate::support::*;
-use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::time::Duration;
-
-const TIMEOUT: Duration = Duration::from_secs(30);
-
-fn command(id: i64, text: &str) -> Value {
-    message(id, json!({"text": text, "entities": [{"type": "bot_command", "offset": 0, "length": text.len()}]}))
-}
-
-/// Sends an update and waits until the bot has answered it with a final message.
-async fn send(fake: &Fake, update: Value, done: &str) {
-    let n = fake.sent_texts().len();
-    fake.push_updates(vec![update]);
-    fake.wait_for(TIMEOUT, |f| f.sent_texts()[n..].iter().any(|t| t.contains(done))).await;
-}
+use serde_json::json;
 
 #[tokio::test]
 async fn usage_sums_every_model_call_of_the_session() {
@@ -36,27 +21,26 @@ async fn usage_sums_every_model_call_of_the_session() {
         };
         with_usage(reply, 100, 10, 40)
     });
-    let fake = Fake::start(vec![], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
 
-    send(&fake, message(1, json!({"text": "look around"})), "done").await;
-    send(&fake, message(2, json!({"text": "look again"})), "done").await;
-    send(&fake, message(3, json!({"text": "thanks"})), "ok").await;
+    chat.ask("look around", "done").await;
+    chat.ask("look again", "done").await;
+    chat.ask("thanks", "ok").await;
     // Ten messages now: enough for /compact to summarise the older ones.
-    send(&fake, command(4, "/compact"), "Compacted").await;
+    chat.ask("/compact", "Compacted").await;
     assert_eq!(fake.llm_requests().len(), 6);
 
-    send(&fake, command(5, "/usage"), "This session").await;
-    let report = fake.sent_texts().last().unwrap().clone();
+    let report = chat.ask("/usage", "This session").await;
     let totals = "6 calls · in 360 · cache read 240 · cache write 0 · out 60";
     assert!(report.contains(&format!("This session: {totals}")), "{report}");
     assert!(report.contains(&format!("Today, all chats: {totals}")), "{report}");
 
     // A new conversation starts from zero; today's totals keep counting.
-    send(&fake, command(6, "/new"), "new conversation").await;
-    send(&fake, message(7, json!({"text": "hi"})), "ok").await;
-    send(&fake, command(8, "/usage"), "This session").await;
-    let report = fake.sent_texts().last().unwrap().clone();
+    chat.ask("/new", "new conversation").await;
+    chat.ask("hi", "ok").await;
+    let report = chat.ask("/usage", "This session").await;
     assert!(report.contains("This session: 1 calls · in 60 · cache read 40 · cache write 0 · out 10"), "{report}");
     assert!(report.contains("Today, all chats: 7 calls · in 420"), "{report}");
 }

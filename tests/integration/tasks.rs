@@ -3,11 +3,8 @@
 
 use crate::support::*;
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(30);
 const SKILL: &str = "---\nname: probe\ndescription: How to probe\n---\nPROBE-BODY\n";
 
 fn msgs(req: &Value) -> &Vec<Value> {
@@ -35,28 +32,20 @@ async fn task_runs_with_skills_and_script_in_its_own_session() {
             "script": "echo SCRIPT-OUT", "isolated": true
         }))
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "watch it"}))], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[("skills/probe/SKILL.md", SKILL)], &[("AUGUST_SCHEDULER_TICK", "1")]);
+    let fake = Fake::llm(llm).await;
+    let setup = Setup { home: &[("skills/probe/SKILL.md", SKILL)], env: &[("AUGUST_SCHEDULER_TICK", "1")], ..Default::default() };
+    let gw = august(&fake, setup).await;
+    let mut chat = gw.chat().await;
+    chat.say("watch it").await;
 
     // The script needs approval when the task is created.
-    let pressed = Mutex::new(HashSet::new());
-    fake.wait_for(TIMEOUT, |f| {
-        for req in f.calls("sendMessage") {
-            let data = req.json()["reply_markup"]["inline_keyboard"][0][0]["callback_data"].as_str().map(String::from);
-            if let Some(d) = data.filter(|d| !d.is_empty() && pressed.lock().unwrap().insert(d.clone())) {
-                f.push_updates(vec![button_press(50, &d)]);
-            }
-        }
-        f.sent_texts().iter().any(|t| t.contains("report:"))
-    })
-    .await;
-    assert!(fake.sent_texts().iter().any(|t| t.contains("echo SCRIPT-OUT")), "approval shows the script");
+    let report = chat.allow_until("report:").await.text;
+    assert!(chat.texts().iter().any(|t| t.contains("echo SCRIPT-OUT")), "approval shows the script");
 
     let run = fake.llm_requests().into_iter().find(|r| user_texts(r).iter().any(|t| t.contains("Scheduled task"))).unwrap();
     let prompt = user_texts(&run).join("\n");
     assert!(prompt.contains("check the thing") && prompt.contains("PROBE-BODY") && prompt.contains("SCRIPT-OUT"), "{prompt}");
     assert!(!prompt.contains("watch it"), "an isolated task doesn't see the chat");
-    let report = fake.sent_texts().into_iter().find(|t| t.contains("report:")).unwrap();
     assert!(report.contains("tasks can't be managed from a scheduled task"), "{report}");
 }
 
@@ -72,9 +61,11 @@ async fn silent_task_sends_nothing() {
         }
         reply_tool("schedule_task", json!({"schedule": "in 1s", "prompt": "quiet check"}))
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "watch quietly"}))], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &[("AUGUST_SCHEDULER_TICK", "1")]);
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { env: &[("AUGUST_SCHEDULER_TICK", "1")], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("watch quietly").await;
     fake.wait_for(TIMEOUT, |f| f.llm_requests().iter().any(|r| user_texts(r).last().unwrap().contains("quiet check"))).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(fake.sent_texts().iter().all(|t| !t.contains("SILENT") && !t.contains("nothing changed")), "{:?}", fake.sent_texts());
+    assert!(chat.texts().iter().all(|t| !t.contains("SILENT") && !t.contains("nothing changed")), "{:?}", chat.texts());
 }

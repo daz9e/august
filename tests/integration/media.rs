@@ -48,12 +48,12 @@ async fn photo_reaches_the_model_and_agent_sends_a_file_back() {
         }
     });
     let fake = Fake::start(vec![update], files, Some(llm)).await;
-    let gw = spawn_gateway(&fake, LlmSetup::Fake, &[("chart.png", &chart)]);
+    let gw = august(&fake, Setup { seed: &[("chart.png", &chart)], telegram: true, ..Default::default() }).await;
 
     fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("Done."))).await;
 
     // The largest photo size was downloaded into the inbox.
-    let saved = inbox(&gw);
+    let saved = gw.inbox();
     assert_eq!(saved.len(), 1, "{saved:?}");
     assert!(saved[0].to_string_lossy().ends_with("-photo.jpg"));
     assert_eq!(std::fs::read(&saved[0]).unwrap(), photo);
@@ -98,11 +98,11 @@ async fn document_is_saved_to_the_inbox_for_the_agent() {
     let files = HashMap::from([("doc1".to_string(), pdf.clone())]);
     let llm: Llm = Box::new(|_| reply_text("Got it."));
     let fake = Fake::start(vec![update], files, Some(llm)).await;
-    let gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
+    let gw = august(&fake, Setup { telegram: true, ..Default::default() }).await;
 
     fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("Got it."))).await;
 
-    let saved = inbox(&gw);
+    let saved = gw.inbox();
     assert_eq!(saved.len(), 1, "{saved:?}");
     let name = saved[0].file_name().unwrap().to_string_lossy().to_string();
     assert!(name.ends_with("-Q3_notes.pdf"), "{name}");
@@ -121,11 +121,11 @@ async fn too_large_file_is_reported_to_the_agent() {
     );
     let llm: Llm = Box::new(|_| reply_text("Too big, sorry."));
     let fake = Fake::start(vec![update], HashMap::new(), Some(llm)).await;
-    let gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
+    let gw = august(&fake, Setup { telegram: true, ..Default::default() }).await;
 
     fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("Too big"))).await;
 
-    assert!(inbox(&gw).is_empty());
+    assert!(gw.inbox().is_empty());
     assert!(fake.calls("getFile").is_empty(), "must not try to download");
     let (text, _) = last_user(&fake.llm_requests()[0]);
     assert!(text.contains("big.zip could not be received") && text.contains("20 MB"), "{text}");
@@ -151,7 +151,7 @@ async fn voice_note_is_transcribed_for_the_agent() {
         ("AUGUST_TRANSCRIBE_API_KEY", "stt-key"),
         ("AUGUST_TRANSCRIBE_MODEL", "whisper-large-v3-turbo"),
     ];
-    let gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &env);
+    let gw = august(&fake, Setup { env: &env, telegram: true, ..Default::default() }).await;
 
     fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("Will do."))).await;
 
@@ -163,7 +163,7 @@ async fn voice_note_is_transcribed_for_the_agent() {
     assert!(stt[0].body.windows(ogg.len()).any(|w| w == ogg.as_slice()));
 
     // The file is kept, and the model sees the transcript and where the file is.
-    let saved = inbox(&gw);
+    let saved = gw.inbox();
     assert_eq!(saved.len(), 1, "{saved:?}");
     let name = saved[0].file_name().unwrap().to_string_lossy().to_string();
     assert!(name.ends_with("-voice.ogg"), "{name}");
@@ -177,12 +177,12 @@ async fn voice_note_without_transcription_is_still_saved() {
     let (update, files) = voice_note();
     let llm: Llm = Box::new(|_| reply_text("Saved it."));
     let fake = Fake::start(vec![update], files, Some(llm)).await;
-    let gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
+    let gw = august(&fake, Setup { telegram: true, ..Default::default() }).await;
 
     fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("Saved it."))).await;
 
     assert!(fake.requests().iter().all(|r| !r.path.ends_with("/audio/transcriptions")));
-    assert_eq!(inbox(&gw).len(), 1);
+    assert_eq!(gw.inbox().len(), 1);
     let (text, _) = last_user(&fake.llm_requests()[0]);
     assert!(text.contains("inbox/") && text.contains("voice.ogg"), "{text}");
     assert!(text.contains("No transcript: transcription is not configured"), "{text}");

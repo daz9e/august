@@ -2,13 +2,10 @@
 //! later compaction updates the earlier summary instead of summarising it again.
 
 use crate::support::*;
-use serde_json::{Value, json};
-use std::collections::HashMap;
+use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(30);
 
 fn is_summary(req: &Value) -> bool {
     req["messages"][0]["content"].as_str().is_some_and(|s| s.contains("You compress conversations"))
@@ -31,13 +28,12 @@ async fn long_conversation_is_summarised_and_the_summary_updated() {
             reply_text("ok")
         }
     });
-    let fake = Fake::start(Vec::new(), HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &[("AUGUST_CONTEXT_TOKENS", "4000")]);
-
-    let chat_calls = |f: &Fake| f.llm_requests().iter().filter(|r| !is_summary(r)).count();
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { env: &[("AUGUST_CONTEXT_TOKENS", "4000")], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
     for i in 1..=14 {
-        fake.push_updates(vec![message(i, json!({"text": format!("note {i}: {}", "lorem ipsum ".repeat(120))}))]);
-        fake.wait_for(TIMEOUT, |f| chat_calls(f) >= i as usize).await;
+        chat.say(&format!("note {i}: {}", "lorem ipsum ".repeat(120))).await;
+        chat.idle(i).await;
     }
 
     let reqs = fake.llm_requests();

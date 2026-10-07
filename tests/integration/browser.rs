@@ -3,8 +3,6 @@
 
 use crate::support::*;
 use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::time::Duration;
 
 #[tokio::test]
 async fn browser_commands_run_in_a_per_chat_session() {
@@ -35,15 +33,17 @@ async fn browser_commands_run_in_a_per_chat_session() {
             None => reply_text("Browsed."),
         }
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "look at example.com"}))], HashMap::new(), Some(llm)).await;
-    let gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], &[("AUGUST_BROWSER_BIN", bin.to_str().unwrap())]);
-    fake.wait_for(Duration::from_secs(30), |f| f.sent_texts().iter().any(|t| t.contains("Browsed."))).await;
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { env: &[("AUGUST_BROWSER_BIN", bin.to_str().unwrap())], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("look at example.com").await;
+    chat.wait_for("Browsed.").await;
 
     // Only the allowed calls reached the browser, all in this chat's session, with the
     // screenshot path made absolute inside the workspace.
     let calls = std::fs::read_to_string(&log).unwrap();
     let shot = gw.workspace.canonicalize().unwrap().join("shots/page.png");
-    let session = format!("--session august-telegram-{CHAT}");
+    let session = format!("--session august-cli-{}", chat.thread);
     let expected = [
         format!("{session} open https://example.com"),
         format!("{session} snapshot -i"),

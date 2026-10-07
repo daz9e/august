@@ -4,9 +4,7 @@
 use crate::support::*;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Saves each call's stdin and args next to itself. Without a tool result in the
 /// transcript it asks for `read_file` (split across deltas); with one, it answers.
@@ -37,16 +35,15 @@ async fn answers_through_the_claude_cli_and_runs_august_tools() {
     std::fs::write(&bin, FAKE_CLAUDE).unwrap();
     std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 
-    let update = message(1, serde_json::json!({"text": "what does note.txt say?"}));
-    let fake = Fake::start(vec![update], HashMap::new(), None).await;
+    let fake = Fake::start(Vec::new(), HashMap::new(), None).await;
     let bin_path = bin.to_string_lossy().into_owned();
     let env = [("AUGUST_PROVIDER", "claude-cli"), ("AUGUST_MODEL", "sonnet"), ("AUGUST_CLAUDE_BIN", bin_path.as_str())];
-    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[("note.txt", b"PINEAPPLE")], &[], &env);
-
-    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("The note says PINEAPPLE."))).await;
+    let gw = august(&fake, Setup { seed: &[("note.txt", b"PINEAPPLE")], env: &env, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("what does note.txt say?", "The note says PINEAPPLE.").await;
 
     // The tool-call markup was never shown in the chat, even mid-stream.
-    let texts = fake.sent_texts();
+    let texts = chat.history();
     assert!(texts.iter().all(|t| !t.contains("tool_call") && !t.contains("<tool")), "{texts:?}");
     assert!(texts.iter().any(|t| t.contains("Let me look.")), "{texts:?}");
 

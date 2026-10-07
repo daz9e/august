@@ -5,10 +5,7 @@ use crate::support::*;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(30);
 
 const SERVER_PY: &str = r#"
 import json, os, sys
@@ -96,7 +93,6 @@ async fn mcp_server_tools_become_agent_tools() {
         "dies": {"command": "python3", "args": ["-c", "import sys; sys.stdin.readline(); print('bye', file=sys.stderr)"]},
     }});
 
-    let cmd = |n: i64, text: &str| message(n, json!({"text": text, "entities": [{"type": "bot_command", "offset": 0, "length": text.len()}]}));
     let llm: Llm = Box::new(|req| {
         let last = messages(req).last().unwrap();
         if last["role"] == "tool" {
@@ -111,18 +107,16 @@ async fn mcp_server_tools_become_agent_tools() {
             reply_tool("mcp_web_time", json!({}))
         }
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "echo please"}))], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[], &[("mcp.json", &config.to_string())]);
+    let fake = Fake::llm(llm).await;
+    let config = config.to_string();
+    let gw = august(&fake, Setup { home: &[("mcp.json", &config)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
 
     // One message at a time, so each runs as its own turn.
-    let sent = |f: &Fake, needle: &str| f.sent_texts().iter().any(|t| t.contains(needle));
-    fake.wait_for(TIMEOUT, |f| sent(f, "Result: hello world")).await;
-    fake.push_updates(vec![message(2, json!({"text": "break it"}))]);
-    fake.wait_for(TIMEOUT, |f| sent(f, "disk on fire")).await;
-    fake.push_updates(vec![message(3, json!({"text": "what time"}))]);
-    fake.wait_for(TIMEOUT, |f| sent(f, "Result: noon over http")).await;
-    fake.push_updates(vec![cmd(4, "/mcp")]);
-    fake.wait_for(TIMEOUT, |f| sent(f, "ghost")).await;
+    chat.ask("echo please", "Result: hello world").await;
+    chat.ask("break it", "disk on fire").await;
+    chat.ask("what time", "Result: noon over http").await;
+    let status = chat.ask("/mcp", "ghost").await;
 
     // The tools were offered under prefixed, sanitized names.
     let reqs = fake.llm_requests();
@@ -137,10 +131,8 @@ async fn mcp_server_tools_become_agent_tools() {
     assert!(tool_msgs.iter().any(|m| m == "error: disk on fire"), "{tool_msgs:?}");
 
     // /mcp lists every server, including the one that could not start.
-    let status = fake.sent_texts().into_iter().find(|t| t.contains("ghost")).unwrap();
     assert!(status.contains("fake — tools: mcp_fake_echo, mcp_fake_fail_hard"), "{status}");
     assert!(status.contains("web — tools: mcp_web_time"), "{status}");
     assert!(status.contains("could not run /nonexistent/mcp-server"), "{status}");
     assert!(status.contains("dies — the server exited: bye"), "{status}");
-    assert!(fake.calls("setMyCommands").iter().any(|r| r.text().contains("\"mcp\"")));
 }

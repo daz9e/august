@@ -3,8 +3,6 @@
 
 use crate::support::*;
 use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::time::Duration;
 
 fn msgs(req: &Value) -> &Vec<Value> {
     req["messages"].as_array().unwrap()
@@ -46,14 +44,16 @@ async fn subtasks_run_in_the_background_and_report_back() {
         }
         two_delegations()
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "compare fruit"}))], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
-    fake.wait_for(Duration::from_secs(30), |f| {
-        let t = f.sent_texts();
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.say("compare fruit").await;
+    chat.wait_until("both reports", |c| {
+        let t = c.texts();
         ["apples are tasty", "pears are tasty"].iter().all(|r| t.iter().any(|x| x.contains("helpers say") && x.contains(r)))
     })
     .await;
-    assert!(fake.sent_texts().iter().any(|t| t.contains("I asked two helpers")));
+    assert!(chat.texts().iter().any(|t| t.contains("I asked two helpers")));
 
     let children: Vec<Value> = fake.llm_requests().into_iter().filter(is_child).collect();
     assert_eq!(children.len(), 2);
@@ -82,9 +82,10 @@ async fn failed_subtask_is_reported_to_the_chat() {
         }
         reply_tool("delegate_task", json!({"goal": "Count the stars"}))
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "count stars"}))], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
-    fake.wait_for(Duration::from_secs(60), |f| f.sent_texts().iter().any(|t| t.contains("relay:"))).await;
-    let relay = fake.sent_texts().into_iter().find(|t| t.contains("relay:")).unwrap();
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.say("count stars").await;
+    let relay = chat.wait_for("relay:").await.text;
     assert!(relay.contains("Subtask #1 failed: Count the stars"), "{relay}");
 }

@@ -5,7 +5,6 @@ use crate::support::*;
 use axum::routing::{get, post};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::time::Duration;
 
 const PAGE: &str = "<html><head><title>x</title></head><body><script>var a=1;</script><h1>Tea &amp; cake</h1><p>one<br>two</p></body></html>";
 const DDG: &str = r#"<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa%3Fb%3D1&amp;rut=zz">Example <b>Site</b></a>
@@ -36,9 +35,11 @@ async fn tool_results(base: &str, env: &[(&str, &str)]) -> Vec<String> {
             _ => reply_text("Searched."),
         }
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "find tea"}))], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway_env(&fake, LlmSetup::Fake, &[], &[], env);
-    fake.wait_for(Duration::from_secs(30), |f| f.sent_texts().iter().any(|t| t.contains("Searched."))).await;
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { env, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("find tea").await;
+    chat.wait_for("Searched.").await;
     let reqs = fake.llm_requests();
     let msgs: &Vec<Value> = reqs.last().unwrap()["messages"].as_array().unwrap();
     msgs.iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap().to_string()).collect()

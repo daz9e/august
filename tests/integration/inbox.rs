@@ -3,10 +3,8 @@
 
 use crate::support::*;
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(30);
 const MARK: &str = "[The user sent this while you were working]";
 
 fn msgs(req: &Value) -> &Vec<Value> {
@@ -41,13 +39,15 @@ async fn message_during_tool_use_joins_the_running_turn() {
             reply_tool("shell", json!({"command": "echo working"}))
         }
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "start the job"}))], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.say("start the job").await;
     fake.wait_for(TIMEOUT, |f| !f.llm_requests().is_empty()).await;
-    fake.push_updates(vec![message(2, json!({"text": "use the blue theme"}))]);
+    chat.say("use the blue theme").await;
 
-    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("done, noted: use the blue theme"))).await;
-    assert!(fake.sent_texts().iter().any(|t| t.contains("Got it")));
+    chat.wait_for("done, noted: use the blue theme").await;
+    assert!(chat.texts().iter().any(|t| t.contains("Got it")));
     // One turn: the message never started its own.
     let reqs = fake.llm_requests();
     assert!(reqs.iter().all(|r| texts(r).iter().filter(|t| t.contains("start the job")).count() == 1));
@@ -57,18 +57,18 @@ async fn message_during_tool_use_joins_the_running_turn() {
 #[tokio::test(flavor = "multi_thread")]
 async fn message_during_the_final_answer_runs_next_and_queue_keeps_its_own_turn() {
     let llm = slow_first(|req| reply_text(&format!("re: {}", texts(req).pop().unwrap().lines().last().unwrap())));
-    let fake = Fake::start(vec![message(1, json!({"text": "first"}))], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway(&fake, LlmSetup::Fake, &[]);
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.say("first").await;
     fake.wait_for(TIMEOUT, |f| !f.llm_requests().is_empty()).await;
-    fake.push_updates(vec![
-        message(2, json!({"text": "second"})),
-        message(3, json!({"text": "/queue third", "entities": [{"type": "bot_command", "offset": 0, "length": 6}]})),
-    ]);
-    fake.wait_for(TIMEOUT, |f| {
-        let t = f.sent_texts();
+    chat.say("second").await;
+    chat.say("/queue third").await;
+    chat.wait_until("all three replies", |c| {
+        let t = c.texts();
         ["] first", "] second", "] third"].iter().all(|r| t.iter().any(|x| x.contains(r)))
     })
     .await;
-    assert!(fake.sent_texts().iter().any(|t| t.contains("Queued")));
+    assert!(chat.texts().iter().any(|t| t.contains("Queued")));
     assert_eq!(fake.llm_requests().len(), 3);
 }

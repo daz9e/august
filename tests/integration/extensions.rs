@@ -3,10 +3,8 @@
 
 use crate::support::*;
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(30);
 
 fn have_bun() -> bool {
     let found = std::env::var_os("PATH")
@@ -60,10 +58,6 @@ fn llm(pick: fn(&str) -> Value) -> Llm {
     })
 }
 
-fn sent_any(f: &Fake, needle: &str) -> bool {
-    f.sent_texts().iter().any(|t| t.contains(needle))
-}
-
 #[tokio::test]
 async fn extensions_add_tools_commands_and_hooks() {
     if !have_bun() {
@@ -76,24 +70,17 @@ async fn extensions_add_tools_commands_and_hooks() {
             reply_tool("shout", json!({"text": "hi"}))
         }
     };
-    let fake = Fake::start(vec![message(1, json!({"text": "hello colour"}))], HashMap::new(), Some(llm(pick))).await;
-    let _gw = spawn_gateway_with_home(
-        &fake,
-        LlmSetup::Fake,
-        &[],
-        &[("extensions/demo/index.ts", DEMO), ("extensions/broken/index.ts", BROKEN)],
-    );
+    let fake = Fake::llm(llm(pick)).await;
+    let home = [("extensions/demo/index.ts", DEMO), ("extensions/broken/index.ts", BROKEN)];
+    let gw = august(&fake, Setup { home: &home, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
 
     // One at a time: a message sent while a turn runs would join that turn.
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "turn ended: Result: HI via telegram")).await;
-    fake.push_updates(vec![message(2, json!({"text": "run the forbidden thing"}))]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "blocked by an extension")).await;
-    fake.push_updates(vec![
-        message(3, json!({"text": "secret"})),
-        message(4, json!({"text": "/ping x", "entities": [{"type": "bot_command", "offset": 0, "length": 5}]})),
-        message(5, json!({"text": "/extensions", "entities": [{"type": "bot_command", "offset": 0, "length": 11}]})),
-    ]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "intercepted") && sent_any(f, "pong x") && sent_any(f, "broken")).await;
+    chat.ask("hello colour", "turn ended: Result: HI via cli").await;
+    chat.ask("run the forbidden thing", "blocked by an extension").await;
+    chat.ask("secret", "intercepted").await;
+    chat.ask("/ping x", "pong x").await;
+    let status = chat.ask("/extensions", "broken").await;
 
     // The extension's tool was offered and the before_turn hook extended the prompt.
     let reqs = fake.llm_requests();
@@ -109,12 +96,10 @@ async fn extensions_add_tools_commands_and_hooks() {
         && m["content"].as_str().unwrap_or("").contains("blocked by an extension: no forbidden commands"))));
 
     // /extensions reports the working one and the error of the broken one.
-    let status = fake.sent_texts().into_iter().find(|t| t.contains("broken")).unwrap();
     assert!(status.contains("demo") && status.contains("shout") && status.contains("/ping"), "{status}");
     assert!(status.contains("boom at load"), "{status}");
-    // The extension command is announced to Telegram.
-    let commands = fake.calls("setMyCommands");
-    assert!(commands.iter().any(|r| r.text().contains("\"ping\"")));
+    // The extension command is in /help.
+    chat.ask("/help", "/ping").await;
 }
 
 const GREETER: &str = r#"export default function (august) {
@@ -138,25 +123,22 @@ async fn agent_installs_an_extension_with_approval() {
             reply_tool("greet", json!({"name": "Bob"}))
         }
     };
-    let fake = Fake::start(vec![message(1, json!({"text": "add a greeter"}))], HashMap::new(), Some(llm(pick))).await;
-    let gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[], &[]);
+    let fake = Fake::llm(llm(pick)).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.say("add a greeter").await;
 
     // The install waits for the owner's approval, which shows the code.
-    fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("callback_data"))).await;
-    let ask = fake.calls("sendMessage").into_iter().find(|r| r.text().contains("callback_data")).unwrap().json();
-    assert!(ask["text"].as_str().unwrap().contains("greeter"));
-    assert!(ask["text"].as_str().unwrap().contains("Hello, ${name}!"));
-    assert_eq!(ask["reply_markup"]["inline_keyboard"][0][0]["text"], "✅ Allow");
-    let allow = ask["reply_markup"]["inline_keyboard"][0][0]["callback_data"].as_str().unwrap().to_string();
-    fake.push_updates(vec![button_press(2, &allow)]);
+    let ask = chat.question().await;
+    assert!(ask.text.contains("greeter") && ask.text.contains("Hello, ${name}!"), "{}", ask.text);
+    chat.press(&ask.button("Allow")).await;
 
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: saved")).await;
-    assert!(sent_any(&fake, "greeter — tools: greet"), "{:?}", fake.sent_texts());
+    let saved = chat.wait_for("Result: saved").await;
+    assert!(saved.text.contains("greeter — tools: greet"), "{}", saved.text);
     assert_eq!(std::fs::read_to_string(gw.home.join("extensions/greeter/index.ts")).unwrap(), GREETER);
 
     // The new tool is usable on the next message, without a restart.
-    fake.push_updates(vec![message(3, json!({"text": "greet Bob"}))]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: Hello, Bob!")).await;
+    chat.ask("greet Bob", "Result: Hello, Bob!").await;
 }
 
 const FRAGILE: &str = r#"export default function (august) {
@@ -175,14 +157,14 @@ async fn crashed_extension_is_restarted() {
     }
     let pick: fn(&str) -> Value =
         |text| reply_tool(if text.contains("crash") { "crash" } else { "alive" }, json!({}));
-    let fake = Fake::start(vec![message(1, json!({"text": "crash please"}))], HashMap::new(), Some(llm(pick))).await;
-    let _gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[], &[("extensions/fragile/index.ts", FRAGILE)]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: bye")).await;
+    let fake = Fake::llm(llm(pick)).await;
+    let gw = august(&fake, Setup { home: &[("extensions/fragile/index.ts", FRAGILE)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("crash please", "Result: bye").await;
 
     // The first restart comes after a second; the gateway keeps serving meanwhile.
     tokio::time::sleep(Duration::from_millis(2_500)).await;
-    fake.push_updates(vec![message(2, json!({"text": "are you there?"}))]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: still here")).await;
+    chat.ask("are you there?", "Result: still here").await;
 }
 
 const PROBE: &str = r#"
@@ -204,11 +186,6 @@ export default function (august: August) {
 }
 "#;
 
-fn command(id: i64, text: &str) -> Value {
-    let len = text.split_whitespace().next().unwrap().len();
-    message(id, json!({"text": text, "entities": [{"type": "bot_command", "offset": 0, "length": len}]}))
-}
-
 #[tokio::test]
 async fn extensions_hook_model_calls_call_into_august_and_can_be_disabled() {
     if !have_bun() {
@@ -221,19 +198,15 @@ async fn extensions_hook_model_calls_call_into_august_and_can_be_disabled() {
             reply_text("forty-two")
         }
     };
-    let fake = Fake::start(vec![message(1, json!({"text": "read the note"}))], HashMap::new(), Some(llm(pick))).await;
-    let gw = spawn_gateway_with_home(
-        &fake,
-        LlmSetup::Fake,
-        &[("note.txt", b"note body")],
-        &[("extensions/probe/index.ts", PROBE)],
-    );
+    let fake = Fake::llm(llm(pick)).await;
+    let setup = Setup { seed: &[("note.txt", b"note body")], home: &[("extensions/probe/index.ts", PROBE)], ..Default::default() };
+    let gw = august(&fake, setup).await;
+    let mut chat = gw.chat().await;
+    chat.say("read the note").await;
 
     // llm_result fires after every model call of the turn.
-    fake.wait_for(TIMEOUT, |f| {
-        sent_any(f, "llm_result 0: read_file||number") && sent_any(f, "llm_result 1: |Result: note body")
-    })
-    .await;
+    chat.wait_for("llm_result 0: read_file||number").await;
+    chat.wait_for("llm_result 1: |Result: note body").await;
     // llm_call changed the system prompt of the second call only.
     let reqs = fake.llm_requests();
     let system = |r: &Value| messages(r)[0]["content"].as_str().unwrap().to_string();
@@ -241,29 +214,22 @@ async fn extensions_hook_model_calls_call_into_august_and_can_be_disabled() {
     assert!(system(second).ends_with("\nSTEP-ONE"));
     assert_eq!(reqs.iter().filter(|r| system(r).contains("STEP-ONE")).count(), 1);
 
-    fake.push_updates(vec![command(2, "/new")]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "session_start fresh")).await;
+    chat.ask("/new", "session_start fresh").await;
 
     // ctx.callTool runs a built-in tool in the chat; ctx.llm asks the model without tools.
-    fake.push_updates(vec![command(3, "/peek one")]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "peek one: note body (error: false)")).await;
-    fake.push_updates(vec![command(4, "/ask what is six times seven")]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "llm says: forty-two")).await;
+    chat.ask("/peek one", "peek one: note body (error: false)").await;
+    chat.ask("/ask what is six times seven", "llm says: forty-two").await;
     let ask = fake.llm_requests().into_iter().find(|r| last_user_text(r).contains("six times seven")).unwrap();
     assert_eq!(system(&ask), "SYS-X");
     assert!(ask["tools"].as_array().is_none_or(|t| t.is_empty()));
 
     // Disabled: listed as paused, not running, remembered on disk; enabling restores it.
-    fake.push_updates(vec![command(5, "/extensions disable probe")]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "⏸ probe")).await;
+    chat.ask("/extensions disable probe", "⏸ probe").await;
     assert!(gw.home.join("extensions/probe/disabled").exists());
-    fake.push_updates(vec![command(6, "/peek two")]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "Unknown command /peek")).await;
-    fake.push_updates(vec![command(7, "/extensions enable probe")]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "✅ probe")).await;
+    chat.ask("/peek two", "Unknown command /peek").await;
+    chat.ask("/extensions enable probe", "✅ probe").await;
     assert!(!gw.home.join("extensions/probe/disabled").exists());
-    fake.push_updates(vec![command(8, "/peek three")]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "peek three: note body")).await;
+    chat.ask("/peek three", "peek three: note body").await;
 }
 
 const WATCHER: &str = r#"export default function (august) {
@@ -281,16 +247,13 @@ async fn compaction_event_reaches_extensions() {
         let system = messages(req)[0]["content"].as_str().unwrap_or("");
         reply_text(if system.contains("You compress conversations") { "## Goal\nchat" } else { "ok" })
     });
-    let fake = Fake::start(vec![message(1, json!({"text": "message 1"}))], HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[], &[("extensions/watcher/index.ts", WATCHER)]);
-    fake.wait_for(TIMEOUT, |f| f.sent_texts().len() >= 1).await;
-    for i in 2..=6 {
-        let n = fake.sent_texts().len();
-        fake.push_updates(vec![message(i, json!({"text": format!("message {i} {}", "x".repeat(300))}))]);
-        fake.wait_for(TIMEOUT, |f| f.sent_texts().len() > n).await;
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { home: &[("extensions/watcher/index.ts", WATCHER)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    for i in 1..=6 {
+        chat.ask(&format!("message {i} {}", "x".repeat(300)), "ok").await;
     }
-    fake.push_updates(vec![message(7, json!({"text": "/compact", "entities": [{"type": "bot_command", "offset": 0, "length": 8}]}))]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "compaction event: smaller")).await;
+    chat.ask("/compact", "compaction event: smaller").await;
 }
 
 const RECALL: &str = r#"
@@ -308,11 +271,12 @@ async fn context_hook_changes_what_the_model_sees_but_not_the_history() {
     if !have_bun() {
         return;
     }
-    let updates = vec![message(1, json!({"text": "hi"})), message(2, json!({"text": "again"}))];
     let llm: Llm = Box::new(|req| reply_text(&format!("seen {}", messages(req).len())));
-    let fake = Fake::start(updates, HashMap::new(), Some(llm)).await;
-    let _gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[], &[("extensions/recall/index.ts", RECALL)]);
-    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().filter(|t| t.starts_with("seen")).count() >= 2).await;
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { home: &[("extensions/recall/index.ts", RECALL)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("hi", "seen").await;
+    chat.ask("again", "seen").await;
 
     for req in fake.llm_requests() {
         let all = req.to_string();
@@ -342,27 +306,25 @@ async fn extensions_replace_builtin_tools_and_decide_approvals() {
         t if t.contains("touch") => reply_tool("shell", json!({"command": "touch made.txt"})),
         _ => reply_tool("read_file", json!({"path": "notes.txt"})),
     };
-    let fake = Fake::start(vec![message(1, json!({"text": "list"}))], HashMap::new(), Some(llm(pick))).await;
-    let gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[("notes.txt", b"private")], &[("extensions/policy/index.ts", POLICY)]);
+    let fake = Fake::llm(llm(pick)).await;
+    let setup = Setup { seed: &[("notes.txt", b"private")], home: &[("extensions/policy/index.ts", POLICY)], ..Default::default() };
+    let gw = august(&fake, setup).await;
+    let mut chat = gw.chat().await;
 
     // An extension tool replaces the built-in of the same name.
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: custom listing")).await;
+    chat.ask("list", "Result: custom listing").await;
 
     // `approve: true` runs a risky command without asking.
-    fake.push_updates(vec![message(2, json!({"text": "touch"}))]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: exit code: 0")).await;
+    chat.ask("touch", "Result: exit code: 0").await;
     assert!(gw.workspace.join("made.txt").exists());
-    assert!(!fake.calls("sendMessage").iter().any(|r| r.text().contains("callback_data")), "asked anyway");
+    assert!(chat.messages().iter().all(|m| m.buttons.is_empty()), "asked anyway");
 
     // `ask` asks even for a tool that never does; a denial reaches the model.
-    fake.push_updates(vec![message(3, json!({"text": "read"}))]);
-    fake.wait_for(TIMEOUT, |f| f.calls("sendMessage").iter().any(|r| r.text().contains("callback_data"))).await;
-    let ask = fake.calls("sendMessage").into_iter().find(|r| r.text().contains("callback_data")).unwrap().json();
-    assert!(ask["text"].as_str().unwrap().contains("Let the agent read notes.txt?"));
-    assert_eq!(ask["reply_markup"]["inline_keyboard"][0][1]["text"], "❌ Deny");
-    let deny = ask["reply_markup"]["inline_keyboard"][0][1]["callback_data"].as_str().unwrap().to_string();
-    fake.push_updates(vec![button_press(4, &deny)]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: the user denied this")).await;
+    chat.say("read").await;
+    let ask = chat.question().await;
+    assert!(ask.text.contains("Let the agent read notes.txt?"), "{}", ask.text);
+    chat.press(&ask.button("Deny")).await;
+    chat.wait_for("Result: the user denied this").await;
 }
 
 const LATE: &str = r#"export default function (august) {
@@ -379,13 +341,11 @@ async fn extension_changes_its_tools_after_startup() {
     if !have_bun() {
         return;
     }
-    let arm = message(1, json!({"text": "/arm", "entities": [{"type": "bot_command", "offset": 0, "length": 4}]}));
-    let fake = Fake::start(vec![arm], HashMap::new(), Some(llm(|_| reply_tool("late", json!({}))))).await;
-    let _gw = spawn_gateway_with_home(&fake, LlmSetup::Fake, &[], &[("extensions/late/index.ts", LATE)]);
-
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "armed")).await;
-    fake.push_updates(vec![message(2, json!({"text": "go"}))]);
-    fake.wait_for(TIMEOUT, |f| sent_any(f, "Result: late ran")).await;
+    let fake = Fake::llm(llm(|_| reply_tool("late", json!({})))).await;
+    let gw = august(&fake, Setup { home: &[("extensions/late/index.ts", LATE)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("/arm", "armed").await;
+    chat.ask("go", "Result: late ran").await;
 
     let first = &fake.llm_requests()[0];
     let tools: Vec<&str> = first["tools"].as_array().unwrap().iter().filter_map(|t| t["function"]["name"].as_str()).collect();

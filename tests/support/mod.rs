@@ -1,6 +1,7 @@
-//! Shared test harness: a fake Telegram Bot API (and optionally a fake
-//! OpenAI-compatible LLM) on one local HTTP server, and the real `august gateway`
-//! binary running against it.
+//! Shared test harness. August runs as the real `august gateway` binary against a fake
+//! LLM (an OpenAI-compatible endpoint on a local HTTP server); tests talk to it as a
+//! messenger client would, through the terminal messenger's socket (`Gateway::chat`).
+//! The same server can play the Telegram Bot API for tests of the Telegram adapter.
 
 #![allow(dead_code)]
 
@@ -74,6 +75,11 @@ impl Fake {
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         Fake { url, inner }
+    }
+
+    /// Only the fake LLM (no Telegram updates or files).
+    pub async fn llm(llm: Llm) -> Fake {
+        Fake::start(Vec::new(), HashMap::new(), Some(llm)).await
     }
 
     /// Queues updates for the next `getUpdates`.
@@ -224,42 +230,43 @@ impl Drop for Gateway {
     }
 }
 
-pub enum LlmSetup<'a> {
-    /// The fake LLM on the test server.
-    Fake,
-    /// Whatever provider the developer configured in `home` (`~/.august`).
-    Real { home: &'a Path },
+/// How August starts in a test.
+#[derive(Default, Clone, Copy)]
+pub struct Setup<'a> {
+    /// Files put into the workspace.
+    pub seed: &'a [(&'a str, &'a [u8])],
+    /// Files put into `AUGUST_HOME` (relative paths).
+    pub home: &'a [(&'a str, &'a str)],
+    /// Extra environment for August.
+    pub env: &'a [(&'a str, &'a str)],
+    /// Also run the Telegram messenger, against the fake Bot API.
+    pub telegram: bool,
 }
 
-/// Starts the gateway with a fresh workspace (seeded with `seed` files) talking to
-/// the fake Bot API at `fake`.
-pub fn spawn_gateway(fake: &Fake, llm: LlmSetup, seed: &[(&str, &[u8])]) -> Gateway {
-    spawn_gateway_with_home(fake, llm, seed, &[])
+/// `august gateway` against the fake LLM, with a fresh home and workspace; ready once it
+/// listens for chats. Killed on drop.
+pub async fn august(fake: &Fake, setup: Setup<'_>) -> Gateway {
+    let gw = spawn(fake, setup);
+    let socket = gw.home.join("august.sock");
+    let start = Instant::now();
+    while tokio::net::UnixStream::connect(&socket).await.is_err() {
+        assert!(start.elapsed() < Duration::from_secs(20), "August did not listen on {}", socket.display());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    gw
 }
 
-/// Like `spawn_gateway`, also writing `home_files` (relative paths) into `AUGUST_HOME`.
-pub fn spawn_gateway_with_home(fake: &Fake, llm: LlmSetup, seed: &[(&str, &[u8])], home_files: &[(&str, &str)]) -> Gateway {
-    spawn_gateway_env(fake, llm, seed, home_files, &[])
-}
-
-/// Like `spawn_gateway_with_home`, with extra environment variables for the gateway.
-pub fn spawn_gateway_env(
-    fake: &Fake,
-    llm: LlmSetup,
-    seed: &[(&str, &[u8])],
-    home_files: &[(&str, &str)],
-    env: &[(&str, &str)],
-) -> Gateway {
+fn spawn(fake: &Fake, setup: Setup) -> Gateway {
     let dir = tempfile::tempdir().unwrap();
-    let fake_home = dir.path().join("home");
-    for (path, text) in home_files {
-        let path = fake_home.join(path);
+    let home = dir.path().join("home");
+    for (path, text) in setup.home {
+        let path = home.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
     let workspace = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    for (name, bytes) in seed {
+    for (name, bytes) in setup.seed {
         std::fs::write(workspace.join(name), bytes).unwrap();
     }
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_august"));
@@ -268,45 +275,227 @@ pub fn spawn_gateway_env(
         .current_dir(dir.path()) // no project .env
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", dir.path())
+        .env("AUGUST_HOME", &home)
         .env("AUGUST_WORKSPACE", &workspace)
-        .env("TELEGRAM_API_BASE", &fake.url)
-        .env("TELEGRAM_BOT_TOKEN", TOKEN)
-        .env("TELEGRAM_ALLOWED_USERS", OWNER.to_string())
+        .env("AUGUST_PROVIDER", "openai")
+        .env("AUGUST_MODEL", "fake-model")
+        .env("OPENAI_API_KEY", "test")
+        .env("OPENAI_BASE_URL", format!("{}/v1", fake.url))
         .stdout(Stdio::null())
         .stderr(if std::env::var_os("TEST_GATEWAY_LOG").is_some() { Stdio::inherit() } else { Stdio::null() });
-    match llm {
-        LlmSetup::Fake => {
-            cmd.env("AUGUST_HOME", &fake_home)
-                .env("AUGUST_PROVIDER", "openai")
-                .env("AUGUST_MODEL", "fake-model")
-                .env("OPENAI_API_KEY", "test")
-                .env("OPENAI_BASE_URL", format!("{}/v1", fake.url));
-        }
-        LlmSetup::Real { home } => {
-            assert!(home_files.is_empty(), "home files are only written for the fake LLM");
-            cmd.env("AUGUST_HOME", home);
-            for (k, v) in std::env::vars().filter(|(k, _)| k.starts_with("AUGUST_") || k.ends_with("_API_KEY")) {
-                cmd.env(k, v);
+    if setup.telegram {
+        cmd.env("TELEGRAM_API_BASE", &fake.url)
+            .env("TELEGRAM_BOT_TOKEN", TOKEN)
+            .env("TELEGRAM_ALLOWED_USERS", OWNER.to_string());
+    }
+    cmd.envs(setup.env.iter().copied());
+    let child = cmd.spawn().expect("start august gateway");
+    Gateway { child, workspace, home, _dir: dir }
+}
+
+impl Gateway {
+    /// A new chat: a thread of the terminal messenger, spoken to over its socket.
+    pub async fn chat(&self) -> Chat {
+        let stream = tokio::net::UnixStream::connect(self.home.join("august.sock")).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        write.write_all(b"{\"type\":\"hello\"}\n").await.unwrap();
+        let mut lines = tokio::io::BufReader::new(read).lines();
+        let hello: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let seen: Arc<Mutex<Seen>> = Arc::default();
+        let sink = seen.clone();
+        tokio::spawn(async move {
+            while let Ok(Some(line)) = lines.next_line().await {
+                sink.lock().unwrap().apply(serde_json::from_str(&line).unwrap());
             }
-            cmd.env("AUGUST_WORKSPACE", &workspace);
+        });
+        Chat { write, seen, thread: hello["thread"].as_str().unwrap().to_string() }
+    }
+
+    /// Files in `workspace/inbox`.
+    pub fn inbox(&self) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(self.workspace.join("inbox"))
+            .map(|d| d.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+}
+
+/// A message August sent to a chat, as it reads now (after edits).
+#[derive(Debug, Clone)]
+pub struct Msg {
+    pub id: String,
+    pub text: String,
+    /// `(id, label)` of its buttons.
+    pub buttons: Vec<(String, String)>,
+    /// Edited after it was sent (a question then is settled).
+    pub edited: bool,
+}
+
+impl Msg {
+    /// The id of the button labelled `label`.
+    pub fn button(&self, label: &str) -> String {
+        self.buttons.iter().find(|(_, l)| l.contains(label)).unwrap_or_else(|| panic!("no button {label:?} in {self:?}")).0.clone()
+    }
+}
+
+#[derive(Default)]
+struct Seen {
+    msgs: Vec<Msg>,
+    files: Vec<(String, String)>,
+    idle: usize,
+    /// Questions this chat answered.
+    answered: Vec<String>,
+    /// Every text shown, including each edit while a reply streamed.
+    history: Vec<String>,
+}
+
+impl Seen {
+    fn apply(&mut self, ev: Value) {
+        match ev["type"].as_str().unwrap_or("") {
+            "send" => {
+                let buttons = ev["buttons"].as_array().into_iter().flatten()
+                    .map(|b| (b["id"].as_str().unwrap().to_string(), b["label"].as_str().unwrap().to_string())).collect();
+                self.msgs.push(Msg { id: ev["id"].as_str().unwrap().into(), text: ev["text"].as_str().unwrap().into(), buttons, edited: false });
+                self.history.push(ev["text"].as_str().unwrap().into());
+            }
+            "edit" => {
+                if let Some(m) = self.msgs.iter_mut().find(|m| m.id == ev["id"]) {
+                    m.text = ev["text"].as_str().unwrap().into();
+                    m.edited = true;
+                }
+                self.history.push(ev["text"].as_str().unwrap().into());
+            }
+            "file" => self.files.push((ev["path"].as_str().unwrap().into(), ev["caption"].as_str().unwrap_or("").into())),
+            "idle" => self.idle += 1,
+            _ => {}
         }
     }
-    cmd.envs(env.iter().copied());
-    let child = cmd.spawn().expect("start august gateway");
-    Gateway { child, workspace, home: fake_home, _dir: dir }
+}
+
+pub const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// One thread with August, as a messenger client would see it.
+pub struct Chat {
+    write: tokio::net::unix::OwnedWriteHalf,
+    seen: Arc<Mutex<Seen>>,
+    pub thread: String,
+}
+
+impl Chat {
+    async fn put(&mut self, msg: Value) {
+        use tokio::io::AsyncWriteExt;
+        self.write.write_all(format!("{msg}\n").as_bytes()).await.unwrap();
+    }
+
+    /// Sends a message (or a `/command`).
+    pub async fn say(&mut self, text: &str) {
+        self.put(json!({"type": "text", "text": text})).await;
+    }
+
+    pub async fn press(&mut self, button: &str) {
+        let mut seen = self.seen.lock().unwrap();
+        if let Some(m) = seen.msgs.iter().find(|m| m.buttons.iter().any(|(id, _)| id == button)).map(|m| m.id.clone()) {
+            seen.answered.push(m);
+        }
+        drop(seen);
+        self.put(json!({"type": "press", "button": button})).await;
+    }
+
+    pub fn messages(&self) -> Vec<Msg> {
+        self.seen.lock().unwrap().msgs.clone()
+    }
+
+    /// Every message's current text, in the order they were sent.
+    pub fn texts(&self) -> Vec<String> {
+        self.messages().into_iter().map(|m| m.text).collect()
+    }
+
+    /// Every text shown so far, including each edit of a streaming reply.
+    pub fn history(&self) -> Vec<String> {
+        self.seen.lock().unwrap().history.clone()
+    }
+
+    /// Files sent to the chat: `(path, caption)`.
+    pub fn files(&self) -> Vec<(String, String)> {
+        self.seen.lock().unwrap().files.clone()
+    }
+
+    /// How often August said it has nothing more to say (a turn or command ended).
+    pub fn idles(&self) -> usize {
+        self.seen.lock().unwrap().idle
+    }
+
+    fn transcript(&self) -> String {
+        self.texts().iter().map(|t| format!("» {t}")).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Waits until `done` holds; panics with the transcript after `TIMEOUT`.
+    pub async fn wait_until(&self, what: &str, done: impl Fn(&Chat) -> bool) {
+        let start = Instant::now();
+        while !done(self) {
+            if start.elapsed() > TIMEOUT {
+                panic!("timed out waiting for {what}; the chat so far:\n{}", self.transcript());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Says `text`, then waits for a message after it that contains `expect`; returns it.
+    pub async fn ask(&mut self, text: &str, expect: &str) -> String {
+        let n = self.messages().len();
+        self.say(text).await;
+        self.wait_until(&format!("{expect:?} after {text:?}"), |c| c.texts()[n..].iter().any(|t| t.contains(expect))).await;
+        self.texts()[n..].iter().find(|t| t.contains(expect)).unwrap().clone()
+    }
+
+    /// Waits for a message whose text contains `needle`.
+    pub async fn wait_for(&self, needle: &str) -> Msg {
+        self.wait_until(&format!("{needle:?}"), |c| c.texts().iter().any(|t| t.contains(needle))).await;
+        self.messages().into_iter().find(|m| m.text.contains(needle)).unwrap()
+    }
+
+    /// Waits for a question (a message with buttons) this chat hasn't answered and that
+    /// isn't settled.
+    pub async fn question(&self) -> Msg {
+        let open = |c: &Chat| {
+            let seen = c.seen.lock().unwrap();
+            seen.msgs.iter().find(|m| !m.buttons.is_empty() && !m.edited && !seen.answered.contains(&m.id)).cloned()
+        };
+        self.wait_until("a question", |c| open(c).is_some()).await;
+        open(self).unwrap()
+    }
+
+    /// Allows every approval asked until a message contains `needle`; returns that message.
+    pub async fn allow_until(&mut self, needle: &str) -> Msg {
+        let start = Instant::now();
+        loop {
+            if let Some(m) = self.messages().into_iter().find(|m| m.text.contains(needle)) {
+                return m;
+            }
+            let open = {
+                let seen = self.seen.lock().unwrap();
+                seen.msgs.iter().find(|m| !m.buttons.is_empty() && !m.edited && !seen.answered.contains(&m.id)).cloned()
+            };
+            if let Some(q) = open {
+                self.press(&q.button("Allow")).await;
+            }
+            if start.elapsed() > TIMEOUT {
+                panic!("timed out waiting for {needle:?}; the chat so far:\n{}", self.transcript());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Waits until August has gone idle `n` times in this chat.
+    pub async fn idle(&self, n: usize) {
+        self.wait_until(&format!("idle #{n}"), |c| c.idles() >= n).await;
+    }
 }
 
 pub fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)).unwrap()
-}
-
-/// Files in `workspace/inbox`.
-pub fn inbox(gw: &Gateway) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::fs::read_dir(gw.workspace.join("inbox"))
-        .map(|d| d.map(|e| e.unwrap().path()).collect())
-        .unwrap_or_default();
-    v.sort();
-    v
 }
 
 /// A terminal (`august` without arguments) connected to a gateway running against the
@@ -330,14 +519,8 @@ impl Drop for Terminal {
 }
 
 pub async fn spawn_terminal(fake: &Fake) -> Terminal {
-    let gateway = spawn_gateway(fake, LlmSetup::Fake, &[]);
     // Connect only once August listens, so the terminal doesn't start one of its own.
-    let socket = gateway.home.join("august.sock");
-    let start = Instant::now();
-    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
-        assert!(start.elapsed() < Duration::from_secs(20), "August did not listen on {}", socket.display());
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let gateway = august(fake, Setup::default()).await;
     let (workspace, home) = (gateway.workspace.clone(), gateway.home.clone());
     let mut term = open_terminal(workspace, home);
     term.gateway = Some(gateway);
