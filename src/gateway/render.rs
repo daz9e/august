@@ -16,11 +16,12 @@ pub(super) enum Ui {
 }
 
 pub(super) fn tool_line(name: &str, input: &serde_json::Value) -> String {
-    let arg = input
-        .as_object()
-        .and_then(|o| o.values().find_map(|v| v.as_str()))
-        .unwrap_or("");
-    let arg: String = arg.replace(['`', '\n'], " ").chars().take(80).collect();
+    // The first string argument, else the first list of strings (e.g. a command line).
+    let values = || input.as_object().into_iter().flat_map(|o| o.values());
+    let arg = values().find_map(|v| v.as_str().map(String::from)).or_else(|| {
+        values().find_map(|v| Some(v.as_array()?.iter().map(|s| s.as_str()).collect::<Option<Vec<_>>>()?.join(" ")))
+    });
+    let arg: String = arg.unwrap_or_default().replace(['`', '\n'], " ").chars().take(80).collect();
     format!("🔧 `{name}` {}", if arg.is_empty() { String::new() } else { format!("`{arg}`") })
 }
 

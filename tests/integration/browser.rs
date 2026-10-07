@@ -39,6 +39,8 @@ async fn browser_commands_run_in_a_per_chat_session() {
     let mut chat = gw.chat().await;
     chat.say("look at example.com").await;
     chat.wait_for("Browsed.").await;
+    // The tool line shows the command, given as a list.
+    assert!(chat.history().iter().any(|t| t.contains("🔧 `browser` `open https://example.com`")), "{:?}", chat.texts());
 
     // Only the allowed calls reached the browser, all in this chat's session, with the
     // screenshot path made absolute inside the workspace.
