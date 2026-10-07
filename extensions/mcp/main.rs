@@ -176,6 +176,13 @@ impl StdioLink {
     }
 }
 
+/// What an HTTP server answers when it no longer knows our session.
+const EXPIRED: &str = "the server ended the session (HTTP 404)";
+
+fn init_params() -> Value {
+    json!({"protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": {"name": "august", "version": env!("CARGO_PKG_VERSION")}})
+}
+
 /// Messages in an SSE body.
 fn sse_messages(body: &str) -> Vec<Value> {
     body.replace("\r\n", "\n")
@@ -199,14 +206,19 @@ impl HttpLink {
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
-        if let Some(s) = self.session.lock().unwrap().clone() {
+        let session = self.session.lock().unwrap().clone();
+        if let Some(s) = &session {
             req = req.header("mcp-session-id", s);
         }
         let resp = req.send().await.map_err(|e| format!("{e}"))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND && session.is_some() {
+            *self.session.lock().unwrap() = None;
+            return Err(EXPIRED.into());
+        }
         if let Some(s) = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()) {
             *self.session.lock().unwrap() = Some(s.to_string());
         }
-        let status = resp.status();
         let sse = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("text/event-stream"));
         // ponytail: reads the whole stream; fine while servers close it after the reply.
         let body = resp.text().await.map_err(|e| format!("{e}"))?;
@@ -247,7 +259,18 @@ impl Server {
                 }
             }
             Link::Http(h) => {
-                let reply = tokio::time::timeout(timeout, h.post(&msg)).await.map_err(|_| timed_out())??;
+                let call = async {
+                    match h.post(&msg).await {
+                        // The server forgot our session (e.g. it restarted): start a new one.
+                        Err(e) if e == EXPIRED => {
+                            h.post(&json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": init_params()})).await?;
+                            h.post(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).await?;
+                            h.post(&msg).await
+                        }
+                        r => r,
+                    }
+                };
+                let reply = tokio::time::timeout(timeout, call).await.map_err(|_| timed_out())??;
                 let reply = reply.unwrap_or_default();
                 if reply.get("error").is_some() { Err(rpc_error(&reply)) } else { Ok(reply["result"].clone()) }
             }
@@ -318,8 +341,7 @@ async fn connect(august: &August, taken: &StdMutex<HashSet<String>>, name: &str,
         (None, None) => return Err("needs a `command` or a `url`".into()),
     };
     let server = Arc::new(Server { link, next_id: AtomicU64::new(1) });
-    let init = json!({"protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": {"name": "august", "version": env!("CARGO_PKG_VERSION")}});
-    server.request("initialize", init, START_TIMEOUT).await?;
+    server.request("initialize", init_params(), START_TIMEOUT).await?;
     server.notify("notifications/initialized").await?;
     let mut found = Vec::new();
     let mut cursor = Value::Null;

@@ -2,9 +2,12 @@
 //! streamable HTTP server and one that can't start. Skipped without python3.
 
 use crate::support::*;
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 
 const SERVER_PY: &str = r#"
@@ -52,29 +55,37 @@ fn have_python() -> bool {
 }
 
 /// A streamable HTTP MCP server: JSON for the handshake, SSE for tool calls, and a
-/// session id it insists on after `initialize`.
+/// session id it insists on after `initialize`. The first session ends before the first
+/// tool call, as when the server restarts.
 async fn http_server() -> String {
-    async fn handle(headers: HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+    type Inits = Arc<AtomicUsize>;
+    async fn handle(State(inits): State<Inits>, headers: HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
         let msg: Value = serde_json::from_slice(&body).unwrap();
         let session = headers.get("mcp-session-id").and_then(|v| v.to_str().ok());
         let Some(id) = msg.get("id").cloned() else { return StatusCode::ACCEPTED.into_response() };
         let reply = |result: Value| json!({"jsonrpc": "2.0", "id": id, "result": result});
-        match msg["method"].as_str().unwrap() {
-            "initialize" => {
-                let r = reply(json!({"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "web"}}));
-                ([("mcp-session-id", "s1")], axum::Json(r)).into_response()
-            }
-            _ if session != Some("s1") => StatusCode::BAD_REQUEST.into_response(),
-            "tools/list" => axum::Json(reply(json!({"tools": [{"name": "time", "inputSchema": {"type": "object"}}]}))).into_response(),
-            _ => {
-                let r = reply(json!({"content": [{"type": "text", "text": "noon over http"}]}));
-                ([("content-type", "text/event-stream")], format!("event: message\ndata: {r}\n\n")).into_response()
-            }
+        let method = msg["method"].as_str().unwrap();
+        if method == "initialize" {
+            let n = inits.fetch_add(1, Ordering::SeqCst) + 1;
+            let r = reply(json!({"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "web"}}));
+            return ([("mcp-session-id", format!("s{n}"))], axum::Json(r)).into_response();
         }
+        let current = format!("s{}", inits.load(Ordering::SeqCst));
+        match session {
+            None => return StatusCode::BAD_REQUEST.into_response(),
+            Some(s) if s != current || (s == "s1" && method == "tools/call") => return StatusCode::NOT_FOUND.into_response(),
+            _ => {}
+        }
+        if method == "tools/list" {
+            return axum::Json(reply(json!({"tools": [{"name": "time", "inputSchema": {"type": "object"}}]}))).into_response();
+        }
+        let r = reply(json!({"content": [{"type": "text", "text": "noon over http"}]}));
+        ([("content-type", "text/event-stream")], format!("event: message\ndata: {r}\n\n")).into_response()
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, axum::Router::new().fallback(handle)).await.unwrap() });
+    let app = axum::Router::new().fallback(handle).with_state(Inits::default());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     url
 }
 
@@ -119,6 +130,7 @@ async fn mcp_server_tools_become_agent_tools() {
     // One message at a time, so each runs as its own turn.
     chat.ask("echo please", "Result: hello world").await;
     chat.ask("break it", "disk on fire").await;
+    // The HTTP server ended its session first: August starts a new one and retries.
     chat.ask("what time", "Result: noon over http").await;
     let status = chat.ask("/mcp", "ghost").await;
 
