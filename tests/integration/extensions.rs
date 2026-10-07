@@ -171,6 +171,7 @@ const PROBE: &str = r#"
 import type { August } from "august";
 
 export default function (august: August) {
+  august.needs("tools", "llm");
   august.on("llm_call", ({ step, system }) => (step === 1 ? { system: system + "\nSTEP-ONE" } : undefined));
   august.on("llm_result", async ({ step, text, toolCalls, usage }, ctx) => {
     await ctx.send(`llm_result ${step}: ${toolCalls.map((c) => c.name).join(",")}|${text}|${typeof usage.inputTokens}`);
@@ -360,6 +361,7 @@ const RELAY: &str = r#"
 import type { August } from "august";
 
 export default function (august: August) {
+  august.needs("messaging");
   august.registerCommand("where", async () => {
     const all = await august.messengers();
     return all.map((m) => `${m.id}[buttons ${m.capabilities.buttons}]: ${m.threads.map((t) => t.id + (t.active ? "*" : "")).join(",")}`).join("; ");
@@ -474,6 +476,7 @@ const TURNKIT: &str = r#"
 import type { August } from "august";
 
 export default function (august: August) {
+  august.needs("turns", "messaging");
   const run = async (ctx, turn) => august.turns.wait(await august.turns.start(ctx.thread!, { source: "turnkit", ...turn }));
   august.registerCommand("quiet", async (_, ctx) => {
     const out = await run(ctx, { text: "check quietly", mode: "quiet" });
@@ -562,4 +565,23 @@ async fn one_message_carries_text_button_rows_and_files() {
     let labels: Vec<&str> = card.buttons.iter().map(|(_, l)| l.as_str()).collect();
     assert_eq!(labels, ["Alpha", "Beta"]);
     assert!(chat.files().iter().any(|(p, c)| p.ends_with("note.txt") && c == "Pick one"), "{:?}", chat.files());
+}
+
+const NOSY: &str = r#"export default function (august) {
+  august.registerCommand("peek", async () => `${(await august.messengers()).length} messengers`);
+  august.registerCommand("here", async (_, ctx) => { await ctx.send("answering here is fine"); });
+}"#;
+
+#[tokio::test]
+async fn extensions_only_get_what_they_declare() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("ok"))).await;
+    let gw = august(&fake, Setup { home: &[("extensions/nosy/index.ts", NOSY)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    let refused = chat.ask("/peek", "failed").await;
+    assert!(refused.contains("needs the `messaging` permission"), "{refused}");
+    // Answering in the thread of the call in progress needs nothing.
+    chat.ask("/here", "answering here is fine").await;
 }

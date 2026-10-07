@@ -11,6 +11,7 @@ const WAIT: Duration = Duration::from_secs(600);
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let august = August::new();
+    august.needs(&["messaging"]);
     august.register_tool(
         "clarify",
         "Ask the user a question with 2-6 short answers to choose from (buttons in the chat) and \

@@ -209,6 +209,7 @@ struct Inner {
     commands: RwLock<Vec<(String, String, CommandFn)>>,
     hooks: RwLock<Vec<(String, HookFn)>>,
     sections: RwLock<Vec<(String, String)>>,
+    needs: RwLock<Vec<String>>,
     /// Set once `ready` was sent; later changes send a new manifest.
     started: AtomicBool,
     dir: PathBuf,
@@ -235,6 +236,7 @@ impl August {
             commands: RwLock::default(),
             hooks: RwLock::default(),
             sections: RwLock::default(),
+            needs: RwLock::default(),
             started: AtomicBool::new(false),
             dir: env("AUGUST_EXTENSION_DIR"),
             workspace: env("AUGUST_WORKSPACE"),
@@ -372,6 +374,13 @@ impl August {
         self.changed();
     }
 
+    /// Declares what this extension uses beyond its own thread: `messaging`, `turns`,
+    /// `tools`, `llm` (see the guide); other such calls are refused.
+    pub fn needs(&self, permissions: &[&str]) {
+        self.0.needs.write().unwrap().extend(permissions.iter().map(|p| p.to_string()));
+        self.changed();
+    }
+
     /// A section of the system prompt (Markdown): how and when the model should use what
     /// this extension offers. Fixed per conversation, so changes apply from the next one.
     pub fn register_prompt_section(&self, name: &str, text: &str) {
@@ -406,6 +415,7 @@ impl August {
             "tools": tools.iter().map(|t| json!({"name": t.name, "description": t.description, "parameters": t.parameters})).collect::<Vec<_>>(),
             "commands": commands.iter().map(|(n, d, _)| json!({"name": n, "description": d})).collect::<Vec<_>>(),
             "events": events,
+            "needs": *self.0.needs.read().unwrap(),
             "sections": self.0.sections.read().unwrap().iter().map(|(n, t)| json!({"name": n, "text": t})).collect::<Vec<_>>(),
         })
     }

@@ -36,6 +36,7 @@ const handlers = new Map<string, Function[]>();
 const tools = new Map<string, any>();
 const commands = new Map<string, any>();
 const sections = new Map<string, string>();
+const needs = new Set<string>();
 let started = false;
 let manifestQueued = false;
 
@@ -49,6 +50,7 @@ function manifest() {
     commands: [...commands.entries()].map(([n, c]) => ({ name: n, description: c.description ?? "" })),
     events: [...handlers.keys()],
     sections: [...sections.entries()].map(([name, text]) => ({ name, text })),
+    needs: [...needs],
   };
 }
 
@@ -131,6 +133,10 @@ const api = {
   },
   unregisterTool(name: string) {
     if (tools.delete(name)) changed();
+  },
+  needs(...permissions: string[]) {
+    permissions.forEach((p) => needs.add(p));
+    changed();
   },
   registerPromptSection(name: string, text: string) {
     if (typeof text !== "string") throw new Error(`registerPromptSection("${name}"): text must be a string`);

@@ -128,6 +128,16 @@ call.
 A tool with the name of a built-in one (`shell`, `read_file`, ...) replaces it, e.g. to run
 shell commands in a container.
 
+## Permissions
+
+An extension declares what it uses beyond the thread of the call in progress, and August
+refuses the rest: `august.needs("messaging", "turns", "tools", "llm")` in its setup —
+`messaging` for messengers and any thread (`august.send`/`listen`/`prompt` elsewhere, or
+later), `turns` for `august.turns` and `ctx.agent`, `tools` for `ctx.callTool`, `llm` for
+`ctx.llm`. Answering in the call's own thread while it runs (`ctx.send`, `ctx.ask`), the store
+and `ctx.approve` need nothing. `/extensions` shows what each one needs. Ask for no more
+than the extension uses.
+
 ## Rules
 
 - Install or update an extension with `save_extension`; it loads it at once and reports

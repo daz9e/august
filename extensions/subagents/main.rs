@@ -28,6 +28,7 @@ type Running = Arc<Mutex<HashMap<String, Vec<AbortHandle>>>>;
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let august = August::new();
+    august.needs(&["turns", "messaging"]);
     let count = Arc::new(AtomicU64::new(0));
     let running: Running = Arc::default();
     let r = running.clone();

@@ -33,6 +33,7 @@ fn describe(all: &Value) -> String {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let august = August::new();
+    august.needs(&["messaging"]);
     let me = august.clone();
     august.register_tool(
         "messengers",

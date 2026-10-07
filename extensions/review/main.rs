@@ -152,6 +152,7 @@ async fn after_turn(august: August, counters: Arc<Mutex<HashMap<String, Counters
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let august = August::new();
+    august.needs(&["turns"]);
     let counters: Arc<Mutex<HashMap<String, Counters>>> = Arc::default();
     let me = august.clone();
     august.on("turn_end", move |data, ctx| {

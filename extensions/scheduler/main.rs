@@ -185,6 +185,7 @@ async fn tick(august: &August) -> Result<()> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let august = August::new();
+    august.needs(&["turns", "messaging", "tools"]);
     august.register_prompt_section("tasks", SECTION);
 
     let me = august.clone();

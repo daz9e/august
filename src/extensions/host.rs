@@ -30,6 +30,28 @@ pub struct Manifest {
     pub events: Vec<String>,
     /// `(name, text)` of sections for the system prompt.
     pub sections: Vec<(String, String)>,
+    /// What it declared it needs (`messaging`, `turns`, `tools`, `llm`).
+    pub needs: Vec<String>,
+}
+
+/// The permission a call into August needs, if any: `messaging` for messengers and any
+/// thread (the thread of a call in progress is free), `turns`, `tools`, `llm`. Storage and
+/// approvals need none.
+fn permission(method: &str) -> Option<&'static str> {
+    match method {
+        "messengers" | "send" | "edit" | "delete" | "react" | "listen" | "next" | "prompt" => Some("messaging"),
+        "turn_start" | "turn_wait" | "turn_cancel" | "turns" => Some("turns"),
+        "callTool" => Some("tools"),
+        "llm" => Some("llm"),
+        _ => None,
+    }
+}
+
+/// Threads of August's calls into the extension that are still running.
+type Busy = Arc<StdMutex<HashMap<Thread, usize>>>;
+
+fn call_thread(params: &Value) -> Option<Thread> {
+    thread(&json!({"thread": params["ctx"]["thread"]})).ok()
 }
 
 pub struct Host {
@@ -37,6 +59,7 @@ pub struct Host {
     waiting: Waiting,
     next_id: AtomicU64,
     manifest: Arc<RwLock<Manifest>>,
+    busy: Busy,
     /// Killed when the host is dropped.
     _child: Child,
 }
@@ -94,10 +117,11 @@ impl Host {
 
         let waiting: Waiting = Arc::default();
         let manifest: Arc<RwLock<Manifest>> = Arc::default();
+        let busy: Busy = Arc::default();
         let (ready_tx, ready_rx) = oneshot::channel::<()>();
         {
             let (stdin, waiting, tail, name) = (stdin.clone(), waiting.clone(), tail.clone(), name.to_string());
-            let manifest = manifest.clone();
+            let (manifest, busy) = (manifest.clone(), busy.clone());
             tokio::spawn(async move {
                 let mut ready_tx = Some(ready_tx);
                 let mut lines = BufReader::new(stdout).lines();
@@ -121,8 +145,13 @@ impl Host {
                         }
                         Some(method) => {
                             let (method, core, stdin, name) = (method.to_string(), core.clone(), stdin.clone(), name.clone());
+                            let allowed = allowed(&manifest, &busy, &method, &msg["params"]);
                             tokio::spawn(async move {
-                                let reply = match serve(core.as_deref(), &name, &method, &msg["params"]).await {
+                                let served = match allowed {
+                                    Ok(()) => serve(core.as_deref(), &name, &method, &msg["params"]).await,
+                                    Err(e) => Err(e),
+                                };
+                                let reply = match served {
                                     Ok(result) => json!({"id": msg["id"], "result": result}),
                                     Err(e) => json!({"id": msg["id"], "error": {"message": format!("{e:#}")}}),
                                 };
@@ -163,7 +192,7 @@ impl Host {
             }
             Err(_) => return Err(format!("did not start within {} s", START_TIMEOUT.as_secs())),
         }
-        Ok(Host { stdin, waiting, next_id: AtomicU64::new(1), manifest, _child: child })
+        Ok(Host { stdin, waiting, next_id: AtomicU64::new(1), manifest, busy, _child: child })
     }
 
     pub fn manifest(&self) -> RwLockReadGuard<'_, Manifest> {
@@ -171,6 +200,25 @@ impl Host {
     }
 
     pub async fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+        // While this call runs, the extension may answer in its thread without `messaging`.
+        let thread = call_thread(&params);
+        if let Some(t) = &thread {
+            *self.busy.lock().unwrap().entry(t.clone()).or_default() += 1;
+        }
+        let result = self.request_inner(method, params, timeout).await;
+        if let Some(t) = thread {
+            let mut busy = self.busy.lock().unwrap();
+            if let Some(n) = busy.get_mut(&t) {
+                *n -= 1;
+                if *n == 0 {
+                    busy.remove(&t);
+                }
+            }
+        }
+        result
+    }
+
+    async fn request_inner(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.waiting.lock().unwrap().insert(id, tx);
@@ -215,6 +263,19 @@ fn message(params: &Value) -> anyhow::Result<OutMessage> {
     let files = m["files"].as_array().into_iter().flatten().filter_map(Value::as_str).map(std::path::PathBuf::from).collect();
     let reply_to = m["reply_to"].as_str().map(String::from);
     Ok(OutMessage { text: text.into(), buttons, files, reply_to })
+}
+
+/// Whether the extension may make this call, given what it declared it needs.
+fn allowed(manifest: &RwLock<Manifest>, busy: &Busy, method: &str, params: &Value) -> anyhow::Result<()> {
+    let Some(need) = permission(method) else { return Ok(()) };
+    if manifest.read().unwrap().needs.iter().any(|n| n == need) {
+        return Ok(());
+    }
+    let own_thread = need == "messaging" && thread(params).is_ok_and(|t| busy.lock().unwrap().contains_key(&t));
+    if own_thread {
+        return Ok(());
+    }
+    anyhow::bail!("`{method}` needs the `{need}` permission: declare it with august.needs(\"{need}\")")
 }
 
 /// A call from extension `name` into August.
@@ -285,6 +346,7 @@ fn parse_manifest(params: &Value) -> Manifest {
             .filter_map(|c| Some((c["name"].as_str()?.to_string(), c["description"].as_str().unwrap_or_default().to_string())))
             .collect(),
         events: list("events").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
+        needs: list("needs").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
         sections: list("sections")
             .iter()
             .filter_map(|c| Some((c["name"].as_str()?.to_string(), c["text"].as_str().unwrap_or_default().to_string())))

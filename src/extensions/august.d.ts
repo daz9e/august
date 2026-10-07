@@ -192,6 +192,11 @@ declare module "august" {
     /** May be called any time; tools added or removed after setup show up from the next model call. */
     registerTool<P = any>(tool: Tool<P>): void;
     unregisterTool(name: string): void;
+    /** Declares what this extension uses beyond its own thread (shown in /extensions):
+     *  `messaging` (messengers, sending to or listening in any thread, prompt), `turns`
+     *  (starting turns, sub-agents), `tools` (callTool), `llm`. Without it, those calls fail;
+     *  answering in the thread of the call in progress, the store and approvals need nothing. */
+    needs(...permissions: ("messaging" | "turns" | "tools" | "llm")[]): void;
     /** A section of the system prompt (Markdown, e.g. "## Reminders\n..."): how and when the
      *  model should use what this extension offers. Fixed for each conversation, so a change
      *  shows up from the next one (`/new`). Registering a name again replaces it. */

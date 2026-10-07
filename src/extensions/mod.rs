@@ -510,6 +510,9 @@ impl Extensions {
                 if !m.events.is_empty() {
                     parts.push(format!("hooks: {}", list(m.events.clone())));
                 }
+                if !m.needs.is_empty() {
+                    parts.push(format!("needs: {}", list(m.needs.clone())));
+                }
                 if !m.sections.is_empty() {
                     parts.push(format!("prompt: {}", list(m.sections.iter().map(|(n, _)| n.clone()).collect())));
                 }
