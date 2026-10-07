@@ -75,6 +75,11 @@ impl CommandSpec {
     }
 }
 
+/// What the system prompt says about how replies are shown, for chat apps.
+pub const CHAT_SURFACE: &str = "The user reads your replies in a chat app that renders Markdown \
+    (bold, italic, `code`, fenced code blocks, lists, links). Avoid tables and headings \
+    unless they really help.";
+
 pub struct Limits {
     /// Max Markdown characters per message the gateway should send.
     pub max_len: usize,
@@ -103,6 +108,12 @@ pub trait Channel: Send + Sync {
     async fn download(&self, file: &Attachment) -> Result<Vec<u8>>;
     /// Sends a local file; images are shown inline where the messenger can.
     async fn send_file(&self, chat: &str, path: &std::path::Path, caption: &str) -> Result<()>;
+    /// How replies are shown, for the system prompt.
+    fn surface(&self) -> &'static str {
+        CHAT_SURFACE
+    }
+    /// The gateway has nothing more to say in `chat` for now (a turn or command is done).
+    async fn idle(&self, _chat: &str) {}
 }
 
 #[async_trait]

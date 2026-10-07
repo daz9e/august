@@ -30,10 +30,8 @@ pub enum Event<'a> {
     /// A new model call starts after tool results (text from before it is complete).
     Step,
     ToolCall { name: &'a str, input: &'a Value },
-    ToolResult { output: &'a str, is_error: bool },
-    Usage(&'a Usage),
     /// Older history was summarised to free up context.
-    Compacted { before: usize, after: usize },
+    Compacted,
 }
 
 pub struct Agent {
@@ -171,7 +169,6 @@ impl Agent {
         };
         self.last_input_tokens = completion.usage.context_tokens() as usize;
         self.record_usage(&completion.usage);
-        on_event(Event::Usage(&completion.usage));
         let u = &completion.usage;
         let calls: Vec<Value> =
             completion.message.tool_uses().map(|(_, name, input)| json!({"name": name, "input": input})).collect();
@@ -305,9 +302,8 @@ impl Agent {
                     }
                 }
             }
-            let before = self.estimate_tokens();
             match self.compact(false).await {
-                Ok(Some((_, after))) => on_event(Event::Compacted { before, after }),
+                Ok(Some(_)) => on_event(Event::Compacted),
                 Ok(None) => {}
                 Err(e) => eprintln!("context compaction failed: {e:#}"),
             }
@@ -334,10 +330,6 @@ impl Agent {
                 futures_util::future::join_all(calls.iter().map(|(_, name, input)| self.tools.call(name, input, ctx))).await;
             let mut results = Vec::new();
             for ((id, _, _), (output, is_error)) in calls.iter().zip(outputs) {
-                on_event(Event::ToolResult {
-                    output: &output,
-                    is_error,
-                });
                 results.push(Block::ToolResult {
                     tool_use_id: id.to_string(),
                     content: output,

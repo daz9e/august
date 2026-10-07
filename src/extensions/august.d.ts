@@ -2,7 +2,7 @@
 // (type-only imports are erased when bun runs the file).
 
 declare module "august" {
-  /** A conversation: `{ channel: "telegram", chat: "123" }`, or `cli` in the terminal. */
+  /** A conversation: `{ channel: "telegram", chat: "123" }`, or `{ channel: "cli", chat: "local" }` in the terminal. */
   export type Chat = { channel: string; chat: string };
 
   export interface Context {
@@ -15,7 +15,7 @@ declare module "august" {
     /** Runs a sub-agent in this chat: a fresh conversation (it sees nothing of the chat),
      *  the chat's approvals, nobody to answer questions. Resolves to its final reply.
      *  `system` is added to the base system prompt; `tools` limits it to those tools,
-     *  `exclude` hides some. Not available in the terminal. */
+     *  `exclude` hides some. */
     agent(task: string, opts?: { system?: string; tools?: string[]; exclude?: string[] }): Promise<string>;
     /** Asks the user to pick one of `options` (buttons in a chat, a numbered list in the
      *  terminal); resolves to the chosen option, or null if they didn't answer in 5 minutes. */

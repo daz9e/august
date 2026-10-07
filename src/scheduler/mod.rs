@@ -18,9 +18,10 @@ pub trait TaskRunner: Send + Sync + 'static {
     async fn run_task(&self, task: Task) -> anyhow::Result<()>;
 }
 
-pub async fn run(db: Arc<Db>, runner: Arc<dyn TaskRunner>) {
+/// Fires the due tasks of `channels` (another August process serves the other channels).
+pub async fn run(db: Arc<Db>, runner: Arc<dyn TaskRunner>, channels: Vec<String>) {
     loop {
-        if let Err(e) = tick(&db, &runner).await {
+        if let Err(e) = tick(&db, &runner, &channels).await {
             eprintln!("scheduler: {e:#}");
         }
         let tick = std::env::var("AUGUST_SCHEDULER_TICK").ok().and_then(|v| v.parse().ok()).map(Duration::from_secs);
@@ -28,9 +29,9 @@ pub async fn run(db: Arc<Db>, runner: Arc<dyn TaskRunner>) {
     }
 }
 
-async fn tick(db: &Db, runner: &Arc<dyn TaskRunner>) -> anyhow::Result<()> {
+async fn tick(db: &Db, runner: &Arc<dyn TaskRunner>, channels: &[String]) -> anyhow::Result<()> {
     let now = db::now();
-    for task in db.due_tasks(now)? {
+    for task in db.due_tasks(now)?.into_iter().filter(|t| channels.contains(&t.channel)) {
         // Move the schedule forward first, so a slow or failing run can't fire twice.
         db.finish_run(task.id, next_run(&task, now))?;
         let runner = runner.clone();

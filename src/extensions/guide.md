@@ -67,7 +67,7 @@ leave it unchanged.
 `turn_end`, `llm_result`, `session_start` and `compaction` only observe: they run in the
 background and their result is ignored.
 
-`ctx.chat` is `{ channel, chat }` (`cli` in the terminal); `ctx.send(text)` messages that
+`ctx.chat` is `{ channel, chat }` (`{ channel: "cli", chat: "local" }` in the terminal); `ctx.send(text)` messages that
 chat, `ctx.prompt(text)` hands it a message as if the user sent it (joins a running turn,
 or starts one). `august.send(channel, chat, text)`
 and `august.prompt(...)` do the same for any chat.

@@ -25,10 +25,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
 use tokio::sync::{Mutex, Notify};
 
-const SURFACE: &str = "The user reads your replies in a chat app that renders Markdown \
-    (bold, italic, `code`, fenced code blocks, lists, links). Avoid tables and headings \
-    unless they really help.";
-
 struct Chat {
     agent: Mutex<Agent>,
     /// Messages sent while a turn runs.
@@ -174,7 +170,8 @@ impl Gateway {
         drop(bus);
 
         let me = self.clone();
-        let scheduler = tokio::spawn(crate::scheduler::run(self.db.clone(), Arc::new(self.clone())));
+        let channels = self.channels.keys().cloned().collect();
+        let scheduler = tokio::spawn(crate::scheduler::run(self.db.clone(), Arc::new(self.clone()), channels));
         let dispatcher = tokio::spawn(async move {
             while let Some(ev) = events.recv().await {
                 let me = me.clone();
@@ -210,7 +207,7 @@ impl Gateway {
         let agent = Agent::new(
             self.provider.read().unwrap().clone(),
             self.tools(),
-            agent::system_prompt(&self.workspace, SURFACE),
+            agent::system_prompt(&self.workspace, self.channels.get(&id.channel).map_or(crate::channels::CHAT_SURFACE, |c| c.surface())),
             self.db.clone(),
             &format!("{}:{}", id.channel, id.chat),
         )?;
@@ -273,7 +270,6 @@ impl Gateway {
             return Ok(());
         };
         let chat = ev.chat.chat.clone();
-        eprintln!("{} · {} ({}): {:?}", ev.chat.channel, ev.user.name, ev.user.id, ev.kind);
         match ev.kind {
             InboundKind::Action { id, data } => {
                 channel.ack_action(&id).await.ok();
@@ -299,6 +295,7 @@ impl Gateway {
                         if let Some(reply) = data["reply"].as_str().filter(|r| !r.is_empty()) {
                             channel.send(&chat, reply, &[]).await?;
                         }
+                        channel.idle(&chat).await;
                         return Ok(());
                     }
                     if let Some(t) = data["text"].as_str() {
@@ -324,7 +321,11 @@ impl Gateway {
 
 /// Runs the agent behind every configured messenger (foreground).
 pub async fn serve() -> Result<()> {
-    let chans = crate::channels::build_configured()?;
+    start(crate::channels::build_configured()?).await
+}
+
+/// Runs the agent behind `chans` until they all stop.
+pub async fn start(chans: Vec<Arc<dyn Channel>>) -> Result<()> {
     let workspace = crate::config::workspace()?;
     let selection = providers::selection()?;
     let label = format!("{} · {}", selection.provider.id, selection.model.clone().unwrap_or_default());

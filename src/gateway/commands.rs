@@ -129,13 +129,17 @@ impl Gateway {
                 let origin = Some((id.channel.clone(), id.chat.clone()));
                 match self.ext.run_command(other, args, &origin).await {
                     Some(Ok(Some(reply))) => reply,
-                    Some(Ok(None)) => return Ok(()),
+                    Some(Ok(None)) => {
+                        channel.idle(chat).await;
+                        return Ok(());
+                    }
                     Some(Err(e)) => format!("⚠️ /{other} failed: {e}"),
                     None => format!("Unknown command /{other}. Try /help."),
                 }
             }
         };
         channel.send(chat, &reply, &[]).await?;
+        channel.idle(chat).await;
         Ok(())
     }
 

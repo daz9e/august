@@ -1,0 +1,60 @@
+//! The terminal is a channel of the same gateway as the messengers: commands, approvals,
+//! sub-agents and their reports work there too.
+
+use crate::support::*;
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::time::Duration;
+
+const TIMEOUT: Duration = Duration::from_secs(30);
+
+fn msgs(req: &Value) -> &Vec<Value> {
+    req["messages"].as_array().unwrap()
+}
+
+fn last_text(req: &Value) -> String {
+    let m = msgs(req).last().unwrap();
+    m["content"].as_str().map(String::from).unwrap_or_else(|| m["content"].to_string())
+}
+
+#[tokio::test]
+async fn terminal_chat_runs_approved_tools_commands_and_subagents() {
+    let llm: Llm = Box::new(|req| {
+        let text = last_text(req);
+        let sub_agent = msgs(req)[0]["content"].as_str().is_some_and(|s| s.contains("You are a sub-agent"));
+        if sub_agent {
+            reply_text("Report: counted 3 files.")
+        } else if text.contains("Subtask #1 finished") {
+            reply_text("The sub-agent counted 3 files.")
+        } else if msgs(req).last().unwrap()["role"] == "tool" {
+            reply_text(&format!("Done: {}", text.lines().next().unwrap_or("")))
+        } else if text.contains("make a file") {
+            reply_tool("shell", json!({"command": "touch made.txt"}))
+        } else {
+            reply_tool("delegate_task", json!({"goal": "count the files"}))
+        }
+    });
+    let fake = Fake::start(vec![], HashMap::new(), Some(llm)).await;
+    let mut term = spawn_terminal(&fake);
+    term.wait_for(TIMEOUT, "> ").await;
+
+    // A risky shell command asks first; `y` answers the approval.
+    term.send("make a file");
+    term.wait_for(TIMEOUT, "Approval needed").await;
+    term.send("y");
+    term.wait_for(TIMEOUT, "Done:").await;
+    assert!(term.workspace.join("made.txt").exists(), "{}", term.output());
+    assert!(term.output().contains("✅ Allowed"), "{}", term.output());
+
+    // Built-in commands go through the gateway.
+    term.send("/status");
+    term.wait_for(TIMEOUT, "Model: `openai · fake-model`").await;
+
+    // A sub-agent runs in the background and its report starts a new turn.
+    term.send("count them in the background");
+    term.wait_for(TIMEOUT, "Started subtask #1").await;
+    term.wait_for(TIMEOUT, "The sub-agent counted 3 files.").await;
+
+    term.send("/exit");
+    assert!(term.exited(TIMEOUT).await, "{}", term.output());
+}

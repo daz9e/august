@@ -271,7 +271,10 @@ impl Channel for TelegramChannel {
                 offset = offset.max(u["update_id"].as_i64().unwrap_or(0) + 1);
                 match parse_update(&u, &bot, &self.allowed) {
                     Parsed::Ignore => {}
-                    Parsed::Event(e) => bus.publish(e),
+                    Parsed::Event(e) => {
+                        eprintln!("telegram · {} ({}): {:?}", e.user.name, e.user.id, e.kind);
+                        bus.publish(e)
+                    }
                     Parsed::Deny(chat, user) => {
                         eprintln!("telegram: rejected user {user}");
                         let text = format!(

@@ -65,6 +65,7 @@ impl Gateway {
                 (text, images) = (left.join("\n"), Vec::new());
                 continue;
             }
+            channel.idle(chat).await;
             return r.map(|_| ());
         }
     }
@@ -127,8 +128,7 @@ impl Gateway {
                 }
                 Event::Step => Ui::Step,
                 Event::ToolCall { name, input } => Ui::Tool(tool_line(name, input)),
-                Event::Compacted { .. } => Ui::Tool("🗜 Older messages summarised to free up context".into()),
-                _ => return,
+                Event::Compacted => Ui::Tool("🗜 Older messages summarised to free up context".into()),
             };
             tx2.send(ui).ok();
         };

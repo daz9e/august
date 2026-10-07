@@ -308,3 +308,90 @@ pub fn inbox(gw: &Gateway) -> Vec<PathBuf> {
     v.sort();
     v
 }
+
+/// `august` in the terminal (no arguments) against the fake LLM, killed on drop. Lines go
+/// in with `send`; everything it prints is collected.
+pub struct Terminal {
+    child: Child,
+    stdin: std::process::ChildStdin,
+    out: Arc<Mutex<String>>,
+    pub workspace: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        self.child.kill().ok();
+        self.child.wait().ok();
+    }
+}
+
+pub fn spawn_terminal(fake: &Fake) -> Terminal {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_august"))
+        .env_clear()
+        .current_dir(dir.path()) // no project .env
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", dir.path())
+        .env("AUGUST_HOME", dir.path().join("home"))
+        .env("AUGUST_WORKSPACE", &workspace)
+        .env("AUGUST_PROVIDER", "openai")
+        .env("AUGUST_MODEL", "fake-model")
+        .env("OPENAI_API_KEY", "test")
+        .env("OPENAI_BASE_URL", format!("{}/v1", fake.url))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(if std::env::var_os("TEST_GATEWAY_LOG").is_some() { Stdio::inherit() } else { Stdio::null() })
+        .spawn()
+        .expect("start august");
+    let out: Arc<Mutex<String>> = Arc::default();
+    let mut stdout = child.stdout.take().unwrap();
+    let sink = out.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = std::io::Read::read(&mut stdout, &mut buf) {
+            if n == 0 {
+                break;
+            }
+            sink.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+    });
+    let stdin = child.stdin.take().unwrap();
+    Terminal { child, stdin, out, workspace, _dir: dir }
+}
+
+impl Terminal {
+    pub fn send(&mut self, line: &str) {
+        use std::io::Write;
+        writeln!(self.stdin, "{line}").unwrap();
+    }
+
+    pub fn output(&self) -> String {
+        self.out.lock().unwrap().clone()
+    }
+
+    /// Waits until the output contains `needle`; panics with the output on timeout.
+    pub async fn wait_for(&self, timeout: Duration, needle: &str) {
+        let start = Instant::now();
+        while !self.output().contains(needle) {
+            if start.elapsed() > timeout {
+                panic!("timed out waiting for {needle:?}; output so far:\n{}", self.output());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Waits for the process to end (after `/exit`).
+    pub async fn exited(&mut self, timeout: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if self.child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+}
