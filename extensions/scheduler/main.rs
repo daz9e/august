@@ -113,17 +113,15 @@ async fn schedule_task(august: &August, input: Value, ctx: Ctx) -> Result<String
 
 /// Runs a task's script in the workspace; its output (or why there is none) for the prompt.
 async fn run_script(august: &August, script: &str) -> String {
-    let run = tokio::process::Command::new("sh").arg("-c").arg(script).current_dir(august.workspace()).kill_on_drop(true).output();
-    match tokio::time::timeout(SCRIPT_TIMEOUT, run).await {
-        Ok(Ok(out)) => {
+    match august_ext::sh(script, august.workspace(), SCRIPT_TIMEOUT).await {
+        Ok(out) => {
             let mut s = String::from_utf8_lossy(&out.stdout).to_string();
             if !out.status.success() {
                 s += &format!("\n[exit status {}] {}", out.status, String::from_utf8_lossy(&out.stderr));
             }
             truncate(s, 20_000)
         }
-        Ok(Err(e)) => format!("[could not run the script: {e}]"),
-        Err(_) => format!("[the script timed out after {} s]", SCRIPT_TIMEOUT.as_secs()),
+        Err(e) => format!("[the script did not finish: {e:#}]"),
     }
 }
 

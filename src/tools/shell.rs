@@ -48,15 +48,7 @@ impl Tool for Shell {
         if !is_safe(cmd) && !ctx.approver.approve(&format!("shell: {cmd}")).await {
             anyhow::bail!("the user denied running this command");
         }
-        let child = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(&ctx.workspace)
-            .kill_on_drop(true)
-            .output();
-        let out = tokio::time::timeout(TIMEOUT, child)
-            .await
-            .map_err(|_| anyhow::anyhow!("timed out after {}s", TIMEOUT.as_secs()))??;
+        let out = august_ext::sh(cmd, &ctx.workspace, TIMEOUT).await?;
         let text = format!(
             "exit code: {}\nstdout:\n{}\nstderr:\n{}",
             out.status.code().map_or("killed".into(), |c| c.to_string()),

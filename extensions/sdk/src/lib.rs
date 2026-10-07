@@ -540,3 +540,35 @@ pub fn truncate(s: String, max: usize) -> String {
 pub fn str_arg<'a>(input: &'a Value, key: &str) -> &'a str {
     input[key].as_str().unwrap_or_default()
 }
+
+/// Runs `sh -c cmd` in `dir` in a process group of its own, and kills the whole group if
+/// it outlives `timeout` or the call is dropped (cancelled), so nothing it started
+/// (`sleep`, a server, a pipeline) keeps running behind it. Commands that finish leave what
+/// they deliberately put in the background alone.
+pub async fn sh(cmd: &str, dir: &std::path::Path, timeout: std::time::Duration) -> Result<std::process::Output> {
+    struct Group(Option<i32>);
+    impl Drop for Group {
+        fn drop(&mut self) {
+            if let Some(pid) = self.0 {
+                // SAFETY: plain syscall; the group may already be gone.
+                unsafe { libc::killpg(pid, libc::SIGKILL) };
+            }
+        }
+    }
+    let child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(dir)
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut group = Group(child.id().map(|p| p as i32));
+    let out = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .map_err(|_| anyhow!("timed out after {}s", timeout.as_secs()))??;
+    group.0 = None;
+    Ok(out)
+}
