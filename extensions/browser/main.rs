@@ -83,7 +83,11 @@ async fn run(august: &August, mut args: Vec<String>, ctx: Ctx) -> Result<String>
         bail!("the user denied the upload");
     }
 
-    let chat = ctx.thread.as_ref().map(|t| format!("{}-{}", t.messenger, t.id)).unwrap_or_else(|| "none".into());
+    let mut chat = ctx.thread.as_ref().map(|t| format!("{}-{}", t.messenger, t.id)).unwrap_or_else(|| "none".into());
+    // A sub-agent gets a browser of its own, so it doesn't drive the thread's tabs.
+    if let Some(turn) = ctx.turn.as_ref().filter(|t| t.mode == "fresh") {
+        chat += &format!("-agent{}", turn.id);
+    }
     let session = format!("august-{}", chat.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>());
     let bin = std::env::var("AUGUST_BROWSER_BIN").ok().filter(|b| !b.is_empty()).unwrap_or_else(|| "agent-browser".into());
     let child = tokio::process::Command::new(&bin)

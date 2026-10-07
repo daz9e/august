@@ -48,3 +48,24 @@ async fn the_user_can_answer_in_their_own_words() {
     chat.wait_for("Noted: The user answered in their own words: green, actually").await;
     assert_eq!(fake.llm_requests().len(), 2);
 }
+
+#[tokio::test]
+async fn a_background_turn_cannot_ask() {
+    let llm: Llm = Box::new(|req| {
+        let msgs = req["messages"].as_array().unwrap();
+        let last = msgs.last().unwrap().clone();
+        let task = msgs.iter().any(|m| m["content"].to_string().contains("Scheduled task"));
+        match (task, last["role"] == "tool") {
+            (true, true) => reply_text(&format!("task got: {}", last["content"].as_str().unwrap())),
+            (true, false) => reply_tool("clarify", json!({"question": "Which?", "options": ["A", "B"]})),
+            (false, true) => reply_text("scheduled"),
+            (false, false) => reply_tool("schedule_task", json!({"schedule": "in 1s", "prompt": "decide something"})),
+        }
+    });
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { env: &[("AUGUST_SCHEDULER_TICK", "1")], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("later, decide something", "scheduled").await;
+    chat.wait_for("task got: error: nobody can answer here").await;
+    assert!(chat.messages().iter().all(|m| m.buttons.is_empty()), "a question was asked");
+}

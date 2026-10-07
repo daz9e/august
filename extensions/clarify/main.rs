@@ -27,6 +27,10 @@ async fn main() {
             "additionalProperties": false,
         }),
         |input, ctx| async move {
+            // A sub-agent or a scheduled task has nobody to ask.
+            if ctx.turn.as_ref().is_some_and(|t| t.mode != "visible") {
+                bail!("nobody can answer here (a background task); decide yourself and say what you assumed");
+            }
             let question = str_arg(&input, "question").trim();
             let options: Vec<String> = input["options"]
                 .as_array()
