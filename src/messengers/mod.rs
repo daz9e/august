@@ -213,18 +213,15 @@ pub fn parse_command(text: &str, bot_name: Option<&str>) -> Option<(String, Stri
     Some((name.to_ascii_lowercase(), args.trim().to_string()))
 }
 
-/// Builds every configured messenger; errors if none is set up.
+/// The terminal plus every configured messenger.
 pub fn build_configured() -> Result<Vec<Arc<dyn Messenger>>> {
-    let mut chans = Vec::new();
+    let mut all: Vec<Arc<dyn Messenger>> = vec![Arc::new(terminal::Terminal::default())];
     for def in registry() {
-        if let Some(ch) = def.build()? {
-            chans.push(ch);
+        if let Some(m) = def.build()? {
+            all.push(m);
         }
     }
-    if chans.is_empty() {
-        anyhow::bail!("no messenger configured: run `august connect`");
-    }
-    Ok(chans)
+    Ok(all)
 }
 
 #[cfg(test)]

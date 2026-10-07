@@ -14,6 +14,11 @@ fn label() -> String {
 }
 const UNIT: &str = "august.service";
 
+/// Whether `august serve` installed the background service.
+pub fn installed() -> bool {
+    if cfg!(target_os = "macos") { plist_path().exists() } else { unit_path().exists() }
+}
+
 pub fn log_path() -> PathBuf {
     config::home().join("logs").join("august.log")
 }

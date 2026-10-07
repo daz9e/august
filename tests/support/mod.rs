@@ -309,14 +309,17 @@ pub fn inbox(gw: &Gateway) -> Vec<PathBuf> {
     v
 }
 
-/// `august` in the terminal (no arguments) against the fake LLM, killed on drop. Lines go
-/// in with `send`; everything it prints is collected.
+/// A terminal (`august` without arguments) connected to a gateway running against the
+/// fake LLM; lines go in with `send`, everything it prints is collected. Both processes
+/// are killed on drop.
 pub struct Terminal {
     child: Child,
     stdin: std::process::ChildStdin,
     out: Arc<Mutex<String>>,
     pub workspace: PathBuf,
-    _dir: tempfile::TempDir,
+    home: PathBuf,
+    /// The gateway this terminal started (`None` for another window on it).
+    gateway: Option<Gateway>,
 }
 
 impl Drop for Terminal {
@@ -326,26 +329,33 @@ impl Drop for Terminal {
     }
 }
 
-pub fn spawn_terminal(fake: &Fake) -> Terminal {
-    let dir = tempfile::tempdir().unwrap();
-    let workspace = dir.path().join("workspace");
-    std::fs::create_dir_all(&workspace).unwrap();
+pub async fn spawn_terminal(fake: &Fake) -> Terminal {
+    let gateway = spawn_gateway(fake, LlmSetup::Fake, &[]);
+    // Connect only once August listens, so the terminal doesn't start one of its own.
+    let socket = gateway.home.join("august.sock");
+    let start = Instant::now();
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+        assert!(start.elapsed() < Duration::from_secs(20), "August did not listen on {}", socket.display());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (workspace, home) = (gateway.workspace.clone(), gateway.home.clone());
+    let mut term = open_terminal(workspace, home);
+    term.gateway = Some(gateway);
+    term
+}
+
+fn open_terminal(workspace: PathBuf, home: PathBuf) -> Terminal {
     let mut child = Command::new(env!("CARGO_BIN_EXE_august"))
         .env_clear()
-        .current_dir(dir.path()) // no project .env
+        .current_dir(&workspace)
         .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", dir.path())
-        .env("AUGUST_HOME", dir.path().join("home"))
-        .env("AUGUST_WORKSPACE", &workspace)
-        .env("AUGUST_PROVIDER", "openai")
-        .env("AUGUST_MODEL", "fake-model")
-        .env("OPENAI_API_KEY", "test")
-        .env("OPENAI_BASE_URL", format!("{}/v1", fake.url))
+        .env("HOME", home.parent().unwrap())
+        .env("AUGUST_HOME", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(if std::env::var_os("TEST_GATEWAY_LOG").is_some() { Stdio::inherit() } else { Stdio::null() })
+        .stderr(Stdio::null())
         .spawn()
-        .expect("start august");
+        .expect("start the terminal");
     let out: Arc<Mutex<String>> = Arc::default();
     let mut stdout = child.stdout.take().unwrap();
     let sink = out.clone();
@@ -359,10 +369,15 @@ pub fn spawn_terminal(fake: &Fake) -> Terminal {
         }
     });
     let stdin = child.stdin.take().unwrap();
-    Terminal { child, stdin, out, workspace, _dir: dir }
+    Terminal { child, stdin, out, workspace, home, gateway: None }
 }
 
 impl Terminal {
+    /// Another terminal window on the same August.
+    pub fn another(&self) -> Terminal {
+        open_terminal(self.workspace.clone(), self.home.clone())
+    }
+
     pub fn send(&mut self, line: &str) {
         use std::io::Write;
         writeln!(self.stdin, "{line}").unwrap();

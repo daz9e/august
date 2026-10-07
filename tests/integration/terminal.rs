@@ -38,7 +38,7 @@ async fn terminal_chat_runs_approved_tools_commands_and_subagents() {
         }
     });
     let fake = Fake::start(vec![], HashMap::new(), Some(llm)).await;
-    let mut term = spawn_terminal(&fake);
+    let mut term = spawn_terminal(&fake).await;
     term.wait_for(TIMEOUT, "> ").await;
 
     // A risky shell command asks first; `y` answers the approval.
@@ -67,4 +67,26 @@ async fn terminal_chat_runs_approved_tools_commands_and_subagents() {
 
     term.send("/exit");
     assert!(term.exited(TIMEOUT).await, "{}", term.output());
+}
+
+#[tokio::test]
+async fn each_terminal_window_is_its_own_thread() {
+    let llm: Llm = Box::new(|req| {
+        let all = req["messages"].to_string();
+        reply_text(if all.contains("I am Ann") && last_text(req).contains("who am I") { "You are Ann." } else { "Noted." })
+    });
+    let fake = Fake::start(vec![], HashMap::new(), Some(llm)).await;
+    let mut first = spawn_terminal(&fake).await;
+    first.wait_for(TIMEOUT, "terminal 1").await;
+    let mut second = first.another();
+    second.wait_for(TIMEOUT, "terminal 2").await;
+
+    first.send("I am Ann");
+    first.wait_for(TIMEOUT, "Noted.").await;
+    // The second window doesn't share the first one's conversation.
+    second.send("who am I?");
+    second.wait_for(TIMEOUT, "Noted.").await;
+    first.send("who am I?");
+    first.wait_for(TIMEOUT, "You are Ann.").await;
+    assert!(!second.output().contains("Ann"), "{}", second.output());
 }

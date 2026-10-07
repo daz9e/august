@@ -9,7 +9,7 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
     let Some(cmd) = std::env::args().nth(1) else {
-        return messengers::terminal::run().await;
+        return messengers::terminal::client::run().await;
     };
     match cmd.as_str() {
         // Foreground gateway; this is what the background service runs.
