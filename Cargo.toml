@@ -47,6 +47,10 @@ name = "august-ext-mcp"
 path = "extensions/mcp/main.rs"
 
 [[bin]]
+name = "august-ext-messaging"
+path = "extensions/messaging/main.rs"
+
+[[bin]]
 name = "august-ext-review"
 path = "extensions/review/main.rs"
 

@@ -8,6 +8,7 @@ mod claude_cli;
 mod media;
 mod extensions;
 mod memory;
+mod messaging;
 mod compaction;
 mod skills;
 mod review;

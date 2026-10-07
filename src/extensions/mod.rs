@@ -23,7 +23,7 @@ const HOST_TS: &str = include_str!("host.ts");
 const TYPES: &str = include_str!("august.d.ts");
 const GUIDE: &str = include_str!("guide.md");
 /// The extensions that ship with August, as binaries `august-ext-<name>` next to `august`.
-const DEFAULTS: &[&str] = &["browser", "clarify", "goal", "mcp", "review", "scheduler", "subagents", "voice", "web"];
+const DEFAULTS: &[&str] = &["browser", "clarify", "goal", "mcp", "messaging", "review", "scheduler", "subagents", "voice", "web"];
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message_in` may do real work on attachments (e.g. transcribe a voice note).

@@ -18,7 +18,7 @@ const SURFACE: &str = "You are a sub-agent doing one task for the main agent, wh
 /// What a sub-agent may not do: talk to the user, change memory or skills, schedule or
 /// delegate more work.
 const EXCLUDE: &[&str] = &[
-    "clarify", "delegate_task", "schedule_task", "list_tasks", "cancel_task", "remember", "forget", "send_file",
+    "clarify", "send_message", "delegate_task", "schedule_task", "list_tasks", "cancel_task", "remember", "forget", "send_file",
     "save_skill", "edit_skill", "save_extension",
 ];
 
