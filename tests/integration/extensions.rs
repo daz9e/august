@@ -469,3 +469,71 @@ async fn extensions_keep_state_in_the_store_across_reloads() {
     chat.ask("/reload", "Extensions reloaded").await;
     chat.ask("/count", "count 2, seen 2").await;
 }
+
+const TURNKIT: &str = r#"
+import type { August } from "august";
+
+export default function (august: August) {
+  const run = async (ctx, turn) => august.turns.wait(await august.turns.start(ctx.thread!, { source: "turnkit", ...turn }));
+  august.registerCommand("quiet", async (_, ctx) => {
+    const out = await run(ctx, { text: "check quietly", mode: "quiet" });
+    return `quiet ${out.status}: ${out.reply}`;
+  });
+  august.registerCommand("fork", async (_, ctx) => {
+    const out = await run(ctx, { text: "look back", mode: "fork", tools: ["read_file"] });
+    return `fork ${out.status}: ${out.reply} | ${out.toolCalls.map((c) => `${c.name}:${c.isError}`).join(",")}`;
+  });
+  august.registerCommand("spawn", async (_, ctx) => {
+    const id = await august.turns.start(ctx.thread!, { text: "a long job", mode: "fresh" });
+    setTimeout(async () => ctx.send(`spawned ${(await august.turns.wait(id)).status}`), 0);
+    return `running: ${(await august.turns.list(ctx.thread!)).map((t) => t.mode).join(",")}`;
+  });
+  august.on("turn_end", async ({ status }, ctx) => {
+    if (ctx.turn?.source === "turnkit") await ctx.send(`ended ${ctx.turn.mode} ${status}`);
+  });
+}
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn extensions_run_quiet_fork_and_fresh_turns() {
+    if !have_bun() {
+        return;
+    }
+    let llm: Llm = Box::new(|req| {
+        let all = req["messages"].to_string();
+        let last = messages(req).last().unwrap();
+        if all.contains("a long job") {
+            std::thread::sleep(Duration::from_secs(3));
+            return reply_text("job done");
+        }
+        if last["role"] == "tool" {
+            return reply_text("FORK-REPLY");
+        }
+        match last_user_text(req) {
+            t if t.contains("look back") => reply_tool("write_file", json!({"path": "x.txt", "content": "no"})),
+            t if t.contains("check quietly") => reply_text("QUIET-REPLY"),
+            _ => reply_text(&format!("saw quiet: {}", all.contains("QUIET-REPLY"))),
+        }
+    });
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { home: &[("extensions/turnkit/index.ts", TURNKIT)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+
+    // A quiet turn shows nothing but stays in the conversation.
+    chat.ask("/quiet", "quiet ok: QUIET-REPLY").await;
+    chat.wait_for("ended quiet ok").await;
+    assert_eq!(chat.texts().iter().filter(|t| t.contains("QUIET-REPLY")).count(), 1, "{:?}", chat.texts());
+    chat.ask("hello", "saw quiet: true").await;
+
+    // A fork may only call what it's allowed, and leaves the conversation as it was.
+    chat.ask("/fork", "fork ok: FORK-REPLY | write_file:true").await;
+    assert!(!gw.workspace.join("x.txt").exists());
+    chat.ask("hello again", "saw quiet: true").await;
+    let last = fake.llm_requests().last().unwrap().to_string();
+    assert!(!last.contains("look back") && !last.contains("FORK-REPLY"), "the fork was kept");
+
+    // /stop cancels the thread's turns, sub-agents included.
+    chat.ask("/spawn", "running: fresh").await;
+    chat.ask("/stop", "Stopping…").await;
+    chat.wait_for("spawned cancelled").await;
+}

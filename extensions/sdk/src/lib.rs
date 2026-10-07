@@ -109,12 +109,24 @@ impl Link {
     }
 }
 
+/// The turn a call runs in.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct Turn {
+    pub id: u64,
+    /// `visible`, `quiet`, `fork` or `fresh`.
+    pub mode: String,
+    pub source: Option<String>,
+    pub parent: Option<u64>,
+}
+
 /// What a tool, command or hook runs for, and the calls back into August.
 #[derive(Clone)]
 pub struct Ctx {
     link: Arc<Link>,
     /// The thread the call belongs to.
     pub thread: Option<Thread>,
+    /// The turn it runs in.
+    pub turn: Option<Turn>,
 }
 
 impl Ctx {
@@ -144,9 +156,19 @@ impl Ctx {
 
     /// Runs a sub-agent with a fresh conversation for the thread; returns its final reply.
     /// `opts`: `{system, tools, exclude}`.
+    /// Fails if it failed or was cancelled (/stop cancels all of a thread's turns).
     pub async fn agent(&self, task: &str, opts: Value) -> Result<String> {
-        let v = self.in_thread("agent", json!({"task": task, "opts": opts})).await?;
-        Ok(v.as_str().unwrap_or_default().to_string())
+        let mut turn = if opts.is_object() { opts } else { json!({}) };
+        turn["text"] = json!(task);
+        turn["mode"] = json!("fresh");
+        turn["parent"] = json!(self.turn.as_ref().map(|t| t.id));
+        let id = self.in_thread("turn_start", json!({"turn": turn})).await?;
+        let out = self.link.call("turn_wait", json!({"id": id})).await?;
+        match out["status"].as_str() {
+            Some("ok") => Ok(out["reply"].as_str().unwrap_or_default().to_string()),
+            Some("cancelled") => Err(anyhow!("cancelled (/stop)")),
+            _ => Err(anyhow!("{}", out["error"].as_str().unwrap_or("the sub-agent failed"))),
+        }
     }
 
     /// Asks in the thread with `options` as buttons; the answer is the option pressed,
@@ -285,6 +307,23 @@ impl August {
         self.0.link.ask(thread, question, options, timeout).await
     }
 
+    /// Starts a turn in `thread` (`{text, mode: quiet|fork|fresh, source, parent, system,
+    /// tools, exclude, approve_all}`); returns its id.
+    pub async fn start_turn(&self, thread: &Thread, turn: Value) -> Result<u64> {
+        let v = self.0.link.call("turn_start", json!({"thread": thread, "turn": turn})).await?;
+        v.as_u64().ok_or_else(|| anyhow!("bad turn id"))
+    }
+
+    /// The turn's outcome `{status, reply, error, toolCalls}` (once per turn), or
+    /// `{status: "running"}` after `timeout`.
+    pub async fn wait_turn(&self, id: u64, timeout: Duration) -> Result<Value> {
+        self.0.link.call("turn_wait", json!({"id": id, "timeout_ms": timeout.as_millis() as u64})).await
+    }
+
+    pub async fn cancel_turn(&self, id: u64) -> Result<bool> {
+        Ok(self.0.link.call("turn_cancel", json!({"id": id})).await? == true)
+    }
+
     /// Hands `thread` a message as if the user sent it.
     pub async fn prompt(&self, thread: &Thread, text: &str) -> Result<()> {
         self.0.link.call("prompt", json!({"thread": thread, "text": text})).await.map(drop)
@@ -414,7 +453,8 @@ impl August {
                 let (me, link) = (self.clone(), link.clone());
                 tokio::spawn(async move {
                     let thread = serde_json::from_value(msg["params"]["ctx"]["thread"].clone()).ok();
-                    let ctx = Ctx { link: link.clone(), thread };
+                    let turn = serde_json::from_value(msg["params"]["ctx"]["turn"].clone()).ok();
+                    let ctx = Ctx { link: link.clone(), thread, turn };
                     let reply = match me.handle(&method, &msg["params"], ctx).await {
                         Ok(result) => json!({"id": msg["id"], "result": result}),
                         Err(e) => {

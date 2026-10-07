@@ -1,6 +1,7 @@
 //! The agent loop: model -> tools -> model ... until the model stops calling tools.
 
 mod compaction;
+mod fork;
 mod inbox;
 mod prompt;
 mod review;
@@ -24,6 +25,30 @@ const MAX_STEPS: usize = 150;
 fn max_steps() -> usize {
     std::env::var("AUGUST_MAX_STEPS").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(MAX_STEPS)
 }
+/// How a turn runs. `Visible`: the user's conversation, streamed to the thread. `Quiet`:
+/// in the thread's conversation, nothing shown, the reply returned. `Fork`: on a copy of
+/// the conversation, nothing kept. `Fresh`: a new conversation (a sub-agent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnMode {
+    Visible,
+    Quiet,
+    Fork,
+    Fresh,
+}
+
+/// The turn a hook, tool or command runs in.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TurnTag {
+    pub id: u64,
+    pub mode: TurnMode,
+    /// Who started it, when not the user (an extension's name, `scheduler`, ...).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u64>,
+}
+
 pub enum Event<'a> {
     /// A fragment of the model's reply, as it streams in.
     Text(&'a str),
@@ -103,6 +128,11 @@ impl Agent {
         }
     }
 
+    /// Tool calls the latest turn made.
+    pub fn tool_calls(&self) -> usize {
+        self.turn_tool_calls
+    }
+
     pub fn set_provider(&mut self, provider: Arc<dyn LlmProvider>) {
         self.provider = provider;
     }
@@ -122,8 +152,8 @@ impl Agent {
 
     /// The thread for hooks outside a turn: `telegram:5#task1` -> `telegram:5`.
     fn chat_ref(&self) -> Origin {
-        let (messenger, id) = self.chat_key.split_once(':')?;
-        Some(crate::messengers::Thread::new(messenger, id.split('#').next().unwrap_or(id)))
+        let thread = self.chat_key.split_once(':').map(|(m, id)| crate::messengers::Thread::new(m, id.split('#').next().unwrap_or(id)));
+        Origin { thread, turn: None }
     }
 
     /// Fires an observe-only extension event in the background.
@@ -248,7 +278,7 @@ impl Agent {
         let result = self.run_turn_inner(&text, attachments, ctx, on_event).await;
         self.turn_system = None;
         match &result {
-            Ok(reply) => {
+            Ok(_) => {
                 self.persist();
                 if !ctx.unattended {
                     if let Some(review) = self.review_due(ctx, self.turn_tool_calls) {
@@ -267,8 +297,6 @@ impl Agent {
                         });
                     }
                 }
-                let data = json!({"text": text, "reply": reply, "unattended": ctx.unattended});
-                self.notify_ext("turn_end", data, ctx.origin.clone());
             }
             Err(_) => self.rollback_turn(),
         }

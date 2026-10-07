@@ -1,6 +1,7 @@
 //! Slash commands (`/new`, `/stop`, `/model`, ...).
 
 use super::Gateway;
+use crate::extensions::Origin;
 use crate::messengers::{Messenger, Thread, CommandSpec, OutMessage};
 use crate::llm::providers;
 use anyhow::Result;
@@ -59,13 +60,11 @@ impl Gateway {
             "stop" => {
                 self.waits.cancel(id, "stop");
                 // Extensions hear it first, so a loop of theirs doesn't start the next turn.
-                self.ext.emit("stop", serde_json::json!({}), &Some(id.clone())).await;
-                match state.cancel.lock().unwrap().as_ref() {
-                    Some(n) => {
-                        n.notify_one();
-                        "Stopping…".to_string()
-                    }
-                    None => "Nothing is running.".to_string(),
+                self.ext.emit("stop", serde_json::json!({}), &Origin::thread(id.clone())).await;
+                // Every turn of the thread: the reply, quiet ones, sub-agents.
+                match self.turns.cancel_thread(id) {
+                    0 => "Nothing is running.".to_string(),
+                    _ => "Stopping…".to_string(),
                 }
             }
             "queue" if args.is_empty() => "Usage: /queue <message>".into(),
@@ -80,9 +79,7 @@ impl Gateway {
             }
             "new" | "reset" => {
                 self.waits.cancel(id, "new");
-                if let Some(n) = state.cancel.lock().unwrap().as_ref() {
-                    n.notify_one();
-                }
+                self.turns.cancel_thread(id);
                 state.agent.lock().await.reset()?;
                 "Started a new conversation.".into()
             }
@@ -108,7 +105,7 @@ impl Gateway {
                 "Model: `{}`\nWorkspace: `{}`\nBusy: {}",
                 self.provider_label.read().unwrap(),
                 self.workspace.display(),
-                if state.cancel.lock().unwrap().is_some() { "yes" } else { "no" }
+                if self.turns.busy(id) { "yes" } else { "no" }
             ),
             "model" if args.is_empty() => {
                 format!("Current model: `{}`\nChange with `/model <id>`.", self.provider_label.read().unwrap())
@@ -130,7 +127,7 @@ impl Gateway {
                 format!("Extensions reloaded.\n{status}")
             }
             other => {
-                match self.ext.run_command(other, args, &Some(id.clone())).await {
+                match self.ext.run_command(other, args, &Origin::thread(id.clone())).await {
                     Some(Ok(Some(reply))) => reply,
                     Some(Ok(None)) => {
                         channel.idle(chat).await;

@@ -7,6 +7,7 @@ mod media;
 mod render;
 mod subagents;
 mod turn;
+mod turns;
 mod waits;
 
 use crate::agent::{self, Agent};
@@ -24,14 +25,12 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 
 struct Chat {
     agent: Mutex<Agent>,
     /// Messages sent while a turn runs.
     inbox: Arc<agent::Inbox>,
-    /// Set while a turn runs; `/stop` notifies it.
-    cancel: StdMutex<Option<Arc<Notify>>>,
     /// Held while a message is prepared (files, `message_in`), so messages keep their order.
     intake: Mutex<()>,
 }
@@ -41,6 +40,8 @@ pub struct Gateway {
     chats: Mutex<HashMap<Thread, Arc<Chat>>>,
     /// Waits for what threads send next (answers to questions).
     waits: Arc<waits::Waits>,
+    /// Every running turn.
+    turns: turns::Turns,
     /// Extensions' listeners (`listen`) until they take their event with `next`.
     listeners: StdMutex<HashMap<u64, tokio::sync::oneshot::Receiver<waits::Reply>>>,
     /// When each thread last sent something (Unix milliseconds).
@@ -148,9 +149,23 @@ impl extensions::Core for ExtCore {
         Ok(())
     }
 
-    async fn agent(&self, thread: &Thread, task: &str, opts: extensions::AgentOpts) -> Result<String> {
-        let (gw, m) = self.messenger(thread)?;
-        gw.subagent(m, thread.clone(), task, opts).await
+    fn start_turn(&self, thread: &Thread, request: Value) -> Result<u64> {
+        let gw = self.gateway()?;
+        let mut req: turns::TurnRequest = serde_json::from_value(request)?;
+        req.thread = Some(thread.clone());
+        gw.start_turn(req)
+    }
+
+    async fn wait_turn(&self, id: u64, timeout: std::time::Duration) -> Result<Value> {
+        self.gateway()?.wait_turn(id, timeout).await
+    }
+
+    fn cancel_turn(&self, id: u64) -> bool {
+        self.gateway().is_ok_and(|gw| gw.turns.cancel(id))
+    }
+
+    fn turns(&self, thread: Option<&Thread>) -> Value {
+        self.gateway().map(|gw| gw.turns.list(thread)).unwrap_or_default()
     }
 
     async fn approve(&self, thread: &Thread, action: &str) -> Result<bool> {
@@ -166,7 +181,7 @@ impl extensions::Core for ExtCore {
             workspace: gw.workspace.clone(),
             approver: Arc::new(gw.approver(m, thread.clone(), None)),
             db: gw.db.clone(),
-            origin: Some(thread.clone()),
+            origin: extensions::Origin::thread(thread.clone()),
             files: Some(Arc::new(files)),
             extensions: Some(gw.ext.clone()),
             unattended: false,
@@ -213,6 +228,7 @@ impl Gateway {
             channels: channels.into_iter().map(|c| (c.id().to_string(), c)).collect(),
             chats: Mutex::new(HashMap::new()),
             waits: Arc::default(),
+            turns: Default::default(),
             listeners: Default::default(),
             activity: Default::default(),
             provider: RwLock::new(provider),
@@ -289,7 +305,7 @@ impl Gateway {
             self.db.clone(),
             &format!("{}:{}", id.messenger, id.id),
         )?;
-        let chat = Arc::new(Chat { agent: Mutex::new(agent), inbox: Arc::default(), cancel: StdMutex::new(None), intake: Mutex::new(()) });
+        let chat = Arc::new(Chat { agent: Mutex::new(agent), inbox: Arc::default(), intake: Mutex::new(()) });
         chats.insert(id.clone(), chat.clone());
         Ok(chat)
     }
@@ -369,7 +385,7 @@ impl Gateway {
                 let (note, images, saved) = self.receive(&*channel, &files).await;
                 let mut text = [text, note].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
                 if self.ext.listens("message_in") {
-                    let data = self.ext.emit("message_in", serde_json::json!({"text": text, "files": saved}), &Some(ev.thread.clone())).await;
+                    let data = self.ext.emit("message_in", serde_json::json!({"text": text, "files": saved}), &extensions::Origin::thread(ev.thread.clone())).await;
                     if data["handled"] == true {
                         if let Some(reply) = data["reply"].as_str().filter(|r| !r.is_empty()) {
                             channel.send(&chat, &OutMessage::text(reply)).await?;

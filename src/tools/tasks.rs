@@ -7,6 +7,7 @@ fn origin(ctx: &ToolCtx) -> Result<(&str, &str)> {
         anyhow::bail!("tasks can't be managed from a scheduled task or a subtask");
     }
     ctx.origin
+        .thread
         .as_ref()
         .map(|t| (t.messenger.as_str(), t.id.as_str()))
         .ok_or_else(|| anyhow::anyhow!("scheduled tasks are only available in messenger chats (run `august serve`)"))

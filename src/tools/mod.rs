@@ -45,7 +45,8 @@ pub struct ToolCtx {
     pub approver: Arc<dyn Approver>,
     pub db: Arc<Db>,
     /// `(channel, chat)` the turn runs in; `None` in the terminal REPL.
-    pub origin: Option<crate::messengers::Thread>,
+    /// The thread and turn this runs for.
+    pub origin: crate::extensions::Origin,
     /// Where `send_file` delivers files; `None` when there is no chat (terminal REPL).
     pub files: Option<Arc<dyn FileSink>>,
     /// Loaded extensions, for `save_extension`; `None` when they are off.
@@ -77,8 +78,9 @@ impl Approver for Approved {
     }
 }
 
+#[derive(Clone)]
 pub struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
+    tools: Vec<Arc<dyn Tool>>,
     /// Extension tools and the `tool_call` / `tool_result` hooks.
     ext: Option<Arc<Extensions>>,
     /// Tools (of any kind) the model is not offered and may not call.
@@ -91,24 +93,24 @@ impl ToolRegistry {
     pub fn with_defaults() -> Self {
         Self {
             tools: vec![
-                Box::new(shell::Shell),
-                Box::new(fs::ReadFile),
-                Box::new(fs::WriteFile),
-                Box::new(fs::EditFile),
-                Box::new(fs::ListDir),
-                Box::new(media::SendFile),
-                Box::new(search::Grep),
-                Box::new(search::Glob),
-                Box::new(memory::Remember),
-                Box::new(memory::Forget),
-                Box::new(memory::SearchHistory),
-                Box::new(skills::LoadSkill),
-                Box::new(skills::SaveSkill),
-                Box::new(skills::EditSkill),
-                Box::new(tasks::ScheduleTask),
-                Box::new(tasks::ListTasks),
-                Box::new(tasks::CancelTask),
-                Box::new(extensions::SaveExtension),
+                Arc::new(shell::Shell),
+                Arc::new(fs::ReadFile),
+                Arc::new(fs::WriteFile),
+                Arc::new(fs::EditFile),
+                Arc::new(fs::ListDir),
+                Arc::new(media::SendFile),
+                Arc::new(search::Grep),
+                Arc::new(search::Glob),
+                Arc::new(memory::Remember),
+                Arc::new(memory::Forget),
+                Arc::new(memory::SearchHistory),
+                Arc::new(skills::LoadSkill),
+                Arc::new(skills::SaveSkill),
+                Arc::new(skills::EditSkill),
+                Arc::new(tasks::ScheduleTask),
+                Arc::new(tasks::ListTasks),
+                Arc::new(tasks::CancelTask),
+                Arc::new(extensions::SaveExtension),
             ],
             ext: None,
             hidden: HashSet::new(),

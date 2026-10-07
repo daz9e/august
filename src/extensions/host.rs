@@ -232,10 +232,13 @@ async fn serve(core: Option<&dyn Core>, name: &str, method: &str, params: &Value
             core.next(listener, timeout).await?
         }
         "prompt" => core.prompt(&thread(params)?, arg("text")?).await.map(|_| Value::Null)?,
-        "agent" => {
-            let opts = serde_json::from_value(params["opts"].clone()).unwrap_or_default();
-            json!(core.agent(&thread(params)?, arg("task")?, opts).await?)
+        "turn_start" => json!(core.start_turn(&thread(params)?, params["turn"].clone())?),
+        "turn_wait" => {
+            let id = params["id"].as_u64().ok_or_else(|| anyhow::anyhow!("missing `id`"))?;
+            core.wait_turn(id, Duration::from_millis(params["timeout_ms"].as_u64().unwrap_or(3_600_000))).await?
         }
+        "turn_cancel" => json!(core.cancel_turn(params["id"].as_u64().unwrap_or(0))),
+        "turns" => core.turns(thread(params).ok().as_ref()),
         "approve" => json!(core.approve(&thread(params)?, arg("action")?).await?),
         "callTool" => {
             let (output, is_error) = core.call_tool(&thread(params)?, arg("name")?, &params["input"]).await?;

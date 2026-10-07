@@ -9,7 +9,7 @@ use crate::tools::{FileSink, ToolCtx};
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
 /// `send_file` from a chat turn: goes through the renderer so the file lands
 /// after the text streamed so far.
@@ -94,8 +94,9 @@ impl Gateway {
         images: Vec<Block>,
         scheduled: bool,
     ) -> Result<Option<String>> {
-        let cancel = Arc::new(Notify::new());
-        *state.cancel.lock().unwrap() = Some(cancel.clone());
+        let mode = if scheduled { crate::agent::TurnMode::Quiet } else { crate::agent::TurnMode::Visible };
+        let source = scheduled.then(|| "scheduler".to_string());
+        let (tag, cancel) = self.turns.begin(id, mode, source, None);
         agent.set_provider(self.provider.read().unwrap().clone());
 
         let typing = {
@@ -116,7 +117,7 @@ impl Gateway {
             workspace: self.workspace.clone(),
             approver,
             db: self.db.clone(),
-            origin: Some(id.clone()),
+            origin: crate::extensions::Origin { thread: Some(id.clone()), turn: Some(tag.clone()) },
             files: Some(Arc::new(ChatFiles(tx.clone()))),
             extensions: Some(self.ext.clone()),
             unattended: scheduled,
@@ -147,6 +148,10 @@ impl Gateway {
             _ = cancel.notified() => None,
         };
         let result = outcome.as_ref().and_then(|r| r.as_ref().ok()).cloned();
+        let ended = super::turns::Outcome::of(
+            outcome.as_ref().map(|r| r.as_ref().map(String::clone).map_err(|e| anyhow::anyhow!("{e:#}"))),
+            vec![serde_json::Value::Null; agent.tool_calls()],
+        );
         match outcome {
             Some(Ok(reply)) if scheduled && reply.trim_start().starts_with("[SILENT]") => {}
             Some(Ok(reply)) => {
@@ -164,7 +169,8 @@ impl Gateway {
                 tx.send(Ui::Text("⏹ Stopped.".into())).ok();
             }
         }
-        *state.cancel.lock().unwrap() = None;
+        self.turns.end(tag.id);
+        self.turn_ended(id, &tag, text, &ended);
         typing.abort();
         drop(tx);
         drop(ctx);

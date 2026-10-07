@@ -131,9 +131,12 @@ async fn handle(State(s): State<Arc<Inner>>, method: Method, uri: Uri, body: Byt
     s.log.lock().unwrap().push(Req { path: path.clone(), body: body.to_vec() });
 
     if path.ends_with("/chat/completions") {
-        let llm = s.llm.as_ref().expect("no fake LLM configured");
+        assert!(s.llm.is_some(), "no fake LLM configured");
         let req: Value = serde_json::from_slice(&body).unwrap();
-        return axum::Json(llm(&req)).into_response();
+        // Off the runtime: a fake model may sleep to play a slow one.
+        let fake = s.clone();
+        let reply = tokio::task::spawn_blocking(move || (fake.llm.as_ref().unwrap())(&req)).await.unwrap();
+        return axum::Json(reply).into_response();
     }
     if path.ends_with("/audio/transcriptions") {
         return axum::Json(json!({"text": TRANSCRIPT})).into_response();

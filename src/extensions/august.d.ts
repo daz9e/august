@@ -29,15 +29,48 @@ declare module "august" {
   /** What a listener took: a button press or a text message; or why nothing came. */
   export type Reply = { press: string } | { text: string } | { timeout: true } | { cancelled: "stop" | "new" };
 
+  /** A run of the agent. `visible`: the user's conversation, streamed to the thread; `quiet`:
+   *  in the thread's conversation, nothing shown, the reply returned; `fork`: on a copy of the
+   *  conversation (same prompt and tools, so the provider's cache holds), nothing kept;
+   *  `fresh`: a new conversation (a sub-agent). */
+  export type TurnMode = "visible" | "quiet" | "fork" | "fresh";
+  export type Turn = { id: number; mode: TurnMode; source?: string; parent?: number };
+  export type TurnRequest = {
+    text: string;
+    mode: "quiet" | "fork" | "fresh";
+    /** Who starts it; hooks see it as `ctx.turn.source`. */
+    source?: string;
+    /** The turn this one belongs to (e.g. `ctx.turn.id`). */
+    parent?: number;
+    /** fresh: instructions added to the base system prompt. */
+    system?: string;
+    /** fresh: only these tools. fork: only these may be called (all stay offered). */
+    tools?: string[];
+    /** fresh: never these tools. */
+    exclude?: string[];
+    /** fork: run approvals without asking (nobody may be there to ask). */
+    approve_all?: boolean;
+  };
+  export type TurnOutcome = {
+    status: "ok" | "error" | "cancelled" | "running";
+    reply: string;
+    error?: string | null;
+    /** fork: every tool call, `{ name, input, output, isError }`. */
+    toolCalls: { name: string; input: any; output: string; isError: boolean }[];
+  };
+
   export interface Context {
     /** The thread the event, tool call or command belongs to (null outside one). */
     thread: Thread | null;
+    /** The turn it runs in (null outside one). */
+    turn: Turn | null;
     /** Sends a message to that thread; resolves to its id (for `august.edit`). */
     send(message: OutMessage): Promise<string>;
     /** Hands the thread `text` as if the user sent it: joins the running turn, or starts one. */
     prompt(text: string): Promise<void>;
-    /** Runs a sub-agent for this thread: a fresh conversation (it sees nothing of the thread),
-     *  the thread's approvals, nobody to answer questions. Resolves to its final reply.
+    /** Runs a sub-agent for this thread (a `fresh` turn under this one): a new conversation,
+     *  the thread's approvals, nobody to answer questions. Resolves to its final reply; throws
+     *  if it failed or was cancelled (/stop cancels all of a thread's turns).
      *  `system` is added to the base system prompt; `tools` limits it to those tools,
      *  `exclude` hides some. */
     agent(task: string, opts?: { system?: string; tools?: string[]; exclude?: string[] }): Promise<string>;
@@ -72,9 +105,16 @@ declare module "august" {
     tool_call: { tool: string; input: any };
     /** A tool finished. */
     tool_result: { tool: string; input: any; output: string; isError: boolean };
-    /** A turn finished with `reply` (observe only; runs in the background). `unattended`:
-     *  a scheduled task or a sub-agent, not the user's conversation. */
-    turn_end: { text: string; reply: string; unattended: boolean };
+    /** Any turn finished (observe only; runs in the background). */
+    turn_end: {
+      text: string;
+      reply: string;
+      status: "ok" | "error" | "cancelled";
+      /** How many tool calls the turn made. */
+      toolCalls: number;
+      /** Not the user's visible conversation (`ctx.turn.mode` says which). */
+      unattended: boolean;
+    };
     /** The user sent /stop in the thread (observe only). */
     stop: {};
     /** Before each model call of a turn; `step` counts from 0, `system` is the full prompt. */
@@ -173,5 +213,13 @@ declare module "august" {
     ask(thread: Thread, question: string, options: string[], opts?: { timeout?: number }): Promise<string | null>;
     /** Hands `thread` a message as if the user sent it. */
     prompt(thread: Thread, text: string): Promise<void>;
+    /** Turns: start a quiet, fork or fresh one and get its id; wait for its outcome (once;
+     *  `{ status: "running" }` if the timeout passes first); cancel it; list running ones. */
+    turns: {
+      start(thread: Thread, turn: TurnRequest): Promise<number>;
+      wait(id: number, opts?: { timeout?: number }): Promise<TurnOutcome>;
+      cancel(id: number): Promise<boolean>;
+      list(thread?: Thread): Promise<(Turn & { thread: Thread })[]>;
+    };
   }
 }

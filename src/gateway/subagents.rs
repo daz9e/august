@@ -1,5 +1,5 @@
-//! Sub-agents for extensions (`ctx.agent`): a fresh conversation of their own in a chat,
-//! with the chat's approvals, unattended, returning the final reply.
+//! Sub-agents (fresh turns): a conversation of their own for a thread, with the thread's
+//! approvals, returning the final reply; and handing a thread a message.
 
 use super::Gateway;
 use crate::agent::{self, Agent};
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 impl Gateway {
-    pub(super) async fn subagent(&self, channel: Arc<dyn Messenger>, id: Thread, task: &str, opts: AgentOpts) -> Result<String> {
+    pub(super) async fn subagent(&self, id: Thread, task: &str, opts: AgentOpts, ctx: ToolCtx) -> Result<String> {
         let n = self.subagents.fetch_add(1, Ordering::Relaxed) + 1;
         // A key of its own, so it starts fresh instead of resuming an older sub-agent's session.
         let key = format!("{}#agent-{}", id.key(), &crate::util::new_uuid()[..8]);
@@ -22,17 +22,6 @@ impl Gateway {
         let provider = self.provider.read().unwrap().clone();
         let system = agent::system_prompt(&self.workspace, opts.system.as_deref().unwrap_or(""));
         let mut agent = Agent::new(provider, tools, system, self.db.clone(), &key)?;
-        let ctx = ToolCtx {
-            workspace: self.workspace.clone(),
-            approver: Arc::new(self.approver(channel, id.clone(), None)),
-            db: self.db.clone(),
-            origin: Some(id),
-            files: None,
-            extensions: Some(self.ext.clone()),
-            unattended: true,
-            notify: None,
-            inbox: None,
-        };
         eprintln!("sub-agent #{n} starts: {}", task.chars().take(80).collect::<String>());
         agent.run_turn(task, &ctx, &mut |_| {}).await
     }

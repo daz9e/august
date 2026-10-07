@@ -84,7 +84,17 @@ async function ask(thread: Thread, question: string, options: string[], timeout 
   return answer;
 }
 
-function context(thread: Thread | null) {
+type Turn = { id: number; mode: string; source?: string; parent?: number };
+
+/** Starts a turn and waits for its outcome; throws unless it ended ok. */
+async function runTurn(thread: Thread, turn: object): Promise<string> {
+  const id = await call("turn_start", { thread, turn });
+  const out = await call("turn_wait", { id });
+  if (out.status === "ok") return out.reply;
+  throw new Error(out.status === "cancelled" ? "cancelled (/stop)" : out.error ?? out.status);
+}
+
+function context(thread: Thread | null, turn: Turn | null = null) {
   const need = (): Thread => {
     if (!thread) throw new Error("this call has no thread");
     return thread;
@@ -92,9 +102,10 @@ function context(thread: Thread | null) {
   const inThread = (method: string, params: object) => (thread ? call(method, { thread, ...params }) : Promise.reject(new Error("this call has no thread")));
   return {
     thread,
+    turn,
     send: (message: Message) => inThread("send", { message }),
     prompt: (text: string) => inThread("prompt", { text }),
-    agent: (task: string, opts: object = {}) => inThread("agent", { task, opts }),
+    agent: (task: string, opts: object = {}) => runTurn(need(), { ...opts, text: task, mode: "fresh", parent: turn?.id }),
     ask: async (question: string, options: string[], opts: { timeout?: number } = {}) => ask(need(), question, options, opts.timeout),
     approve: (action: string) => inThread("approve", { action }),
     callTool: (name: string, input: unknown = {}) => inThread("callTool", { name, input }),
@@ -147,10 +158,16 @@ const api = {
   next: (listener: number, opts: { timeout?: number } = {}) => call("next", { listener, timeout_ms: opts.timeout ?? 300_000 }),
   ask: (thread: Thread, question: string, options: string[], opts: { timeout?: number } = {}) => ask(thread, question, options, opts.timeout),
   prompt: (thread: Thread, text: string) => call("prompt", { thread, text }),
+  turns: {
+    start: (thread: Thread, turn: object) => call("turn_start", { thread, turn }),
+    wait: (id: number, opts: { timeout?: number } = {}) => call("turn_wait", { id, timeout_ms: opts.timeout }),
+    cancel: (id: number) => call("turn_cancel", { id }),
+    list: (thread?: Thread) => call("turns", { thread }),
+  },
 };
 
 async function handle(method: string, params: any): Promise<unknown> {
-  const ctx = context(params.ctx?.thread ?? null);
+  const ctx = context(params.ctx?.thread ?? null, params.ctx?.turn ?? null);
   switch (method) {
     case "event": {
       // Handlers run in order; each result is merged into the data the next one sees.

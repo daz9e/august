@@ -55,8 +55,15 @@ pub trait Core: Send + Sync {
     async fn next(&self, listener: u64, timeout: Duration) -> Result<Value>;
     /// Hands `thread` a message as if the user sent it: joins the running turn, or starts one.
     async fn prompt(&self, thread: &Thread, text: &str) -> Result<()>;
-    /// Runs a sub-agent (fresh conversation, unattended) for `thread`; returns its reply.
-    async fn agent(&self, thread: &Thread, task: &str, opts: AgentOpts) -> Result<String>;
+    /// Starts a turn in `thread` (`{text, mode: quiet|fork|fresh, source, parent, system,
+    /// tools, exclude, approve_all}`) and returns its id.
+    fn start_turn(&self, thread: &Thread, request: Value) -> Result<u64>;
+    /// Waits up to `timeout` for a turn's outcome: `{status: ok|error|cancelled, reply,
+    /// error, toolCalls}`, or `{status: "running"}` if it isn't done yet (once per turn).
+    async fn wait_turn(&self, id: u64, timeout: Duration) -> Result<Value>;
+    fn cancel_turn(&self, id: u64) -> bool;
+    /// Running turns, of one thread or all.
+    fn turns(&self, thread: Option<&Thread>) -> Value;
     /// Asks the user in `thread` whether `action` may run.
     async fn approve(&self, thread: &Thread, action: &str) -> Result<bool>;
     /// Runs an agent tool for `thread` (hooks and approvals included): `(output, is_error)`.
@@ -81,8 +88,18 @@ pub struct AgentOpts {
     pub exclude: Vec<String>,
 }
 
-/// The thread a hook, tool or command runs for.
-pub type Origin = Option<Thread>;
+/// Where a hook, tool or command runs: its thread, and the turn when inside one.
+#[derive(Debug, Clone, Default)]
+pub struct Origin {
+    pub thread: Option<Thread>,
+    pub turn: Option<crate::agent::TurnTag>,
+}
+
+impl Origin {
+    pub fn thread(thread: Thread) -> Self {
+        Self { thread: Some(thread), turn: None }
+    }
+}
 
 enum State {
     Running(Arc<Host>),
@@ -516,5 +533,8 @@ impl Extensions {
 }
 
 fn ctx_json(origin: &Origin) -> Value {
-    json!({"thread": origin.as_ref().map(|t| json!({"messenger": t.messenger, "id": t.id}))})
+    json!({
+        "thread": origin.thread.as_ref().map(|t| json!({"messenger": t.messenger, "id": t.id})),
+        "turn": origin.turn,
+    })
 }

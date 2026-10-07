@@ -50,8 +50,10 @@ leave it unchanged.
   to run it without the usual approval, `{ ask: "question" }` to ask the user first.
 - `tool_result` `{ tool, input, output, isError }`: return `{ output }` to change what the
   model sees.
-- `turn_end` `{ text, reply, unattended }`: after a turn; runs in the background, the result
-  is ignored. `unattended` is true for scheduled tasks and sub-agents.
+- `turn_end` `{ text, reply, status, toolCalls, unattended }`: after any turn; `status` is
+  `ok`, `error` or `cancelled`, `toolCalls` how many tools it called, and `ctx.turn` its
+  `{ id, mode, source, parent }` (`unattended`: not the user's visible conversation). Runs
+  in the background; the result is ignored.
 - `llm_call` `{ step, system }`: before every model call of a turn (`step` from 0). Return
   `{ system }` to use another system prompt for that call only. The prompt is otherwise
   byte-stable so the provider can cache it; changing it costs that cache, so prefer
@@ -97,6 +99,13 @@ Calling into August:
   returns the text.
 - `await ctx.agent(task, { system, tools, exclude })` runs a sub-agent with a fresh
   conversation and returns its final reply (`tools` limits it, `exclude` hides some).
+- Turns: `const id = await august.turns.start(thread, { text, mode })` starts a `quiet` turn
+  (in the thread's conversation, nothing shown, e.g. a scheduled check), a `fork` (on a copy
+  of the conversation, nothing kept; `tools` limits what it may call; good for looking back
+  at a conversation) or a `fresh` one (a sub-agent); `await august.turns.wait(id)` gives
+  `{ status, reply, error, toolCalls }`. `august.turns.cancel(id)`, `august.turns.list()`.
+  /stop cancels every turn of its thread. `ctx.turn` tells which turn a call runs in
+  (`{ id, mode, source, parent }`).
 - `await ctx.approve(action)` is August's own yes/no approval.
 - `august.workspace` is the agent's workspace folder.
 
