@@ -103,8 +103,14 @@ async fn schedule_task(august: &August, input: Value, ctx: Ctx) -> Result<String
     {
         bail!("the user denied the script");
     }
-    let id = august.get("next_id").await?.and_then(|v| v.as_u64()).unwrap_or(1);
-    august.set("next_id", json!(id + 1)).await?;
+    let id = {
+        // Calls run concurrently; one at a time takes the next id.
+        static NEXT_ID: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _one = NEXT_ID.lock().await;
+        let id = august.get("next_id").await?.and_then(|v| v.as_u64()).unwrap_or(1);
+        august.set("next_id", json!(id + 1)).await?;
+        id
+    };
     let isolated = input["isolated"].as_bool().unwrap_or(false);
     let task = Task { id, thread, schedule: spec, prompt: prompt.into(), next_run: Some(next), last_run: None, skills, script, isolated };
     save(august, &task).await?;

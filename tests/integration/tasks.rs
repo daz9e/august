@@ -69,3 +69,22 @@ async fn silent_task_sends_nothing() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(chat.texts().iter().all(|t| !t.contains("SILENT") && !t.contains("nothing changed")), "{:?}", chat.texts());
 }
+
+#[tokio::test]
+async fn tasks_scheduled_together_are_all_kept() {
+    let call = |id: &str, prompt: &str| json!({"id": id, "type": "function", "function": {
+        "name": "schedule_task", "arguments": json!({"schedule": "every 1d", "prompt": prompt}).to_string()}});
+    let llm: Llm = Box::new(move |req| {
+        if msgs(req).last().unwrap()["role"] == "tool" {
+            return reply_text("both set");
+        }
+        json!({"choices": [{"message": {"role": "assistant", "content": null,
+            "tool_calls": [call("a", "water the plants"), call("b", "feed the cat")]}, "finish_reason": "tool_calls"}]})
+    });
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.ask("two reminders", "both set").await;
+    let list = chat.ask("/tasks", "#").await;
+    assert!(list.contains("water the plants") && list.contains("feed the cat"), "{}", list);
+}
