@@ -124,9 +124,20 @@ async fn a_subtask_after_a_restart_starts_fresh() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_drops_running_subtasks() {
-    let llm: Llm = Box::new(|req| {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    // The sub-agent works until the user has stopped.
+    let stopped = Arc::new(AtomicBool::new(false));
+    let done = stopped.clone();
+    let llm: Llm = Box::new(move |req| {
         if is_child(req) {
-            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            let start = Instant::now();
+            tokio::task::block_in_place(|| {
+                while !done.load(Ordering::SeqCst) && start.elapsed() < TIMEOUT {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            });
             return reply_text("late report");
         }
         if msgs(req).last().unwrap()["role"] == "tool" {
@@ -139,8 +150,9 @@ async fn stop_drops_running_subtasks() {
     let mut chat = gw.chat().await;
     chat.ask("count stars", "delegated").await;
     chat.ask("/stop", "Dropped 1 running subtask").await;
+    stopped.store(true, Ordering::SeqCst);
 
     // The sub-agent's run ends, but its report doesn't start a turn.
-    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
     assert!(fake.llm_requests().iter().filter(|r| !is_child(r)).all(|r| !last_user(r).contains("[Subtask")));
 }
