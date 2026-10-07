@@ -27,6 +27,7 @@ for line in sys.stdin:
             {"name": "echo", "description": "Echo text", "inputSchema": {"type": "object",
              "properties": {"text": {"type": "string"}}, "required": ["text"]}},
             {"name": "fail.hard", "description": "Always fails", "inputSchema": {"type": "object"}},
+            {"name": "fail hard", "description": "Also fails", "inputSchema": {"type": "object"}},
         ]}
     elif method == "tools/call" and msg["params"]["name"] == "echo":
         text = os.environ["GREETING"] + " " + msg["params"]["arguments"]["text"]
@@ -131,7 +132,8 @@ async fn mcp_server_tools_become_agent_tools() {
     assert!(tool_msgs.iter().any(|m| m == "error: disk on fire"), "{tool_msgs:?}");
 
     // /mcp lists every server, including the one that could not start.
-    assert!(status.contains("fake — tools: mcp_fake_echo, mcp_fake_fail_hard"), "{status}");
+    // Names that clean up to the same one are told apart.
+    assert!(status.contains("fake — tools: mcp_fake_echo, mcp_fake_fail_hard, mcp_fake_fail_hard_2"), "{status}");
     assert!(status.contains("web — tools: mcp_web_time"), "{status}");
     assert!(status.contains("could not run /nonexistent/mcp-server"), "{status}");
     assert!(status.contains("dies — the server exited: bye"), "{status}");

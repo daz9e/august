@@ -265,13 +265,21 @@ impl Server {
     }
 }
 
-/// `mcp_<server>_<tool>` in the charset providers accept, capped in length.
-fn tool_name(server: &str, tool: &str) -> String {
-    format!("mcp_{server}_{tool}")
+/// `mcp_<server>_<tool>` in the charset providers accept, capped in length, with `_2`, `_3`,
+/// ... when cleaning or capping made it the name of a tool in `taken`. Adds it to `taken`.
+fn tool_name(taken: &mut HashSet<String>, server: &str, tool: &str) -> String {
+    let full: String = format!("mcp_{server}_{tool}")
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .take(MAX_NAME)
-        .collect()
+        .collect();
+    let mut name: String = full.chars().take(MAX_NAME).collect();
+    let mut n = 1;
+    while !taken.insert(name.clone()) {
+        n += 1;
+        let suffix = format!("_{n}");
+        name = full.chars().take(MAX_NAME - suffix.len()).collect::<String>() + &suffix;
+    }
+    name
 }
 
 /// Text of a `tools/call` result; non-text blocks are only named. `isError` maps to `Err`.
@@ -325,10 +333,7 @@ async fn connect(august: &August, status: &Status, taken: &StdMutex<HashSet<Stri
     let mut tools = Vec::new();
     for t in found {
         let Some(remote) = t["name"].as_str().map(String::from) else { continue };
-        let local = tool_name(name, &remote);
-        if !taken.lock().unwrap().insert(local.clone()) {
-            continue; // an earlier server has a tool of that name
-        }
+        let local = tool_name(&mut taken.lock().unwrap(), name, &remote);
         let description = t["description"].as_str().filter(|d| !d.is_empty()).map(String::from).unwrap_or_else(|| format!("Tool `{remote}` of the MCP server `{name}`"));
         let schema = if t["inputSchema"].is_object() { t["inputSchema"].clone() } else { json!({"type": "object"}) };
         let server = server.clone();
