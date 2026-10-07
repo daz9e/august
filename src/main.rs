@@ -1,15 +1,6 @@
-mod agent;
-mod channels;
-mod cli;
-mod config;
-mod db;
-mod extensions;
-mod gateway;
-mod llm;
-mod scheduler;
-mod skills;
-mod tools;
-mod util;
+//! The `august` command; everything else lives in the library (`lib.rs`).
+
+use august::{channels, cli, gateway};
 
 use anyhow::Result;
 
