@@ -45,7 +45,7 @@ pub struct ToolCtx {
     pub approver: Arc<dyn Approver>,
     pub db: Arc<Db>,
     /// `(channel, chat)` the turn runs in; `None` in the terminal REPL.
-    pub origin: Option<(String, String)>,
+    pub origin: Option<crate::messengers::Thread>,
     /// Where `send_file` delivers files; `None` when there is no chat (terminal REPL).
     pub files: Option<Arc<dyn FileSink>>,
     /// Loaded extensions, for `save_extension`; `None` when they are off.

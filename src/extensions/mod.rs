@@ -8,6 +8,7 @@
 mod host;
 
 use crate::llm::ToolSpec;
+use crate::messengers::{OutMessage, Thread};
 use anyhow::Result;
 use async_trait::async_trait;
 use host::Host;
@@ -35,21 +36,30 @@ const ENTRIES: [&str; 3] = ["index.ts", "index.js", "index.mjs"];
 /// Marker file in an extension folder that keeps it from starting.
 const DISABLED: &str = "disabled";
 
-/// What extensions can ask of August.
+/// What extensions can ask of August: the core's primitives.
 #[async_trait]
 pub trait Core: Send + Sync {
-    /// Sends a Markdown message to a chat.
-    async fn send(&self, channel: &str, chat: &str, text: &str) -> Result<()>;
-    /// Queues an agent turn in a chat.
-    async fn prompt(&self, channel: &str, chat: &str, text: &str) -> Result<()>;
-    /// Runs a sub-agent in a chat (fresh conversation, unattended) and returns its reply.
-    async fn agent(&self, channel: &str, chat: &str, task: &str, opts: AgentOpts) -> Result<String>;
-    /// Asks the user in a chat to pick one of `options`; `None` if they didn't answer.
-    async fn ask(&self, channel: &str, chat: &str, question: &str, options: &[String]) -> Result<Option<String>>;
-    /// Asks the user in a chat whether `action` may run.
-    async fn approve(&self, channel: &str, chat: &str, action: &str) -> Result<bool>;
-    /// Runs an agent tool in a chat (hooks and approvals included): `(output, is_error)`.
-    async fn call_tool(&self, channel: &str, chat: &str, name: &str, input: &Value) -> Result<(String, bool)>;
+    /// Every messenger: its description (name, capabilities, extras) and its threads,
+    /// the active one marked.
+    async fn messengers(&self) -> Result<Value>;
+    /// Sends `message` (`{text, buttons: [{id, label}]}`) to `thread`; returns its id.
+    async fn send(&self, thread: &Thread, message: OutMessage) -> Result<String>;
+    /// Replaces a sent message.
+    async fn edit(&self, thread: &Thread, id: &str, message: OutMessage) -> Result<()>;
+    /// Starts listening in `thread` for a press of one of `buttons` or (with `text`) a text
+    /// message; what it takes doesn't reach the agent. Returns the listener's id for `next`.
+    fn listen(&self, thread: &Thread, buttons: Vec<String>, text: bool) -> u64;
+    /// Waits up to `timeout` for what the listener takes: `{"press": id}`, `{"text": ...}`,
+    /// or null (timed out, or the thread got /stop or /new). Ends the listener.
+    async fn next(&self, listener: u64, timeout: Duration) -> Result<Value>;
+    /// Hands `thread` a message as if the user sent it: joins the running turn, or starts one.
+    async fn prompt(&self, thread: &Thread, text: &str) -> Result<()>;
+    /// Runs a sub-agent (fresh conversation, unattended) for `thread`; returns its reply.
+    async fn agent(&self, thread: &Thread, task: &str, opts: AgentOpts) -> Result<String>;
+    /// Asks the user in `thread` whether `action` may run.
+    async fn approve(&self, thread: &Thread, action: &str) -> Result<bool>;
+    /// Runs an agent tool for `thread` (hooks and approvals included): `(output, is_error)`.
+    async fn call_tool(&self, thread: &Thread, name: &str, input: &Value) -> Result<(String, bool)>;
     /// One completion without tools on the configured model.
     async fn llm(&self, prompt: &str, system: &str) -> Result<String>;
 }
@@ -66,8 +76,8 @@ pub struct AgentOpts {
     pub exclude: Vec<String>,
 }
 
-/// The chat a hook, tool or command runs for: `(channel, chat)`.
-pub type ChatRef = Option<(String, String)>;
+/// The thread a hook, tool or command runs for.
+pub type Origin = Option<Thread>;
 
 enum State {
     Running(Arc<Host>),
@@ -389,7 +399,7 @@ impl Extensions {
     /// Runs `event` through every extension that handles it, in name order. Each one gets
     /// the data the previous one returned; a `block` or `handled` result stops the chain.
     /// Failing handlers are skipped.
-    pub async fn emit(&self, event: &str, mut data: Value, chat: &ChatRef) -> Value {
+    pub async fn emit(&self, event: &str, mut data: Value, chat: &Origin) -> Value {
         for (name, host) in self.running() {
             if !host.manifest().events.iter().any(|e| e == event) {
                 continue;
@@ -423,7 +433,7 @@ impl Extensions {
     }
 
     /// Runs an extension tool; `None` if no extension has it.
-    pub async fn call_tool(&self, name: &str, input: &Value, chat: &ChatRef) -> Option<Result<String, String>> {
+    pub async fn call_tool(&self, name: &str, input: &Value, chat: &Origin) -> Option<Result<String, String>> {
         let host = self.running().into_iter().find(|(_, h)| h.manifest().tools.iter().any(|t| t.name == name))?.1;
         let params = json!({"name": name, "input": input, "ctx": ctx_json(chat)});
         Some(host.request("tool", params, TOOL_TIMEOUT).await.map(|v| match v {
@@ -443,7 +453,7 @@ impl Extensions {
     }
 
     /// Runs `/name args`; `None` if no extension has the command, else the optional reply.
-    pub async fn run_command(&self, name: &str, args: &str, chat: &ChatRef) -> Option<Result<Option<String>, String>> {
+    pub async fn run_command(&self, name: &str, args: &str, chat: &Origin) -> Option<Result<Option<String>, String>> {
         let host = self.running().into_iter().find(|(_, h)| h.manifest().commands.iter().any(|(n, _)| n == name))?.1;
         let params = json!({"name": name, "args": args, "ctx": ctx_json(chat)});
         Some(host.request("command", params, COMMAND_TIMEOUT).await.map(|v| v.as_str().map(String::from)))
@@ -489,9 +499,6 @@ impl Extensions {
     }
 }
 
-fn ctx_json(chat: &ChatRef) -> Value {
-    match chat {
-        Some((channel, chat)) => json!({"chat": {"channel": channel, "chat": chat}}),
-        None => json!({"chat": {"channel": "cli", "chat": "cli"}}),
-    }
+fn ctx_json(origin: &Origin) -> Value {
+    json!({"thread": origin.as_ref().map(|t| json!({"messenger": t.messenger, "id": t.id}))})
 }

@@ -11,7 +11,7 @@ pub use prompt::system_prompt;
 pub use store::SessionStore;
 use compaction::DEFAULT_CONTEXT_TOKENS;
 
-use crate::extensions::ChatRef;
+use crate::extensions::Origin;
 use crate::llm::{Block, Completion, LlmProvider, Message, Role, StopReason, ToolSpec, Usage};
 use crate::tools::{ToolCtx, ToolRegistry};
 use anyhow::Result;
@@ -120,14 +120,14 @@ impl Agent {
         Ok(())
     }
 
-    /// The chat for hooks outside a turn: `telegram:5#task1` -> `(telegram, 5)`; `None` for `cli`.
-    fn chat_ref(&self) -> ChatRef {
-        let (channel, chat) = self.chat_key.split_once(':')?;
-        Some((channel.into(), chat.split('#').next().unwrap_or(chat).into()))
+    /// The thread for hooks outside a turn: `telegram:5#task1` -> `telegram:5`.
+    fn chat_ref(&self) -> Origin {
+        let (messenger, id) = self.chat_key.split_once(':')?;
+        Some(crate::messengers::Thread::new(messenger, id.split('#').next().unwrap_or(id)))
     }
 
     /// Fires an observe-only extension event in the background.
-    fn notify_ext(&self, event: &'static str, data: Value, chat: ChatRef) {
+    fn notify_ext(&self, event: &'static str, data: Value, chat: Origin) {
         if let Some(ext) = self.tools.extensions().filter(|e| e.listens(event)).cloned() {
             tokio::spawn(async move { ext.emit(event, data, &chat).await });
         }

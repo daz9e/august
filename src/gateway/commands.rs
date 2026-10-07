@@ -59,8 +59,7 @@ impl Gateway {
             "stop" => {
                 self.waits.cancel(id);
                 // Extensions hear it first, so a loop of theirs doesn't start the next turn.
-                let origin = Some((id.messenger.clone(), id.id.clone()));
-                self.ext.emit("stop", serde_json::json!({}), &origin).await;
+                self.ext.emit("stop", serde_json::json!({}), &Some(id.clone())).await;
                 match state.cancel.lock().unwrap().as_ref() {
                     Some(n) => {
                         n.notify_one();
@@ -131,8 +130,7 @@ impl Gateway {
                 format!("Extensions reloaded.\n{status}")
             }
             other => {
-                let origin = Some((id.messenger.clone(), id.id.clone()));
-                match self.ext.run_command(other, args, &origin).await {
+                match self.ext.run_command(other, args, &Some(id.clone())).await {
                     Some(Ok(Some(reply))) => reply,
                     Some(Ok(None)) => {
                         channel.idle(chat).await;

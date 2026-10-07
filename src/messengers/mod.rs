@@ -160,6 +160,11 @@ pub trait Messenger: Send + Sync {
     fn id(&self) -> &str;
     fn describe(&self) -> Description;
 
+    /// Threads this messenger knows of (the core adds the ones it has seen).
+    async fn threads(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Receives messages until the connection is lost for good, publishing them on `bus`.
     async fn run(&self, bus: Bus<Inbound>) -> Result<()>;
 

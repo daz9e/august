@@ -18,7 +18,9 @@ for (const level of ["log", "info", "warn", "error", "debug"] as const) {
 
 const write = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n");
 
-type Chat = { channel: string; chat: string };
+type Thread = { messenger: string; id: string };
+type Button = { id: string; label: string };
+type Message = string | { text: string; buttons?: Button[] };
 
 let nextId = 1;
 const waiting = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -58,16 +60,41 @@ function changed() {
   });
 }
 
-function context(chat: Chat | null) {
-  const noChat = () => Promise.reject(new Error("this call has no chat"));
+/** Asks in `thread`: the question with `options` as buttons; the answer is a press, a
+ * number, an option's name or the user's own words. Null after `timeout` ms. */
+async function ask(thread: Thread, question: string, options: string[], timeout = 300_000): Promise<string | null> {
+  const key = Math.random().toString(36).slice(2, 10);
+  const buttons = options.map((label, i) => ({ id: `${key}.${i}`, label }));
+  // Listen before sending, so a quick answer can't slip past.
+  const listener = await call("listen", { thread, buttons: buttons.map((b) => b.id), text: true });
+  const text = `❓ ${question}`;
+  const id = await call("send", { thread, message: { text, buttons } });
+  const reply = await call("next", { listener, timeout_ms: timeout });
+  let answer: string | null = null;
+  if (reply?.press) answer = options[buttons.findIndex((b) => b.id === reply.press)] ?? null;
+  else if (typeof reply?.text === "string") {
+    const n = Number(reply.text.trim());
+    const named = options.find((o) => o.toLowerCase() === reply.text.trim().toLowerCase());
+    answer = (Number.isInteger(n) && options[n - 1]) || named || reply.text;
+  }
+  await call("edit", { thread, id, message: `${text}\n→ ${answer ?? "⌛ no answer"}` }).catch(() => {});
+  return answer;
+}
+
+function context(thread: Thread | null) {
+  const need = (): Thread => {
+    if (!thread) throw new Error("this call has no thread");
+    return thread;
+  };
+  const inThread = (method: string, params: object) => (thread ? call(method, { thread, ...params }) : Promise.reject(new Error("this call has no thread")));
   return {
-    chat,
-    send: (text: string) => (chat ? call("send", { ...chat, text }) : noChat()),
-    prompt: (text: string) => (chat ? call("prompt", { ...chat, text }) : noChat()),
-    agent: (task: string, opts: object = {}) => (chat ? call("agent", { ...chat, task, opts }) : noChat()),
-    ask: (question: string, options: string[]) => (chat ? call("ask", { ...chat, question, options }) : noChat()),
-    approve: (action: string) => (chat ? call("approve", { ...chat, action }) : noChat()),
-    callTool: (name: string, input: unknown = {}) => (chat ? call("callTool", { ...chat, name, input }) : noChat()),
+    thread,
+    send: (message: Message) => inThread("send", { message }),
+    prompt: (text: string) => inThread("prompt", { text }),
+    agent: (task: string, opts: object = {}) => inThread("agent", { task, opts }),
+    ask: async (question: string, options: string[], opts: { timeout?: number } = {}) => ask(need(), question, options, opts.timeout),
+    approve: (action: string) => inThread("approve", { action }),
+    callTool: (name: string, input: unknown = {}) => inThread("callTool", { name, input }),
     llm: (prompt: string, opts: { system?: string } = {}) => call("llm", { prompt, system: opts.system }),
   };
 }
@@ -97,12 +124,18 @@ const api = {
     commands.set(cmd.replace(/^\//, ""), command);
     changed();
   },
-  send: (channel: string, chat: string, text: string) => call("send", { channel, chat, text }),
-  prompt: (channel: string, chat: string, text: string) => call("prompt", { channel, chat, text }),
+  messengers: () => call("messengers", {}),
+  send: (thread: Thread, message: Message) => call("send", { thread, message }),
+  edit: (thread: Thread, id: string, message: Message) => call("edit", { thread, id, message }),
+  listen: (thread: Thread, opts: { buttons?: string[]; text?: boolean } = {}) =>
+    call("listen", { thread, buttons: opts.buttons ?? [], text: opts.text ?? false }),
+  next: (listener: number, opts: { timeout?: number } = {}) => call("next", { listener, timeout_ms: opts.timeout ?? 300_000 }),
+  ask: (thread: Thread, question: string, options: string[], opts: { timeout?: number } = {}) => ask(thread, question, options, opts.timeout),
+  prompt: (thread: Thread, text: string) => call("prompt", { thread, text }),
 };
 
 async function handle(method: string, params: any): Promise<unknown> {
-  const ctx = context(params.ctx?.chat ?? null);
+  const ctx = context(params.ctx?.thread ?? null);
   switch (method) {
     case "event": {
       // Handlers run in order; each result is merged into the data the next one sees.

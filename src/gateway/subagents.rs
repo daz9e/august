@@ -25,7 +25,7 @@ impl Gateway {
             workspace: self.workspace.clone(),
             approver: Arc::new(self.approver(channel, id.clone(), None)),
             db: self.db.clone(),
-            origin: Some((id.messenger, id.id)),
+            origin: Some(id),
             files: None,
             extensions: Some(self.ext.clone()),
             unattended: true,

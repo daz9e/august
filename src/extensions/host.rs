@@ -4,6 +4,7 @@
 
 use super::Core;
 use crate::llm::ToolSpec;
+use crate::messengers::{Button, OutMessage, Thread};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;
@@ -182,27 +183,54 @@ impl Host {
     }
 }
 
+fn thread(params: &Value) -> anyhow::Result<Thread> {
+    let t = &params["thread"];
+    match (t["messenger"].as_str(), t["id"].as_str()) {
+        (Some(m), Some(id)) => Ok(Thread::new(m, id)),
+        _ => anyhow::bail!("this needs a thread ({{messenger, id}}); the call has none"),
+    }
+}
+
+fn message(params: &Value) -> anyhow::Result<OutMessage> {
+    let m = &params["message"];
+    let text = m.as_str().or(m["text"].as_str()).ok_or_else(|| anyhow::anyhow!("missing `message.text`"))?;
+    let buttons = m["buttons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|b| match (b["id"].as_str(), b["label"].as_str()) {
+            (Some(id), Some(label)) => Ok(Button { id: id.into(), label: label.into() }),
+            _ => Err(anyhow::anyhow!("a button needs `id` and `label`")),
+        })
+        .collect::<anyhow::Result<_>>()?;
+    Ok(OutMessage { text: text.into(), buttons })
+}
+
 /// A call from the extension into August.
 async fn serve(core: Option<&dyn Core>, method: &str, params: &Value) -> anyhow::Result<Value> {
     let core = core.ok_or_else(|| anyhow::anyhow!("August is not ready yet"))?;
     let arg = |k: &str| params[k].as_str().ok_or_else(|| anyhow::anyhow!("missing string `{k}`"));
     Ok(match method {
-        "send" => core.send(arg("channel")?, arg("chat")?, arg("text")?).await.map(|_| Value::Null)?,
-        "prompt" => core.prompt(arg("channel")?, arg("chat")?, arg("text")?).await.map(|_| Value::Null)?,
+        "messengers" => core.messengers().await?,
+        "send" => json!(core.send(&thread(params)?, message(params)?).await?),
+        "edit" => core.edit(&thread(params)?, arg("id")?, message(params)?).await.map(|_| Value::Null)?,
+        "listen" => {
+            let buttons: Vec<String> = serde_json::from_value(params["buttons"].clone()).unwrap_or_default();
+            json!(core.listen(&thread(params)?, buttons, params["text"] == true))
+        }
+        "next" => {
+            let listener = params["listener"].as_u64().ok_or_else(|| anyhow::anyhow!("missing `listener`"))?;
+            let timeout = Duration::from_millis(params["timeout_ms"].as_u64().unwrap_or(300_000));
+            core.next(listener, timeout).await?
+        }
+        "prompt" => core.prompt(&thread(params)?, arg("text")?).await.map(|_| Value::Null)?,
         "agent" => {
             let opts = serde_json::from_value(params["opts"].clone()).unwrap_or_default();
-            json!(core.agent(arg("channel")?, arg("chat")?, arg("task")?, opts).await?)
+            json!(core.agent(&thread(params)?, arg("task")?, opts).await?)
         }
-        "ask" => {
-            let options: Vec<String> = serde_json::from_value(params["options"].clone()).unwrap_or_default();
-            if options.is_empty() {
-                anyhow::bail!("ask needs at least one option");
-            }
-            json!(core.ask(arg("channel")?, arg("chat")?, arg("question")?, &options).await?)
-        }
-        "approve" => json!(core.approve(arg("channel")?, arg("chat")?, arg("action")?).await?),
+        "approve" => json!(core.approve(&thread(params)?, arg("action")?).await?),
         "callTool" => {
-            let (output, is_error) = core.call_tool(arg("channel")?, arg("chat")?, arg("name")?, &params["input"]).await?;
+            let (output, is_error) = core.call_tool(&thread(params)?, arg("name")?, &params["input"]).await?;
             json!({"output": output, "isError": is_error})
         }
         "llm" => json!(core.llm(arg("prompt")?, params["system"].as_str().filter(|s| !s.is_empty()).unwrap_or("You are a helpful assistant.")).await?),

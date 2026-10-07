@@ -26,9 +26,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
 use tokio::sync::{Mutex, Notify};
 
-/// How long `ctx.ask` waits for an answer.
-const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-
 struct Chat {
     agent: Mutex<Agent>,
     /// Messages sent while a turn runs.
@@ -44,6 +41,10 @@ pub struct Gateway {
     chats: Mutex<HashMap<Thread, Arc<Chat>>>,
     /// Waits for what threads send next (answers to questions).
     waits: Arc<waits::Waits>,
+    /// Extensions' listeners (`listen`) until they take their event with `next`.
+    listeners: StdMutex<HashMap<u64, tokio::sync::oneshot::Receiver<waits::Reply>>>,
+    /// When each thread last sent something (Unix seconds).
+    activity: StdMutex<HashMap<Thread, i64>>,
     provider: RwLock<Arc<dyn LlmProvider>>,
     provider_label: RwLock<String>,
     workspace: PathBuf,
@@ -53,7 +54,7 @@ pub struct Gateway {
     subagents: std::sync::atomic::AtomicU64,
 }
 
-/// What extensions can do in the gateway: message chats, start turns, run tools, ask the model.
+/// The core's primitives as extensions call them.
 struct ExtCore(Weak<Gateway>);
 
 impl ExtCore {
@@ -61,63 +62,99 @@ impl ExtCore {
         self.0.upgrade().ok_or_else(|| anyhow::anyhow!("August is shutting down"))
     }
 
-    fn channel(&self, channel: &str) -> Result<(Arc<Gateway>, Arc<dyn Messenger>)> {
+    fn messenger(&self, thread: &Thread) -> Result<(Arc<Gateway>, Arc<dyn Messenger>)> {
         let gw = self.gateway()?;
-        let ch = gw.channels.get(channel).cloned().ok_or_else(|| anyhow::anyhow!("channel `{channel}` is not running"))?;
-        Ok((gw, ch))
+        let m = gw.channels.get(&thread.messenger).cloned();
+        let m = m.ok_or_else(|| anyhow::anyhow!("messenger `{}` is not running", thread.messenger))?;
+        Ok((gw, m))
     }
 }
 
 #[async_trait]
 impl extensions::Core for ExtCore {
-    async fn send(&self, channel: &str, chat: &str, text: &str) -> Result<()> {
-        let (_, ch) = self.channel(channel)?;
-        ch.send(chat, &OutMessage::text(text)).await.map(|_| ())
+    async fn messengers(&self) -> Result<Value> {
+        let gw = self.gateway()?;
+        let seen = gw.activity.lock().unwrap().clone();
+        let active = seen.iter().max_by_key(|(_, at)| **at).map(|(t, _)| t.clone());
+        let mut all: Vec<&Arc<dyn Messenger>> = gw.channels.values().collect();
+        all.sort_by_key(|m| m.id().to_string());
+        let mut out = Vec::new();
+        for m in all {
+            let d = m.describe();
+            let mut ids = m.threads().await;
+            for t in seen.keys().filter(|t| t.messenger == d.id) {
+                if !ids.contains(&t.id) {
+                    ids.push(t.id.clone());
+                }
+            }
+            let threads: Vec<Value> = ids
+                .into_iter()
+                .map(|id| {
+                    let thread = Thread::new(&d.id, &id);
+                    serde_json::json!({"id": id, "active": active.as_ref() == Some(&thread), "last_seen": seen.get(&thread)})
+                })
+                .collect();
+            out.push(serde_json::json!({"id": d.id, "name": d.name, "capabilities": d.capabilities, "extra": d.extra, "threads": threads}));
+        }
+        Ok(Value::Array(out))
     }
 
-    async fn prompt(&self, channel: &str, chat: &str, text: &str) -> Result<()> {
-        let (gw, ch) = self.channel(channel)?;
-        let (id, text) = (Thread { messenger: channel.into(), id: chat.into() }, text.to_string());
-        // Not awaited: the caller may be inside a turn of that very chat.
-        tokio::spawn(async move { gw.deliver(ch, id, &text).await });
+    async fn send(&self, thread: &Thread, message: OutMessage) -> Result<String> {
+        let (_, m) = self.messenger(thread)?;
+        m.send(&thread.id, &message).await
+    }
+
+    async fn edit(&self, thread: &Thread, id: &str, message: OutMessage) -> Result<()> {
+        let (_, m) = self.messenger(thread)?;
+        m.edit(&thread.id, id, &message).await
+    }
+
+    fn listen(&self, thread: &Thread, buttons: Vec<String>, text: bool) -> u64 {
+        let Ok(gw) = self.gateway() else { return 0 };
+        let (id, rx) = gw.waits.add(thread.clone(), waits::Accept { buttons, text });
+        gw.listeners.lock().unwrap().insert(id, rx);
+        id
+    }
+
+    async fn next(&self, listener: u64, timeout: std::time::Duration) -> Result<Value> {
+        let gw = self.gateway()?;
+        let rx = gw.listeners.lock().unwrap().remove(&listener);
+        let rx = rx.ok_or_else(|| anyhow::anyhow!("no listener #{listener} (each one gives one event)"))?;
+        let reply = tokio::time::timeout(timeout, rx).await.ok().and_then(Result::ok);
+        gw.waits.remove(listener);
+        Ok(match reply {
+            Some(waits::Reply::Press(button)) => serde_json::json!({"press": button}),
+            Some(waits::Reply::Text(text)) => serde_json::json!({"text": text}),
+            None => Value::Null,
+        })
+    }
+
+    async fn prompt(&self, thread: &Thread, text: &str) -> Result<()> {
+        let (gw, m) = self.messenger(thread)?;
+        let (thread, text) = (thread.clone(), text.to_string());
+        // Not awaited: the caller may be inside a turn of that very thread.
+        tokio::spawn(async move { gw.deliver(m, thread, &text).await });
         Ok(())
     }
 
-    async fn agent(&self, channel: &str, chat: &str, task: &str, opts: extensions::AgentOpts) -> Result<String> {
-        let (gw, ch) = self.channel(channel)?;
-        gw.subagent(ch, Thread { messenger: channel.into(), id: chat.into() }, task, opts).await
+    async fn agent(&self, thread: &Thread, task: &str, opts: extensions::AgentOpts) -> Result<String> {
+        let (gw, m) = self.messenger(thread)?;
+        gw.subagent(m, thread.clone(), task, opts).await
     }
 
-    async fn approve(&self, channel: &str, chat: &str, action: &str) -> Result<bool> {
-        let (gw, ch) = self.channel(channel)?;
-        let approver = gw.approver(ch, Thread::new(channel, chat), None);
+    async fn approve(&self, thread: &Thread, action: &str) -> Result<bool> {
+        let (gw, m) = self.messenger(thread)?;
+        let approver = gw.approver(m, thread.clone(), None);
         Ok(crate::tools::Approver::approve(&approver, action).await)
     }
 
-    async fn ask(&self, channel: &str, chat: &str, question: &str, options: &[String]) -> Result<Option<String>> {
-        let (gw, ch) = self.channel(channel)?;
-        let thread = Thread::new(channel, chat);
-        let text = format!("❓ {question}");
-        let (message, answer) = approval::ask(&*ch, &gw.waits, &thread, &text, options, ASK_TIMEOUT).await?;
-        let answer = match answer {
-            Some(approval::Answer::Option(i)) => options.get(i).cloned(),
-            Some(approval::Answer::Text(t)) => Some(t),
-            None => None,
-        };
-        if ch.describe().capabilities.edit {
-            let done = format!("{text}\n→ {}", answer.as_deref().unwrap_or("⌛ no answer"));
-            ch.edit(chat, &message, &OutMessage::text(done)).await.ok();
-        }
-        Ok(answer)
-    }
-
-    async fn call_tool(&self, channel: &str, chat: &str, name: &str, input: &Value) -> Result<(String, bool)> {
-        let (gw, ch) = self.channel(channel)?;
+    async fn call_tool(&self, thread: &Thread, name: &str, input: &Value) -> Result<(String, bool)> {
+        let (gw, m) = self.messenger(thread)?;
         let ctx = ToolCtx {
             workspace: gw.workspace.clone(),
-            approver: Arc::new(gw.approver(ch, Thread::new(channel, chat), None)),
+            approver: Arc::new(gw.approver(m, thread.clone(), None)),
             db: gw.db.clone(),
-            origin: Some((channel.into(), chat.into())),
+            origin: Some(thread.clone()),
             files: None,
             extensions: Some(gw.ext.clone()),
             unattended: false,
@@ -154,6 +191,8 @@ impl Gateway {
             channels: channels.into_iter().map(|c| (c.id().to_string(), c)).collect(),
             chats: Mutex::new(HashMap::new()),
             waits: Arc::default(),
+            listeners: Default::default(),
+            activity: Default::default(),
             provider: RwLock::new(provider),
             provider_label: RwLock::new(label),
             workspace,
@@ -287,6 +326,7 @@ impl Gateway {
             return Ok(());
         };
         let chat = ev.thread.id.clone();
+        self.activity.lock().unwrap().insert(ev.thread.clone(), chrono::Utc::now().timestamp());
         // What something waits for (the answer to a question) goes there first.
         if self.waits.offer(&ev) {
             if let InboundKind::Press { ack, .. } = &ev.kind {
@@ -307,8 +347,7 @@ impl Gateway {
                 let (note, images, saved) = self.receive(&*channel, &files).await;
                 let mut text = [text, note].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
                 if self.ext.listens("message_in") {
-                    let origin = Some((ev.thread.messenger.clone(), chat.clone()));
-                    let data = self.ext.emit("message_in", serde_json::json!({"text": text, "files": saved}), &origin).await;
+                    let data = self.ext.emit("message_in", serde_json::json!({"text": text, "files": saved}), &Some(ev.thread.clone())).await;
                     if data["handled"] == true {
                         if let Some(reply) = data["reply"].as_str().filter(|r| !r.is_empty()) {
                             channel.send(&chat, &OutMessage::text(reply)).await?;

@@ -45,6 +45,6 @@ async fn the_user_can_answer_in_their_own_words() {
     chat.question().await;
     // Typing instead of pressing answers the open question; it doesn't start a new turn.
     chat.say("green, actually").await;
-    chat.wait_for("Noted: The user chose: green, actually").await;
+    chat.wait_for("Noted: The user answered in their own words: green, actually").await;
     assert_eq!(fake.llm_requests().len(), 2);
 }

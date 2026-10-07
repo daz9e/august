@@ -150,6 +150,12 @@ impl Messenger for Terminal {
         }
     }
 
+    async fn threads(&self) -> Vec<String> {
+        let mut open: Vec<String> = self.0.clients.lock().unwrap().keys().cloned().collect();
+        open.sort();
+        open
+    }
+
     async fn run(&self, bus: Bus<Inbound>) -> Result<()> {
         let path = socket_path();
         if UnixStream::connect(&path).await.is_ok() {

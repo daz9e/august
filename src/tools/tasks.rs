@@ -8,7 +8,7 @@ fn origin(ctx: &ToolCtx) -> Result<(&str, &str)> {
     }
     ctx.origin
         .as_ref()
-        .map(|(c, h)| (c.as_str(), h.as_str()))
+        .map(|t| (t.messenger.as_str(), t.id.as_str()))
         .ok_or_else(|| anyhow::anyhow!("scheduled tasks are only available in messenger chats (run `august serve`)"))
 }
 

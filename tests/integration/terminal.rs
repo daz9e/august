@@ -1,4 +1,4 @@
-//! The terminal is a channel of the same gateway as the messengers: commands, approvals,
+//! The terminal is a messenger of the same August as the others: commands, approvals,
 //! sub-agents and their reports work there too.
 
 use crate::support::*;

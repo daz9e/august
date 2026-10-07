@@ -60,28 +60,43 @@ leave it unchanged.
   about to see. Return `{ messages }` to change it for that call only (inject recalled notes,
   drop noise); the stored history stays as is. Keep tool_use/tool_result pairs intact.
 - `llm_result` `{ step, text, toolCalls: [{ name, input }], usage }`: after every model call.
-- `stop` `{}`: the user sent /stop; stop any loop of yours in that chat.
-- `session_start` `{ previous, session }`: the chat started a new conversation (`/new`).
+- `stop` `{}`: the user sent /stop; stop any loop of yours in that thread.
+- `session_start` `{ previous, session }`: the thread started a new conversation (`/new`).
 - `compaction` `{ before, after }`: older history was summarised (estimated tokens).
 
 `turn_end`, `llm_result`, `session_start` and `compaction` only observe: they run in the
 background and their result is ignored.
 
-`ctx.chat` is `{ channel, chat }` (`{ channel: "cli", chat: "local" }` in the terminal); `ctx.send(text)` messages that
-chat, `ctx.prompt(text)` hands it a message as if the user sent it (joins a running turn,
-or starts one). `august.send(channel, chat, text)`
-and `august.prompt(...)` do the same for any chat.
+`ctx.thread` is the thread the call belongs to: `{ messenger, id }`, e.g.
+`{ messenger: "telegram", id: "123" }` or a terminal window `{ messenger: "cli", id: "1" }`.
+
+Messengers and messages — August's primitives, usable for any thread:
+- `await august.messengers()` lists every messenger with what it can do (`capabilities`:
+  Markdown, buttons, edits, files, images, audio, threads, ...; plus free-form `extra`) and
+  its threads, the one the user wrote in last marked `active`.
+- `await august.send(thread, { text, buttons: [{ id, label }] })` sends a message (a plain
+  string works too) and returns its id; `august.edit(thread, id, message)` replaces it.
+  `ctx.send(message)` sends to `ctx.thread`.
+- To wait for the user: `const l = await august.listen(thread, { buttons: [...ids], text: true })`
+  *before* sending the question, then `await august.next(l, { timeout: 60_000 })` gives
+  `{ press: id }`, `{ text }` or null (timed out, or /stop or /new in that thread). What a
+  listener takes doesn't reach the agent. You decide how long to wait and what to do
+  without an answer (ask elsewhere, remind, give up).
+- `await ctx.ask(question, ["Yes", "Later"], { timeout })` (or `august.ask(thread, ...)`)
+  does all that: buttons, and the answer as the option pressed, numbered or named, the
+  user's own words, or null.
+- `ctx.prompt(text)` / `august.prompt(thread, text)` hand a thread a message as if the user
+  sent it (joins a running turn, or starts one).
 
 Calling into August:
 - `await ctx.callTool("read_file", { path: "notes.md" })` runs any agent tool (built-in,
-  MCP or another extension's) in that chat, through the `tool_call`/`tool_result` hooks and
-  the usual approvals; returns `{ output, isError }`.
+  MCP or another extension's) for that thread, through the `tool_call`/`tool_result` hooks
+  and the usual approvals; returns `{ output, isError }`.
 - `await ctx.llm(prompt, { system })` is one completion on the current model, without tools;
   returns the text.
 - `await ctx.agent(task, { system, tools, exclude })` runs a sub-agent with a fresh
   conversation and returns its final reply (`tools` limits it, `exclude` hides some).
-- `await ctx.ask(question, ["Yes", "Later"])` asks the user with buttons and returns the
-  chosen option, or null after 5 minutes; `await ctx.approve(action)` is a yes/no approval.
+- `await ctx.approve(action)` is August's own yes/no approval.
 - `august.workspace` is the agent's workspace folder.
 
 Tools can be registered (and removed with `august.unregisterTool(name)`) at any time, not

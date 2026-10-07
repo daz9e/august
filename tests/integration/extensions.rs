@@ -23,7 +23,7 @@ export default function (august: August) {
     name: "shout",
     description: "Uppercase some text",
     parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-    execute: ({ text }, ctx) => `${text.toUpperCase()} via ${ctx.chat?.channel}`,
+    execute: ({ text }, ctx) => `${text.toUpperCase()} via ${ctx.thread?.messenger}`,
   });
   august.on("message_in", ({ text }) =>
     text === "secret" ? { handled: true, reply: "intercepted" } : { text: text.replace("colour", "color") });
@@ -350,4 +350,56 @@ async fn extension_changes_its_tools_after_startup() {
     let first = &fake.llm_requests()[0];
     let tools: Vec<&str> = first["tools"].as_array().unwrap().iter().filter_map(|t| t["function"]["name"].as_str()).collect();
     assert!(tools.contains(&"late") && !tools.contains(&"early"), "{tools:?}");
+}
+
+const RELAY: &str = r#"
+import type { August } from "august";
+
+export default function (august: August) {
+  august.registerCommand("where", async () => {
+    const all = await august.messengers();
+    return all.map((m) => `${m.id}[buttons ${m.capabilities.buttons}]: ${m.threads.map((t) => t.id + (t.active ? "*" : "")).join(",")}`).join("; ");
+  });
+  // Asks in another window and reports the answer back here.
+  august.registerCommand("poke", async (id) => {
+    const answer = await august.ask({ messenger: "cli", id }, "Coffee?", ["Yes", "No"], { timeout: 10_000 });
+    return `answer: ${answer}`;
+  });
+  august.registerCommand("wait", async (_, ctx) => {
+    const l = await august.listen(ctx.thread!, { text: true });
+    return `got: ${JSON.stringify(await august.next(l, { timeout: 300 }))}`;
+  });
+}
+"#;
+
+#[tokio::test]
+async fn extensions_see_messengers_and_talk_to_any_thread() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("the agent answered"))).await;
+    let gw = august(&fake, Setup { home: &[("extensions/relay/index.ts", RELAY)], ..Default::default() }).await;
+    let mut first = gw.chat().await;
+    let mut second = gw.chat().await;
+
+    // Messengers describe themselves and list their threads, the latest one active.
+    second.ask("/help", "/where").await;
+    let wh = first.ask("/where", "cli[").await;
+    assert!(wh.contains("cli[buttons 9]: 1*,2"), "{wh}");
+
+    // A question asked in another thread: its buttons answer it…
+    first.say("/poke 2").await;
+    let q = second.question().await;
+    assert!(q.text.contains("Coffee?"), "{}", q.text);
+    second.press(&q.button("No")).await;
+    first.wait_for("answer: No").await;
+    // …or the user's own words, which don't reach the agent as a message.
+    first.say("/poke 2").await;
+    second.question().await;
+    second.say("maybe later").await;
+    first.wait_for("answer: maybe later").await;
+    assert!(fake.llm_requests().is_empty(), "an answer started a turn");
+
+    // A listener without an answer gives up after its timeout.
+    first.ask("/wait", "got: null").await;
 }

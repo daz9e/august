@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::oneshot;
 
@@ -44,59 +45,114 @@ impl Link {
     }
 }
 
-/// A conversation: `channel` (`telegram`, `cli`, ...) and `chat`.
-#[derive(Clone, Debug)]
-pub struct Chat {
-    pub channel: String,
-    pub chat: String,
+/// A conversation in a messenger: a Telegram chat, a terminal window, ...
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Thread {
+    pub messenger: String,
+    pub id: String,
+}
+
+impl Thread {
+    /// `messenger:id`.
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.messenger, self.id)
+    }
+}
+
+/// A button under a message; a press comes back with its `id`.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Button {
+    pub id: String,
+    pub label: String,
+}
+
+/// What a listener took (`August::next`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Reply {
+    Press(String),
+    Text(String),
+}
+
+impl Link {
+    async fn send(&self, thread: &Thread, text: &str, buttons: &[Button]) -> Result<String> {
+        let v = self.call("send", json!({"thread": thread, "message": {"text": text, "buttons": buttons}})).await?;
+        Ok(v.as_str().unwrap_or_default().to_string())
+    }
+
+    async fn ask(&self, thread: &Thread, question: &str, options: &[String], timeout: Duration) -> Result<Option<String>> {
+        let key = format!("{:x}", self.next_id.fetch_add(1, Ordering::Relaxed) ^ std::process::id() as u64);
+        let buttons: Vec<Button> = options.iter().enumerate().map(|(i, o)| Button { id: format!("{key}.{i}"), label: o.clone() }).collect();
+        // Listen before sending, so a quick answer can't slip past.
+        let ids: Vec<&str> = buttons.iter().map(|b| b.id.as_str()).collect();
+        let listener = self.call("listen", json!({"thread": thread, "buttons": ids, "text": true})).await?;
+        let text = format!("❓ {question}");
+        let id = self.send(thread, &text, &buttons).await?;
+        let reply = self.call("next", json!({"listener": listener, "timeout_ms": timeout.as_millis() as u64})).await?;
+        let answer = match (reply["press"].as_str(), reply["text"].as_str()) {
+            (Some(press), _) => buttons.iter().position(|b| b.id == press).map(|i| options[i].clone()),
+            (_, Some(t)) => {
+                let t = t.trim();
+                let by_number = t.parse::<usize>().ok().and_then(|n| n.checked_sub(1)).and_then(|i| options.get(i));
+                let by_name = options.iter().find(|o| o.eq_ignore_ascii_case(t));
+                Some(by_number.or(by_name).cloned().unwrap_or_else(|| t.to_string()))
+            }
+            _ => None,
+        };
+        let done = format!("{text}\n→ {}", answer.as_deref().unwrap_or("⌛ no answer"));
+        self.call("edit", json!({"thread": thread, "id": id, "message": done})).await.ok();
+        Ok(answer)
+    }
 }
 
 /// What a tool, command or hook runs for, and the calls back into August.
 #[derive(Clone)]
 pub struct Ctx {
     link: Arc<Link>,
-    pub chat: Option<Chat>,
+    /// The thread the call belongs to.
+    pub thread: Option<Thread>,
 }
 
 impl Ctx {
-    async fn chat_call(&self, method: &str, mut params: Value) -> Result<Value> {
-        let chat = self.chat.as_ref().ok_or_else(|| anyhow!("this call has no chat"))?;
-        params["channel"] = json!(chat.channel);
-        params["chat"] = json!(chat.chat);
+    fn thread(&self) -> Result<&Thread> {
+        self.thread.as_ref().ok_or_else(|| anyhow!("this call has no thread"))
+    }
+
+    async fn in_thread(&self, method: &str, mut params: Value) -> Result<Value> {
+        params["thread"] = json!(self.thread()?);
         self.link.call(method, params).await
     }
 
-    /// `channel:chat`, or `cli` without a chat.
+    /// `messenger:id` of the thread, or `none`.
     pub fn key(&self) -> String {
-        self.chat.as_ref().map(|c| format!("{}:{}", c.channel, c.chat)).unwrap_or_else(|| "cli".into())
+        self.thread.as_ref().map(Thread::key).unwrap_or_else(|| "none".into())
     }
 
-    /// Sends a Markdown message to the chat.
-    pub async fn send(&self, text: &str) -> Result<()> {
-        self.chat_call("send", json!({"text": text})).await.map(drop)
+    /// Sends a Markdown message to the thread; returns its id.
+    pub async fn send(&self, text: &str) -> Result<String> {
+        self.link.send(self.thread()?, text, &[]).await
     }
 
-    /// Hands the chat `text` as if the user sent it: joins the running turn, or starts one.
+    /// Hands the thread `text` as if the user sent it: joins the running turn, or starts one.
     pub async fn prompt(&self, text: &str) -> Result<()> {
-        self.chat_call("prompt", json!({"text": text})).await.map(drop)
+        self.in_thread("prompt", json!({"text": text})).await.map(drop)
     }
 
-    /// Runs a sub-agent with a fresh conversation in the chat; returns its final reply.
+    /// Runs a sub-agent with a fresh conversation for the thread; returns its final reply.
     /// `opts`: `{system, tools, exclude}`.
     pub async fn agent(&self, task: &str, opts: Value) -> Result<String> {
-        let v = self.chat_call("agent", json!({"task": task, "opts": opts})).await?;
+        let v = self.in_thread("agent", json!({"task": task, "opts": opts})).await?;
         Ok(v.as_str().unwrap_or_default().to_string())
     }
 
-    /// Asks the user to pick one of `options`; `None` if they didn't answer.
-    pub async fn ask(&self, question: &str, options: &[String]) -> Result<Option<String>> {
-        let v = self.chat_call("ask", json!({"question": question, "options": options})).await?;
-        Ok(v.as_str().map(String::from))
+    /// Asks in the thread with `options` as buttons; the answer is the option pressed,
+    /// numbered or named, the user's own words, or `None` after `timeout`.
+    pub async fn ask(&self, question: &str, options: &[String], timeout: Duration) -> Result<Option<String>> {
+        self.link.ask(self.thread()?, question, options, timeout).await
     }
 
-    /// Asks the user whether `action` may run.
+    /// August's approval: may `action` run?
     pub async fn approve(&self, action: &str) -> Result<bool> {
-        Ok(self.chat_call("approve", json!({"action": action})).await? == true)
+        Ok(self.in_thread("approve", json!({"action": action})).await? == true)
     }
 
     /// One completion on the configured model, without tools.
@@ -157,6 +213,47 @@ impl August {
     /// The agent's workspace folder (absolute).
     pub fn workspace(&self) -> &PathBuf {
         &self.0.workspace
+    }
+
+    /// Every messenger: description, capabilities and threads (see `august.d.ts`).
+    pub async fn messengers(&self) -> Result<Value> {
+        self.0.link.call("messengers", json!({})).await
+    }
+
+    /// Sends a Markdown message with `buttons` to any thread; returns its id.
+    pub async fn send(&self, thread: &Thread, text: &str, buttons: &[Button]) -> Result<String> {
+        self.0.link.send(thread, text, buttons).await
+    }
+
+    pub async fn edit(&self, thread: &Thread, id: &str, text: &str) -> Result<()> {
+        self.0.link.call("edit", json!({"thread": thread, "id": id, "message": text})).await.map(drop)
+    }
+
+    /// Starts listening in `thread` for a press of one of `buttons` or (with `text`) a text
+    /// message; what it takes doesn't reach the agent. Listen before sending the question.
+    pub async fn listen(&self, thread: &Thread, buttons: &[&str], text: bool) -> Result<u64> {
+        let v = self.0.link.call("listen", json!({"thread": thread, "buttons": buttons, "text": text})).await?;
+        v.as_u64().ok_or_else(|| anyhow!("bad listener id"))
+    }
+
+    /// What the listener took, or `None` after `timeout` (or /stop, /new in the thread).
+    pub async fn next(&self, listener: u64, timeout: Duration) -> Result<Option<Reply>> {
+        let v = self.0.link.call("next", json!({"listener": listener, "timeout_ms": timeout.as_millis() as u64})).await?;
+        Ok(match (v["press"].as_str(), v["text"].as_str()) {
+            (Some(p), _) => Some(Reply::Press(p.into())),
+            (_, Some(t)) => Some(Reply::Text(t.into())),
+            _ => None,
+        })
+    }
+
+    /// `Ctx::ask` for any thread.
+    pub async fn ask(&self, thread: &Thread, question: &str, options: &[String], timeout: Duration) -> Result<Option<String>> {
+        self.0.link.ask(thread, question, options, timeout).await
+    }
+
+    /// Hands `thread` a message as if the user sent it.
+    pub async fn prompt(&self, thread: &Thread, text: &str) -> Result<()> {
+        self.0.link.call("prompt", json!({"thread": thread, "text": text})).await.map(drop)
     }
 
     /// A tool the model can call; `run` returns its output, an error is reported to the model.
@@ -271,11 +368,8 @@ impl August {
             if let Some(method) = msg["method"].as_str().map(String::from) {
                 let (me, link) = (self.clone(), link.clone());
                 tokio::spawn(async move {
-                    let chat = msg["params"]["ctx"]["chat"].as_object().map(|c| Chat {
-                        channel: str_of(c, "channel"),
-                        chat: str_of(c, "chat"),
-                    });
-                    let ctx = Ctx { link: link.clone(), chat };
+                    let thread = serde_json::from_value(msg["params"]["ctx"]["thread"].clone()).ok();
+                    let ctx = Ctx { link: link.clone(), thread };
                     let reply = match me.handle(&method, &msg["params"], ctx).await {
                         Ok(result) => json!({"id": msg["id"], "result": result}),
                         Err(e) => {
@@ -299,10 +393,6 @@ impl August {
 fn stopped(data: &Map<String, Value>) -> bool {
     let block = data.get("block");
     block == Some(&Value::Bool(true)) || block.and_then(Value::as_str).is_some_and(|s| !s.is_empty()) || data.get("handled") == Some(&Value::Bool(true))
-}
-
-fn str_of(c: &Map<String, Value>, k: &str) -> String {
-    c.get(k).and_then(Value::as_str).unwrap_or_default().to_string()
 }
 
 /// `s` cut to `max` characters, noting how much was cut.

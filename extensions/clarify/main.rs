@@ -1,8 +1,12 @@
-//! `clarify`: the agent asks the user a question with a few answers to tap, and waits.
+//! `clarify`: the agent asks the user a question with a few answers to tap (or answer in
+//! their own words) and waits, here up to ten minutes.
 
 use anyhow::bail;
 use august_ext::{August, str_arg};
 use serde_json::json;
+use std::time::Duration;
+
+const WAIT: Duration = Duration::from_secs(600);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -33,9 +37,10 @@ async fn main() {
             if question.is_empty() || options.len() < 2 {
                 bail!("need a question and at least 2 options");
             }
-            Ok(match ctx.ask(question, &options).await? {
-                Some(answer) => format!("The user chose: {answer}"),
-                None => "The user didn't answer within 5 minutes.".into(),
+            Ok(match ctx.ask(question, &options, WAIT).await? {
+                Some(answer) if options.contains(&answer) => format!("The user chose: {answer}"),
+                Some(words) => format!("The user answered in their own words: {words}"),
+                None => "The user didn't answer within 10 minutes.".into(),
             })
         },
     );

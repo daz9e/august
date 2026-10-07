@@ -239,6 +239,11 @@ impl Messenger for Telegram {
         ID
     }
 
+    async fn threads(&self) -> Vec<String> {
+        // A private chat with a user has the user's id.
+        self.allowed.iter().map(|u| u.to_string()).collect()
+    }
+
     fn describe(&self) -> Description {
         Description {
             id: ID.into(),

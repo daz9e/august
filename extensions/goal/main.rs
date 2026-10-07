@@ -40,7 +40,7 @@ async fn judge(goals: Shared, max_turns: u32, data: Value, ctx: Ctx) -> anyhow::
         Ok(v) => v.trim().to_string(),
         Err(e) => {
             goals.lock().unwrap().by_chat.remove(&k);
-            return ctx.send(&format!("⚠️ Could not check the goal, pausing it: {e:#}")).await;
+            return ctx.send(&format!("⚠️ Could not check the goal, pausing it: {e:#}")).await.map(drop);
         }
     };
     let turns = {
@@ -59,14 +59,14 @@ async fn judge(goals: Shared, max_turns: u32, data: Value, ctx: Ctx) -> anyhow::
         }
     };
     let Some(turns) = turns else {
-        return ctx.send(&format!("🎯 Goal reached: {}", goal.text)).await;
+        return ctx.send(&format!("🎯 Goal reached: {}", goal.text)).await.map(drop);
     };
     let rest = verdict.strip_prefix("CONTINUE").unwrap_or(&verdict);
     let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace()).trim();
     let missing = if rest.is_empty() { "the goal isn't reached yet" } else { rest };
     if turns >= max_turns {
         goals.lock().unwrap().by_chat.remove(&k);
-        return ctx.send(&format!("⏸ Goal paused after {turns} turns. Still missing: {missing}\nSet it again with /goal to continue.")).await;
+        return ctx.send(&format!("⏸ Goal paused after {turns} turns. Still missing: {missing}\nSet it again with /goal to continue.")).await.map(drop);
     }
     ctx.prompt(&format!("[Goal not reached yet: {missing}] Keep working towards the goal: {}", goal.text)).await
 }

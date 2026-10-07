@@ -103,7 +103,7 @@ impl Gateway {
             workspace: self.workspace.clone(),
             approver,
             db: self.db.clone(),
-            origin: Some((id.messenger.clone(), chat.to_string())),
+            origin: Some(id.clone()),
             files: Some(Arc::new(ChatFiles(tx.clone()))),
             extensions: Some(self.ext.clone()),
             unattended: scheduled,

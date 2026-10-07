@@ -2,27 +2,50 @@
 // (type-only imports are erased when bun runs the file).
 
 declare module "august" {
-  /** A conversation: `{ channel: "telegram", chat: "123" }`, or `{ channel: "cli", chat: "local" }` in the terminal. */
-  export type Chat = { channel: string; chat: string };
+  /** A conversation in a messenger: a Telegram chat (`{ messenger: "telegram", id: "123" }`),
+   *  a terminal window (`{ messenger: "cli", id: "1" }`), ... */
+  export type Thread = { messenger: string; id: string };
+
+  /** A button under a message; a press comes back with its `id`. */
+  export type Button = { id: string; label: string };
+  /** What to send: Markdown text, optionally with buttons. Each messenger renders it its own way. */
+  export type OutMessage = string | { text: string; buttons?: Button[] };
+
+  /** What a messenger says about itself. */
+  export interface Messenger {
+    id: string;
+    name: string;
+    capabilities: {
+      markdown: boolean; max_len: number; buttons: number; edit: boolean; edit_interval_ms: number;
+      files_in: boolean; files_out: boolean; images: boolean; audio_in: boolean;
+      commands: boolean; typing: boolean; threads: boolean;
+    };
+    /** Anything else it offers, free form. */
+    extra: Record<string, unknown>;
+    /** Threads it knows of; `active` is the one the user wrote in last. */
+    threads: { id: string; active: boolean; last_seen: number | null }[];
+  }
+
+  /** What a listener took: a button press or a text message; null after the timeout or /stop. */
+  export type Reply = { press: string } | { text: string } | null;
 
   export interface Context {
-    /** The chat the event, tool call or command belongs to. */
-    chat: Chat | null;
-    /** Sends a Markdown message to that chat. */
-    send(text: string): Promise<void>;
-    /** Hands the chat `text` as if the user sent it: joins the running turn, or starts one. */
+    /** The thread the event, tool call or command belongs to (null outside one). */
+    thread: Thread | null;
+    /** Sends a message to that thread; resolves to its id (for `august.edit`). */
+    send(message: OutMessage): Promise<string>;
+    /** Hands the thread `text` as if the user sent it: joins the running turn, or starts one. */
     prompt(text: string): Promise<void>;
-    /** Runs a sub-agent in this chat: a fresh conversation (it sees nothing of the chat),
-     *  the chat's approvals, nobody to answer questions. Resolves to its final reply.
+    /** Runs a sub-agent for this thread: a fresh conversation (it sees nothing of the thread),
+     *  the thread's approvals, nobody to answer questions. Resolves to its final reply.
      *  `system` is added to the base system prompt; `tools` limits it to those tools,
      *  `exclude` hides some. */
     agent(task: string, opts?: { system?: string; tools?: string[]; exclude?: string[] }): Promise<string>;
-    /** Asks the user to pick one of `options` (buttons in a chat, a numbered list in the
-     *  terminal); resolves to the chosen option, or null if they didn't answer in 5 minutes. */
-    ask(question: string, options: string[]): Promise<string | null>;
-    /** Asks the user (button or prompt) whether `action` may run; resolves to their answer. */
+    /** `august.ask` in this thread. */
+    ask(question: string, options: string[], opts?: { timeout?: number }): Promise<string | null>;
+    /** Asks the user whether `action` may run (August's approval: Allow / Deny, 5 minutes). */
     approve(action: string): Promise<boolean>;
-    /** Runs any agent tool (built-in, MCP or extension) in that chat, with its hooks and approvals. */
+    /** Runs any agent tool (built-in, MCP or extension) for this thread, with its hooks and approvals. */
     callTool(name: string, input?: object): Promise<{ output: string; isError: boolean }>;
     /** One completion on the configured model, without tools; returns the text. */
     llm(prompt: string, opts?: { system?: string }): Promise<string>;
@@ -52,7 +75,7 @@ declare module "august" {
     /** A turn finished with `reply` (observe only; runs in the background). `unattended`:
      *  a scheduled task or a sub-agent, not the user's conversation. */
     turn_end: { text: string; reply: string; unattended: boolean };
-    /** The user sent /stop in the chat (observe only). */
+    /** The user sent /stop in the thread (observe only). */
     stop: {};
     /** Before each model call of a turn; `step` counts from 0, `system` is the full prompt. */
     llm_call: { step: number; system: string };
@@ -60,7 +83,7 @@ declare module "august" {
     context: { step: number; messages: Message[] };
     /** After each model call (observe only; background). */
     llm_result: { step: number; text: string; toolCalls: { name: string; input: any }[]; usage: Usage };
-    /** The chat started a new conversation, e.g. with /new (observe only; background). */
+    /** The thread started a new conversation, e.g. with /new (observe only; background). */
     session_start: { previous: string; session: string };
     /** Older history was summarised; estimated tokens (observe only; background). */
     compaction: { before: number; after: number };
@@ -119,7 +142,22 @@ declare module "august" {
     unregisterTool(name: string): void;
     /** `/name` in Telegram and the terminal. */
     registerCommand(name: string, command: Command | Command["handler"]): void;
-    send(channel: string, chat: string, text: string): Promise<void>;
-    prompt(channel: string, chat: string, text: string): Promise<void>;
+    /** Every messenger with its description and threads. */
+    messengers(): Promise<Messenger[]>;
+    /** Sends a message to any thread; resolves to its id. */
+    send(thread: Thread, message: OutMessage): Promise<string>;
+    /** Replaces a sent message (where the messenger can edit). */
+    edit(thread: Thread, id: string, message: OutMessage): Promise<void>;
+    /** Starts listening in `thread` for a press of one of `buttons` and/or (`text: true`) a text
+     *  message; what it takes doesn't reach the agent. Listen before you send the question. */
+    listen(thread: Thread, opts: { buttons?: string[]; text?: boolean }): Promise<number>;
+    /** Waits for what the listener takes (default timeout 5 minutes); ends the listener. */
+    next(listener: number, opts?: { timeout?: number }): Promise<Reply>;
+    /** Asks in `thread` with `options` as buttons and waits (default 5 minutes): resolves to
+     *  the option pressed, numbered or named, the user's own words, or null. Built on
+     *  listen + send + next. */
+    ask(thread: Thread, question: string, options: string[], opts?: { timeout?: number }): Promise<string | null>;
+    /** Hands `thread` a message as if the user sent it. */
+    prompt(thread: Thread, text: string): Promise<void>;
   }
 }
