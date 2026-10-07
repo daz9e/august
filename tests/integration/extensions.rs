@@ -403,3 +403,29 @@ async fn extensions_see_messengers_and_talk_to_any_thread() {
     // A listener without an answer gives up after its timeout.
     first.ask("/wait", "got: null").await;
 }
+
+const HINTS: &str = r###"export default function (august) {
+  august.registerPromptSection("hints", "## Hints\nHINT-ONE");
+  august.registerCommand("hint", (text) => { august.registerPromptSection("hints", `## Hints\n${text}`); return "hinted"; });
+}"###;
+
+#[tokio::test]
+async fn extensions_add_prompt_sections_fixed_per_conversation() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("ok"))).await;
+    let gw = august(&fake, Setup { home: &[("extensions/hints/index.ts", HINTS)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    let system = |i: usize| fake.llm_requests()[i]["messages"][0]["content"].as_str().unwrap().to_string();
+
+    chat.ask("first", "ok").await;
+    assert!(system(0).contains("## Hints\nHINT-ONE"), "{}", system(0));
+    // A changed section waits for the next conversation, so the prompt stays cacheable.
+    chat.ask("/hint HINT-TWO", "hinted").await;
+    chat.ask("second", "ok").await;
+    assert_eq!(system(1), system(0));
+    chat.ask("/new", "new conversation").await;
+    chat.ask("third", "ok").await;
+    assert!(system(2).contains("HINT-TWO") && !system(2).contains("HINT-ONE"), "{}", system(2));
+}

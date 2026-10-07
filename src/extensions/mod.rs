@@ -442,6 +442,11 @@ impl Extensions {
         }))
     }
 
+    /// Every running extension's prompt sections, as one block for the system prompt.
+    pub fn prompt_sections(&self) -> String {
+        self.running().iter().flat_map(|(_, h)| h.manifest().sections.clone()).map(|(_, text)| format!("\n\n{}", text.trim())).collect()
+    }
+
     /// `(name, description)` of extension commands, minus names in `reserved`.
     pub fn commands(&self, reserved: &[&str]) -> Vec<(String, String)> {
         let mut seen: HashSet<String> = reserved.iter().map(|s| s.to_string()).collect();
@@ -475,6 +480,9 @@ impl Extensions {
                 }
                 if !m.events.is_empty() {
                     parts.push(format!("hooks: {}", list(m.events.clone())));
+                }
+                if !m.sections.is_empty() {
+                    parts.push(format!("prompt: {}", list(m.sections.iter().map(|(n, _)| n.clone()).collect())));
                 }
                 let replaced: Vec<_> = m.tools.iter().filter(|t| builtin.contains(&t.name)).map(|t| t.name.clone()).collect();
                 if !replaced.is_empty() {

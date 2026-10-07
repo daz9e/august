@@ -28,6 +28,8 @@ pub struct Manifest {
     pub tools: Vec<ToolSpec>,
     pub commands: Vec<(String, String)>,
     pub events: Vec<String>,
+    /// `(name, text)` of sections for the system prompt.
+    pub sections: Vec<(String, String)>,
 }
 
 pub struct Host {
@@ -256,5 +258,9 @@ fn parse_manifest(params: &Value) -> Manifest {
             .filter_map(|c| Some((c["name"].as_str()?.to_string(), c["description"].as_str().unwrap_or_default().to_string())))
             .collect(),
         events: list("events").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
+        sections: list("sections")
+            .iter()
+            .filter_map(|c| Some((c["name"].as_str()?.to_string(), c["text"].as_str().unwrap_or_default().to_string())))
+            .collect(),
     }
 }

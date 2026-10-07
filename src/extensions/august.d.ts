@@ -23,7 +23,7 @@ declare module "august" {
     /** Anything else it offers, free form. */
     extra: Record<string, unknown>;
     /** Threads it knows of; `active` is the one the user wrote in last. */
-    threads: { id: string; active: boolean; last_seen: number | null }[];
+    threads: { id: string; active: boolean; /** Unix ms of the last message from it. */ last_seen: number | null }[];
   }
 
   /** What a listener took: a button press or a text message; null after the timeout or /stop. */
@@ -140,6 +140,10 @@ declare module "august" {
     /** May be called any time; tools added or removed after setup show up from the next model call. */
     registerTool<P = any>(tool: Tool<P>): void;
     unregisterTool(name: string): void;
+    /** A section of the system prompt (Markdown, e.g. "## Reminders\n..."): how and when the
+     *  model should use what this extension offers. Fixed for each conversation, so a change
+     *  shows up from the next one (`/new`). Registering a name again replaces it. */
+    registerPromptSection(name: string, text: string): void;
     /** `/name` in Telegram and the terminal. */
     registerCommand(name: string, command: Command | Command["handler"]): void;
     /** Every messenger with its description and threads. */

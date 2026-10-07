@@ -99,6 +99,10 @@ Calling into August:
 - `await ctx.approve(action)` is August's own yes/no approval.
 - `august.workspace` is the agent's workspace folder.
 
+`august.registerPromptSection(name, text)` adds a section to the system prompt (e.g.
+"## Reminders" with when to use your tools). The prompt is fixed for a conversation so the
+provider can cache it: a new or changed section shows up from the next conversation.
+
 Tools can be registered (and removed with `august.unregisterTool(name)`) at any time, not
 only during setup, e.g. once a remote service answers; the model sees them from its next
 call.

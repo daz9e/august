@@ -43,7 +43,7 @@ pub struct Gateway {
     waits: Arc<waits::Waits>,
     /// Extensions' listeners (`listen`) until they take their event with `next`.
     listeners: StdMutex<HashMap<u64, tokio::sync::oneshot::Receiver<waits::Reply>>>,
-    /// When each thread last sent something (Unix seconds).
+    /// When each thread last sent something (Unix milliseconds).
     activity: StdMutex<HashMap<Thread, i64>>,
     provider: RwLock<Arc<dyn LlmProvider>>,
     provider_label: RwLock<String>,
@@ -326,7 +326,7 @@ impl Gateway {
             return Ok(());
         };
         let chat = ev.thread.id.clone();
-        self.activity.lock().unwrap().insert(ev.thread.clone(), chrono::Utc::now().timestamp());
+        self.activity.lock().unwrap().insert(ev.thread.clone(), chrono::Utc::now().timestamp_millis());
         // What something waits for (the answer to a question) goes there first.
         if self.waits.offer(&ev) {
             if let InboundKind::Press { ack, .. } = &ev.kind {

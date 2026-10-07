@@ -88,14 +88,16 @@ pub fn list() -> Vec<Skill> {
 
 /// System-prompt section listing the available skills (empty when there are none).
 pub fn prompt_section() -> String {
+    let mut s = String::from(
+        "\n\n## Skills\nAfter solving a non-trivial, repeatable task, offer to save the procedure \
+         with `save_skill`; when a skill turns out wrong or incomplete, fix it with `edit_skill`.",
+    );
     let skills = list();
     if skills.is_empty() {
-        return String::new();
+        return s;
     }
-    let mut s = String::from(
-        "\n\n## Skills\nThese skills hold instructions for specific tasks. When one matches the \
-         request, call `load_skill` with its name and follow it.\n",
-    );
+    s += "\nThese skills hold instructions for specific tasks. When one matches the request, call \
+          `load_skill` with its name and follow it.\n";
     for k in skills {
         s += &format!("- {}: {}\n", k.name, k.description);
     }
