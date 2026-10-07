@@ -239,9 +239,9 @@ fn status() -> Result<()> {
 
 /// Sets up a messenger (Telegram, ...): token, owner pairing, allowlist.
 async fn connect(which: Option<&str>) -> Result<()> {
-    let defs = crate::channels::registry();
+    let defs = crate::messengers::registry();
     let def = match which {
-        Some(id) => crate::channels::def(id).ok_or_else(|| {
+        Some(id) => crate::messengers::def(id).ok_or_else(|| {
             let ids: Vec<_> = defs.iter().map(|d| d.id()).collect();
             anyhow::anyhow!("unknown messenger: {id} ({})", ids.join(" | "))
         })?,

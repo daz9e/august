@@ -5,10 +5,10 @@ mod api;
 mod markdown;
 
 use super::{
-    Attachment, Button, Channel, ChannelDef, ChatId, CommandSpec, Inbound, InboundKind, Limits, User,
+    Attachment, Button, Messenger, MessengerDef, Thread, CommandSpec, Inbound, InboundKind, Limits, User,
     parse_command,
 };
-use crate::channels::bus::Bus;
+use crate::messengers::bus::Bus;
 use crate::config;
 use anyhow::{Context, Result, bail};
 use api::Api;
@@ -92,9 +92,9 @@ fn display_name(from: &Value) -> String {
 }
 
 fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
-    let chat_of = |id: i64| ChatId {
-        channel: ID.into(),
-        chat: id.to_string(),
+    let chat_of = |id: i64| Thread {
+        messenger: ID.into(),
+        id: id.to_string(),
     };
 
     if let Some(cb) = u.get("callback_query") {
@@ -109,7 +109,7 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
             return Parsed::Deny(chat, user);
         }
         return Parsed::Event(Inbound {
-            chat: chat_of(chat),
+            thread: chat_of(chat),
             user: User {
                 id: user.to_string(),
                 name: display_name(&cb["from"]),
@@ -161,7 +161,7 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
         }
     };
     Parsed::Event(Inbound {
-        chat: chat_of(chat),
+        thread: chat_of(chat),
         user: User {
             id: user.to_string(),
             name: display_name(&m["from"]),
@@ -234,7 +234,7 @@ fn plain(md: &str) -> String {
 }
 
 #[async_trait]
-impl Channel for TelegramChannel {
+impl Messenger for TelegramChannel {
     fn id(&self) -> &str {
         ID
     }
@@ -418,7 +418,7 @@ fn theme() -> ColorfulTheme {
 }
 
 #[async_trait]
-impl ChannelDef for TelegramDef {
+impl MessengerDef for TelegramDef {
     fn id(&self) -> &'static str {
         ID
     }
@@ -431,7 +431,7 @@ impl ChannelDef for TelegramDef {
         Ok(load_config()?.is_some())
     }
 
-    fn build(&self) -> Result<Option<Arc<dyn Channel>>> {
+    fn build(&self) -> Result<Option<Arc<dyn Messenger>>> {
         let Some(cfg) = load_config()? else {
             return Ok(None);
         };

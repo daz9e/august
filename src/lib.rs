@@ -3,7 +3,7 @@
 //! implement and compose; see `.project/concept.md`.
 
 mod agent;
-pub mod channels;
+pub mod messengers;
 pub mod cli;
 mod config;
 mod db;

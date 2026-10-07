@@ -1,6 +1,6 @@
 //! Questions as chat buttons: approvals (Allow / Deny) and `ctx.ask` with any options.
 
-use crate::channels::{Button, Channel};
+use crate::messengers::{Button, Messenger};
 use crate::tools::Approver;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(300);
 pub(super) type Pending = Arc<StdMutex<HashMap<String, oneshot::Sender<String>>>>;
 
 pub(super) struct ChatApprover {
-    pub(super) channel: Arc<dyn Channel>,
+    pub(super) channel: Arc<dyn Messenger>,
     pub(super) chat: String,
     pub(super) pending: Pending,
 }

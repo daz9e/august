@@ -9,10 +9,10 @@ mod subagents;
 mod turn;
 
 use crate::agent::{self, Agent};
-use crate::channels::bus::Bus;
+use crate::messengers::bus::Bus;
 use crate::db::Db;
 use crate::extensions::{self, Extensions};
-use crate::channels::{Channel, ChatId, Inbound, InboundKind};
+use crate::messengers::{Messenger, Thread, Inbound, InboundKind};
 use crate::llm::{LlmProvider, Message};
 use crate::llm::providers;
 use crate::scheduler::TaskRunner;
@@ -36,8 +36,8 @@ struct Chat {
 }
 
 pub struct Gateway {
-    channels: HashMap<String, Arc<dyn Channel>>,
-    chats: Mutex<HashMap<ChatId, Arc<Chat>>>,
+    channels: HashMap<String, Arc<dyn Messenger>>,
+    chats: Mutex<HashMap<Thread, Arc<Chat>>>,
     pending: approval::Pending,
     provider: RwLock<Arc<dyn LlmProvider>>,
     provider_label: RwLock<String>,
@@ -56,7 +56,7 @@ impl ExtCore {
         self.0.upgrade().ok_or_else(|| anyhow::anyhow!("August is shutting down"))
     }
 
-    fn channel(&self, channel: &str) -> Result<(Arc<Gateway>, Arc<dyn Channel>)> {
+    fn channel(&self, channel: &str) -> Result<(Arc<Gateway>, Arc<dyn Messenger>)> {
         let gw = self.gateway()?;
         let ch = gw.channels.get(channel).cloned().ok_or_else(|| anyhow::anyhow!("channel `{channel}` is not running"))?;
         Ok((gw, ch))
@@ -72,7 +72,7 @@ impl extensions::Core for ExtCore {
 
     async fn prompt(&self, channel: &str, chat: &str, text: &str) -> Result<()> {
         let (gw, ch) = self.channel(channel)?;
-        let (id, text) = (ChatId { channel: channel.into(), chat: chat.into() }, text.to_string());
+        let (id, text) = (Thread { messenger: channel.into(), id: chat.into() }, text.to_string());
         // Not awaited: the caller may be inside a turn of that very chat.
         tokio::spawn(async move { gw.deliver(ch, id, &text).await });
         Ok(())
@@ -80,7 +80,7 @@ impl extensions::Core for ExtCore {
 
     async fn agent(&self, channel: &str, chat: &str, task: &str, opts: extensions::AgentOpts) -> Result<String> {
         let (gw, ch) = self.channel(channel)?;
-        gw.subagent(ch, ChatId { channel: channel.into(), chat: chat.into() }, task, opts).await
+        gw.subagent(ch, Thread { messenger: channel.into(), id: chat.into() }, task, opts).await
     }
 
     async fn approve(&self, channel: &str, chat: &str, action: &str) -> Result<bool> {
@@ -131,7 +131,7 @@ impl TaskRunner for Arc<Gateway> {
 
 impl Gateway {
     pub fn new(
-        channels: Vec<Arc<dyn Channel>>,
+        channels: Vec<Arc<dyn Messenger>>,
         provider: Arc<dyn LlmProvider>,
         label: String,
         workspace: PathBuf,
@@ -199,7 +199,7 @@ impl Gateway {
         ToolRegistry::with_defaults().with_extensions(self.ext.clone())
     }
 
-    async fn chat(&self, id: &ChatId) -> Result<Arc<Chat>> {
+    async fn chat(&self, id: &Thread) -> Result<Arc<Chat>> {
         let mut chats = self.chats.lock().await;
         if let Some(chat) = chats.get(id) {
             return Ok(chat.clone());
@@ -207,9 +207,9 @@ impl Gateway {
         let agent = Agent::new(
             self.provider.read().unwrap().clone(),
             self.tools(),
-            agent::system_prompt(&self.workspace, self.channels.get(&id.channel).map_or(crate::channels::CHAT_SURFACE, |c| c.surface())),
+            agent::system_prompt(&self.workspace, self.channels.get(&id.messenger).map_or(crate::messengers::CHAT_SURFACE, |c| c.surface())),
             self.db.clone(),
-            &format!("{}:{}", id.channel, id.chat),
+            &format!("{}:{}", id.messenger, id.id),
         )?;
         let chat = Arc::new(Chat { agent: Mutex::new(agent), inbox: Arc::default(), cancel: StdMutex::new(None), intake: Mutex::new(()) });
         chats.insert(id.clone(), chat.clone());
@@ -237,9 +237,9 @@ impl Gateway {
             text += &format!("\n\n[Output of the task's script `{script}`]\n{}", self.run_script(script).await);
         }
         // An isolated task gets a fresh conversation of its own on every run.
-        let mut id = ChatId { channel: task.channel.clone(), chat: task.chat.clone() };
+        let mut id = Thread { messenger: task.channel.clone(), id: task.chat.clone() };
         if task.isolated {
-            id.chat = format!("{}#task{}", task.chat, task.id);
+            id.id = format!("{}#task{}", task.chat, task.id);
             self.chat(&id).await?.agent.lock().await.reset()?;
         }
         self.turn(channel, id, &task.chat, &text, Vec::new(), true).await
@@ -266,10 +266,10 @@ impl Gateway {
     }
 
     async fn handle(self: Arc<Self>, ev: Inbound) -> Result<()> {
-        let Some(channel) = self.channels.get(&ev.chat.channel).cloned() else {
+        let Some(channel) = self.channels.get(&ev.thread.messenger).cloned() else {
             return Ok(());
         };
-        let chat = ev.chat.chat.clone();
+        let chat = ev.thread.id.clone();
         match ev.kind {
             InboundKind::Action { id, data } => {
                 channel.ack_action(&id).await.ok();
@@ -281,15 +281,15 @@ impl Gateway {
                     }
                 }
             }
-            InboundKind::Command { name, args } => self.command(&channel, &ev.chat, &name, &args).await?,
+            InboundKind::Command { name, args } => self.command(&channel, &ev.thread, &name, &args).await?,
             InboundKind::Message { text, files } if text.is_empty() && files.is_empty() => {}
             InboundKind::Message { text, files } => {
-                let state = self.chat(&ev.chat).await?;
+                let state = self.chat(&ev.thread).await?;
                 let intake = state.intake.lock().await;
                 let (note, images, saved) = self.receive(&*channel, &files).await;
                 let mut text = [text, note].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
                 if self.ext.listens("message_in") {
-                    let origin = Some((ev.chat.channel.clone(), chat.clone()));
+                    let origin = Some((ev.thread.messenger.clone(), chat.clone()));
                     let data = self.ext.emit("message_in", serde_json::json!({"text": text, "files": saved}), &origin).await;
                     if data["handled"] == true {
                         if let Some(reply) = data["reply"].as_str().filter(|r| !r.is_empty()) {
@@ -311,7 +311,7 @@ impl Gateway {
                 // Busy from here, so the next message joins this turn instead of racing it.
                 state.inbox.start();
                 drop(intake);
-                self.turn(channel, ev.chat, &chat, &text, images, false).await?
+                self.turn(channel, ev.thread, &chat, &text, images, false).await?
             }
         }
         Ok(())
@@ -321,11 +321,11 @@ impl Gateway {
 
 /// Runs the agent behind every configured messenger (foreground).
 pub async fn serve() -> Result<()> {
-    start(crate::channels::build_configured()?).await
+    start(crate::messengers::build_configured()?).await
 }
 
 /// Runs the agent behind `chans` until they all stop.
-pub async fn start(chans: Vec<Arc<dyn Channel>>) -> Result<()> {
+pub async fn start(chans: Vec<Arc<dyn Messenger>>) -> Result<()> {
     let workspace = crate::config::workspace()?;
     let selection = providers::selection()?;
     let label = format!("{} · {}", selection.provider.id, selection.model.clone().unwrap_or_default());

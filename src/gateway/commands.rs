@@ -1,7 +1,7 @@
 //! Slash commands (`/new`, `/stop`, `/model`, ...).
 
 use super::Gateway;
-use crate::channels::{Channel, ChatId, CommandSpec};
+use crate::messengers::{Messenger, Thread, CommandSpec};
 use crate::llm::providers;
 use anyhow::Result;
 use std::sync::Arc;
@@ -42,8 +42,8 @@ impl Gateway {
         }
     }
 
-    pub(super) async fn command(self: &Arc<Self>, channel: &Arc<dyn Channel>, id: &ChatId, name: &str, args: &str) -> Result<()> {
-        let chat = id.chat.as_str();
+    pub(super) async fn command(self: &Arc<Self>, channel: &Arc<dyn Messenger>, id: &Thread, name: &str, args: &str) -> Result<()> {
+        let chat = id.id.as_str();
         let state = self.chat(id).await?;
         let reply = match name {
             "start" | "help" => {
@@ -55,7 +55,7 @@ impl Gateway {
             }
             "stop" => {
                 // Extensions hear it first, so a loop of theirs doesn't start the next turn.
-                let origin = Some((id.channel.clone(), id.chat.clone()));
+                let origin = Some((id.messenger.clone(), id.id.clone()));
                 self.ext.emit("stop", serde_json::json!({}), &origin).await;
                 match state.cancel.lock().unwrap().as_ref() {
                     Some(n) => {
@@ -98,8 +98,8 @@ impl Gateway {
                     facts.iter().map(|f| format!("#{} {}", f.id, f.text)).collect::<Vec<_>>().join("\n")
                 }
             }
-            "usage" => self.db.usage_report(&format!("{}:{}", id.channel, id.chat))?,
-            "tasks" => crate::tools::format_tasks(&self.db.tasks(Some((&id.channel, &id.chat)))?),
+            "usage" => self.db.usage_report(&format!("{}:{}", id.messenger, id.id))?,
+            "tasks" => crate::tools::format_tasks(&self.db.tasks(Some((&id.messenger, &id.id)))?),
             "status" => format!(
                 "Model: `{}`\nWorkspace: `{}`\nBusy: {}",
                 self.provider_label.read().unwrap(),
@@ -126,7 +126,7 @@ impl Gateway {
                 format!("Extensions reloaded.\n{status}")
             }
             other => {
-                let origin = Some((id.channel.clone(), id.chat.clone()));
+                let origin = Some((id.messenger.clone(), id.id.clone()));
                 match self.ext.run_command(other, args, &origin).await {
                     Some(Ok(Some(reply))) => reply,
                     Some(Ok(None)) => {

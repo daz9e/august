@@ -1,7 +1,7 @@
-//! Messenger abstraction. A `Channel` is a live connection to one messenger (it
+//! Messengers. A `Messenger` is a live connection to one messenger (it
 //! publishes `Inbound` events on the bus and can send/edit messages); a
-//! `ChannelDef` is the vendor: how to configure it and how to build the channel.
-//! Message text everywhere is plain Markdown; each vendor converts it to its own
+//! `MessengerDef` is its kind: how to configure it and how to build it.
+//! Message text everywhere is plain Markdown; each messenger converts it to its own
 //! dialect.
 
 pub mod bus;
@@ -16,11 +16,22 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 
-/// A conversation on a particular channel.
+/// A conversation in a messenger: a Telegram chat, a terminal window, ...
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ChatId {
-    pub channel: String,
-    pub chat: String,
+pub struct Thread {
+    pub messenger: String,
+    pub id: String,
+}
+
+impl Thread {
+    pub fn new(messenger: impl Into<String>, id: impl Into<String>) -> Self {
+        Self { messenger: messenger.into(), id: id.into() }
+    }
+
+    /// `messenger:id`, the key sessions are stored under.
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.messenger, self.id)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -29,10 +40,10 @@ pub struct User {
     pub name: String,
 }
 
-/// A file that came with a message; the channel downloads it on request.
+/// A file that came with a message; the messenger downloads it on request.
 #[derive(Debug, Clone)]
 pub struct Attachment {
-    /// Vendor handle for `Channel::download`.
+    /// Vendor handle for `Messenger::download`.
     pub id: String,
     /// Original file name, if the messenger has one (photos don't).
     pub name: Option<String>,
@@ -52,7 +63,7 @@ pub enum InboundKind {
 
 #[derive(Debug, Clone)]
 pub struct Inbound {
-    pub chat: ChatId,
+    pub thread: Thread,
     pub user: User,
     pub kind: InboundKind,
 }
@@ -88,7 +99,7 @@ pub struct Limits {
 }
 
 #[async_trait]
-pub trait Channel: Send + Sync {
+pub trait Messenger: Send + Sync {
     fn id(&self) -> &str;
     fn limits(&self) -> Limits;
 
@@ -117,21 +128,21 @@ pub trait Channel: Send + Sync {
 }
 
 #[async_trait]
-pub trait ChannelDef: Send + Sync {
+pub trait MessengerDef: Send + Sync {
     fn id(&self) -> &'static str;
     fn label(&self) -> &'static str;
     fn is_configured(&self) -> Result<bool>;
     /// Interactive setup (token, owner pairing, ...); saves into `channels.json`.
     async fn setup(&self) -> Result<()>;
     /// `None` when not configured.
-    fn build(&self) -> Result<Option<Arc<dyn Channel>>>;
+    fn build(&self) -> Result<Option<Arc<dyn Messenger>>>;
 }
 
-pub fn registry() -> Vec<Box<dyn ChannelDef>> {
+pub fn registry() -> Vec<Box<dyn MessengerDef>> {
     vec![Box::new(telegram::TelegramDef)]
 }
 
-pub fn def(id: &str) -> Option<Box<dyn ChannelDef>> {
+pub fn def(id: &str) -> Option<Box<dyn MessengerDef>> {
     registry().into_iter().find(|d| d.id() == id)
 }
 
@@ -150,7 +161,7 @@ pub fn parse_command(text: &str, bot_name: Option<&str>) -> Option<(String, Stri
 }
 
 /// Builds every configured messenger; errors if none is set up.
-pub fn build_configured() -> Result<Vec<Arc<dyn Channel>>> {
+pub fn build_configured() -> Result<Vec<Arc<dyn Messenger>>> {
     let mut chans = Vec::new();
     for def in registry() {
         if let Some(ch) = def.build()? {

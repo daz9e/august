@@ -4,7 +4,7 @@ use super::Gateway;
 use super::approval::ChatApprover;
 use super::render::{Ui, render, tool_line};
 use crate::agent::Event;
-use crate::channels::{Channel, ChatId};
+use crate::messengers::{Messenger, Thread};
 use crate::llm::Block;
 use crate::tools::{FileSink, ToolCtx};
 use anyhow::Result;
@@ -29,7 +29,7 @@ impl FileSink for ChatFiles {
 
 /// Background notes (what the review saved) go straight to the chat.
 struct ChatNotes {
-    channel: Arc<dyn Channel>,
+    channel: Arc<dyn Messenger>,
     chat: String,
 }
 
@@ -47,8 +47,8 @@ impl Gateway {
     /// turn didn't pick up.
     pub(super) async fn turn(
         self: &Arc<Self>,
-        channel: Arc<dyn Channel>,
-        id: ChatId,
+        channel: Arc<dyn Messenger>,
+        id: Thread,
         chat: &str,
         text: &str,
         images: Vec<Block>,
@@ -75,8 +75,8 @@ impl Gateway {
         self: &Arc<Self>,
         state: &super::Chat,
         agent: &mut crate::agent::Agent,
-        channel: Arc<dyn Channel>,
-        id: &ChatId,
+        channel: Arc<dyn Messenger>,
+        id: &Thread,
         chat: &str,
         text: &str,
         images: Vec<Block>,
@@ -107,7 +107,7 @@ impl Gateway {
             workspace: self.workspace.clone(),
             approver: approver.clone(),
             db: self.db.clone(),
-            origin: Some((id.channel.clone(), chat.to_string())),
+            origin: Some((id.messenger.clone(), chat.to_string())),
             files: Some(Arc::new(ChatFiles(tx.clone()))),
             extensions: Some(self.ext.clone()),
             unattended: scheduled,

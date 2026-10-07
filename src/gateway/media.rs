@@ -2,7 +2,7 @@
 //! Extensions get the saved files with `message_in` (the default `voice` one transcribes audio).
 
 use super::Gateway;
-use crate::channels::{Attachment, Channel};
+use crate::messengers::{Attachment, Messenger};
 use crate::llm::{Block, IMAGE_TYPES, MAX_IMAGE_BYTES};
 use crate::util::{human_size, mime_for};
 use anyhow::Result;
@@ -15,7 +15,7 @@ impl Gateway {
     /// Downloads `files` into the inbox. Returns a note for the model (where each
     /// file is, or why it is missing), image blocks for the ones it can see, and the
     /// saved files for `message_in` (`{path, mime, voice}`).
-    pub(super) async fn receive(&self, channel: &dyn Channel, files: &[Attachment]) -> (String, Vec<Block>, Vec<Value>) {
+    pub(super) async fn receive(&self, channel: &dyn Messenger, files: &[Attachment]) -> (String, Vec<Block>, Vec<Value>) {
         let mut notes = Vec::new();
         let mut images = Vec::new();
         let mut saved = Vec::new();
@@ -39,7 +39,7 @@ impl Gateway {
         (notes.join("\n"), images, saved)
     }
 
-    async fn save(&self, channel: &dyn Channel, file: &Attachment, name: &str) -> Result<(PathBuf, u64)> {
+    async fn save(&self, channel: &dyn Messenger, file: &Attachment, name: &str) -> Result<(PathBuf, u64)> {
         let bytes = channel.download(file).await?;
         let dir = self.workspace.join(INBOX);
         tokio::fs::create_dir_all(&dir).await?;

@@ -1,4 +1,4 @@
-//! Channel-independent splitting of long Markdown into message-sized pieces.
+//! Messenger-independent splitting of long Markdown into message-sized pieces.
 
 pub(crate) fn fence_open(line: &str) -> Option<(&str, &str)> {
     let t = line.trim_start();

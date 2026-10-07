@@ -4,7 +4,7 @@
 use super::Gateway;
 use super::approval::ChatApprover;
 use crate::agent::{self, Agent};
-use crate::channels::{Channel, ChatId};
+use crate::messengers::{Messenger, Thread};
 use crate::extensions::AgentOpts;
 use crate::tools::ToolCtx;
 use anyhow::Result;
@@ -12,9 +12,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 impl Gateway {
-    pub(super) async fn subagent(&self, channel: Arc<dyn Channel>, id: ChatId, task: &str, opts: AgentOpts) -> Result<String> {
+    pub(super) async fn subagent(&self, channel: Arc<dyn Messenger>, id: Thread, task: &str, opts: AgentOpts) -> Result<String> {
         let n = self.subagents.fetch_add(1, Ordering::Relaxed) + 1;
-        let key = format!("{}:{}#agent{n}", id.channel, id.chat);
+        let key = format!("{}:{}#agent{n}", id.messenger, id.id);
         let mut tools = self.tools().without(&opts.exclude);
         if let Some(only) = &opts.tools {
             tools = tools.only(only);
@@ -24,9 +24,9 @@ impl Gateway {
         let mut agent = Agent::new(provider, tools, system, self.db.clone(), &key)?;
         let ctx = ToolCtx {
             workspace: self.workspace.clone(),
-            approver: Arc::new(ChatApprover { channel, chat: id.chat.clone(), pending: self.pending.clone() }),
+            approver: Arc::new(ChatApprover { channel, chat: id.id.clone(), pending: self.pending.clone() }),
             db: self.db.clone(),
-            origin: Some((id.channel, id.chat)),
+            origin: Some((id.messenger, id.id)),
             files: None,
             extensions: Some(self.ext.clone()),
             unattended: true,
@@ -39,13 +39,13 @@ impl Gateway {
 
     /// Hands a message to the chat as if the user sent it: into the running turn, or as
     /// a new one.
-    pub(super) async fn deliver(self: &Arc<Self>, channel: Arc<dyn Channel>, id: ChatId, text: &str) {
+    pub(super) async fn deliver(self: &Arc<Self>, channel: Arc<dyn Messenger>, id: Thread, text: &str) {
         let offered = match self.chat(&id).await {
             Ok(state) => state.inbox.offer(text),
             Err(e) => return eprintln!("gateway: {e:#}"),
         };
         if !offered {
-            let chat = id.chat.clone();
+            let chat = id.id.clone();
             if let Err(e) = self.turn(channel, id, &chat, text, Vec::new(), false).await {
                 eprintln!("gateway: {e:#}");
             }

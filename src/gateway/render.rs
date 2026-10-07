@@ -1,6 +1,6 @@
 //! Turns an agent's event stream into sent and edited chat messages.
 
-use crate::channels::Channel;
+use crate::messengers::Messenger;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,7 +25,7 @@ pub(super) fn tool_line(name: &str, input: &serde_json::Value) -> String {
 }
 
 /// Turns the stream of `Ui` items into sent/edited messages, throttled to the channel's limits.
-pub(super) async fn render(channel: Arc<dyn Channel>, chat: String, mut rx: mpsc::UnboundedReceiver<Ui>) {
+pub(super) async fn render(channel: Arc<dyn Messenger>, chat: String, mut rx: mpsc::UnboundedReceiver<Ui>) {
     let limits = channel.limits();
     let mut buf = String::new();
     let mut sent: Vec<(String, String)> = Vec::new(); // (message id, markdown shown)
@@ -81,12 +81,12 @@ pub(super) async fn render(channel: Arc<dyn Channel>, chat: String, mut rx: mpsc
     }
 }
 
-async fn flush(channel: &dyn Channel, chat: &str, buf: &str, sent: &mut Vec<(String, String)>, max: usize) {
+async fn flush(channel: &dyn Messenger, chat: &str, buf: &str, sent: &mut Vec<(String, String)>, max: usize) {
     let text = buf.trim_end();
     if text.is_empty() {
         return;
     }
-    for (i, chunk) in crate::channels::split_markdown(text, max).into_iter().enumerate() {
+    for (i, chunk) in crate::messengers::split_markdown(text, max).into_iter().enumerate() {
         if let Some((id, shown)) = sent.get_mut(i) {
             if *shown != chunk {
                 match channel.edit(chat, id, &chunk, &[]).await {

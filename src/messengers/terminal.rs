@@ -4,7 +4,7 @@
 //! edit prints only what it adds). A message with buttons is a question: its options are
 //! numbered and the next line answers the oldest open one.
 
-use super::{Attachment, Button, Channel, ChatId, CommandSpec, Inbound, InboundKind, Limits, User, bus::Bus};
+use super::{Attachment, Button, Messenger, Thread, CommandSpec, Inbound, InboundKind, Limits, User, bus::Bus};
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -102,7 +102,7 @@ impl Terminal {
 }
 
 #[async_trait]
-impl Channel for Terminal {
+impl Messenger for Terminal {
     fn id(&self) -> &str {
         ID
     }
@@ -116,7 +116,7 @@ impl Channel for Terminal {
     }
 
     async fn run(&self, bus: Bus<Inbound>) -> Result<()> {
-        let chat = ChatId { channel: ID.into(), chat: CHAT.into() };
+        let chat = Thread { messenger: ID.into(), id: CHAT.into() };
         let user = User { id: "local".into(), name: std::env::var("USER").unwrap_or_else(|_| "you".into()) };
         println!("Write a message; /help lists commands, /exit quits.");
         self.prompt();
@@ -148,7 +148,7 @@ impl Channel for Terminal {
                     None => InboundKind::Message { text: line, files: Vec::new() },
                 },
             };
-            bus.publish(Inbound { chat: chat.clone(), user: user.clone(), kind });
+            bus.publish(Inbound { thread: chat.clone(), user: user.clone(), kind });
         }
         Ok(())
     }

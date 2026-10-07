@@ -1,6 +1,6 @@
 //! The `august` command; everything else lives in the library (`lib.rs`).
 
-use august::{channels, cli, gateway};
+use august::{cli, gateway, messengers};
 
 use anyhow::Result;
 
@@ -9,14 +9,14 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
     let Some(cmd) = std::env::args().nth(1) else {
-        return channels::terminal::run().await;
+        return messengers::terminal::run().await;
     };
     match cmd.as_str() {
         // Foreground gateway; this is what the background service runs.
         "gateway" => gateway::serve().await,
         "serve" => {
             // Fail early so the service is not installed only to crash-loop.
-            channels::build_configured()?;
+            messengers::build_configured()?;
             cli::service::start()
         }
         "stop" => cli::service::stop(),
