@@ -16,6 +16,8 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, oneshot};
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
+/// The version of the protocol this August speaks (`ready.protocol`).
+pub const PROTOCOL: u64 = 2;
 /// Stderr lines kept to explain a failed start or a crash.
 const TAIL_LINES: usize = 20;
 
@@ -32,6 +34,10 @@ pub struct Manifest {
     pub sections: Vec<(String, String)>,
     /// What it declared it needs (`messaging`, `turns`, `tools`, `llm`).
     pub needs: Vec<String>,
+    /// Its own timeouts for hooks, by event (ms).
+    pub timeouts: HashMap<String, u64>,
+    /// The protocol version it speaks.
+    pub protocol: u64,
 }
 
 /// The permission a call into August needs, if any: `messaging` for messengers and any
@@ -182,7 +188,12 @@ impl Host {
         }
 
         match tokio::time::timeout(START_TIMEOUT, ready_rx).await {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                let speaks = manifest.read().unwrap().protocol;
+                if speaks != PROTOCOL {
+                    return Err(format!("speaks extension protocol {speaks}; this August needs {PROTOCOL} (update its SDK)"));
+                }
+            }
             Ok(Err(_)) => {
                 // Exited before registering; give stderr a moment to drain.
                 let _ = child.wait().await;
@@ -222,19 +233,41 @@ impl Host {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.waiting.lock().unwrap().insert(id, tx);
+        // If this call is dropped (its turn was cancelled) or times out, the extension is told
+        // to stop working on it.
+        let mut guard = CancelOnDrop { id, stdin: self.stdin.clone(), waiting: self.waiting.clone(), done: false };
         let msg = json!({"id": id, "method": method, "params": params});
         if write_line(&self.stdin, &msg).await.is_err() {
+            guard.done = true;
             self.waiting.lock().unwrap().remove(&id);
             return Err("the extension process exited".into());
         }
-        match tokio::time::timeout(timeout, rx).await {
+        let r = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err("the extension process exited".into()),
-            Err(_) => {
-                self.waiting.lock().unwrap().remove(&id);
-                Err(format!("timed out after {} s", timeout.as_secs()))
-            }
+            Err(_) => return Err(format!("timed out after {} s", timeout.as_secs())),
+        };
+        guard.done = true;
+        r
+    }
+}
+
+/// Cancels a call the extension is still working on when nobody waits for it any more.
+struct CancelOnDrop {
+    id: u64,
+    stdin: Arc<Mutex<ChildStdin>>,
+    waiting: Waiting,
+    done: bool,
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if self.done {
+            return;
         }
+        self.waiting.lock().unwrap().remove(&self.id);
+        let (stdin, msg) = (self.stdin.clone(), json!({"method": "cancel", "params": {"id": self.id}}));
+        tokio::spawn(async move { write_line(&stdin, &msg).await.ok() });
     }
 }
 
@@ -347,6 +380,8 @@ fn parse_manifest(params: &Value) -> Manifest {
             .collect(),
         events: list("events").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
         needs: list("needs").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
+        timeouts: params["timeouts"].as_object().into_iter().flatten().filter_map(|(k, v)| Some((k.clone(), v.as_u64()?))).collect(),
+        protocol: params["protocol"].as_u64().unwrap_or(1),
         sections: list("sections")
             .iter()
             .filter_map(|c| Some((c["name"].as_str()?.to_string(), c["text"].as_str().unwrap_or_default().to_string())))

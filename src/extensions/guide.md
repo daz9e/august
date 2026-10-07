@@ -150,7 +150,11 @@ than the extension uses.
   August's log).
 - npm packages: just import them; bun installs them on first run. Keep state in files under
   `august.dir`.
-- Timeouts: hooks 10 s (`message_in` 2 min), commands 60 s, tools 10 min, setup 30 s. A failing or slow hook is skipped
+- Timeouts: hooks 10 s (`message_in` 2 min; `august.on(event, handler, { timeout })` sets
+  your own), commands 60 s, tools 10 min, setup 30 s. When August stops waiting for a call
+  (its turn was cancelled with /stop, or it timed out), `ctx.signal` is aborted: pass it to
+  `fetch` and long work so it stops too.
+- Before a reload or `/extensions disable`, the `shutdown` event gives you 2 s to clean up. A failing or slow hook is skipped
   (August continues as if it returned nothing); a crashed extension is restarted.
 - Built-in command names can't be taken; a tool with a built-in tool's name replaces it.
 

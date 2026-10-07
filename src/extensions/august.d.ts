@@ -66,6 +66,9 @@ declare module "august" {
     thread: Thread | null;
     /** The turn it runs in (null outside one). */
     turn: Turn | null;
+    /** Aborted when August stops waiting for this call (its turn was cancelled, or it timed
+     *  out); pass it to fetch and the like to stop work nobody needs. */
+    signal: AbortSignal;
     /** Sends a message to that thread; resolves to its id (for `august.edit`). */
     send(message: OutMessage): Promise<string>;
     /** Hands the thread `text` as if the user sent it: joins the running turn, or starts one. */
@@ -126,6 +129,8 @@ declare module "august" {
     };
     /** The user reacted to `message` with `emoji` (empty: took it back). Observe only. */
     reaction: { message: string; emoji: string };
+    /** August is about to stop this extension (reload, disable): clean up, within 2 s. */
+    shutdown: {};
     /** The user sent /stop in the thread (observe only). */
     stop: {};
     /** Before each model call of a turn; `step` counts from 0, `system` is the full prompt. */
@@ -151,6 +156,7 @@ declare module "august" {
     turn_end: void;
     stop: void;
     reaction: void;
+    shutdown: void;
     /** `system` replaces the system prompt for this one call (breaks the prompt cache). */
     llm_call: { system?: string };
     /** Returned `messages` replace what the model sees for this one call; the stored
@@ -185,9 +191,12 @@ declare module "august" {
     dir: string;
     /** The agent's workspace folder (absolute); keep the files the agent works with inside it. */
     workspace: string;
+    /** `opts.timeout`: how long August waits for this hook (ms; default 10 s, `message_in`
+     *  2 minutes), e.g. longer for a `tool_call` hook that asks the user. */
     on<E extends keyof Events>(
       event: E,
       handler: (data: Events[E], ctx: Context) => Results[E] | void | Promise<Results[E] | void>,
+      opts?: { timeout?: number },
     ): void;
     /** May be called any time; tools added or removed after setup show up from the next model call. */
     registerTool<P = any>(tool: Tool<P>): void;

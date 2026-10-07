@@ -33,6 +33,9 @@ function call(method: string, params: unknown): Promise<any> {
 }
 
 const handlers = new Map<string, Function[]>();
+const timeouts = new Map<string, number>();
+/** In-flight requests from August, by id, so a cancel can abort them. */
+const running = new Map<number, AbortController>();
 const tools = new Map<string, any>();
 const commands = new Map<string, any>();
 const sections = new Map<string, string>();
@@ -50,6 +53,8 @@ function manifest() {
     commands: [...commands.entries()].map(([n, c]) => ({ name: n, description: c.description ?? "" })),
     events: [...handlers.keys()],
     sections: [...sections.entries()].map(([name, text]) => ({ name, text })),
+    timeouts: Object.fromEntries(timeouts),
+    protocol: 2,
     needs: [...needs],
   };
 }
@@ -119,8 +124,9 @@ const api = {
   name,
   dir: dirname(entry),
   workspace: process.env.AUGUST_WORKSPACE ?? "",
-  on(event: string, handler: Function) {
+  on(event: string, handler: Function, opts: { timeout?: number } = {}) {
     if (typeof handler !== "function") throw new Error(`on("${event}"): handler must be a function`);
+    if (opts.timeout) timeouts.set(event, opts.timeout);
     handlers.set(event, [...(handlers.get(event) ?? []), handler]);
     changed();
   },
@@ -174,8 +180,8 @@ const api = {
   },
 };
 
-async function handle(method: string, params: any): Promise<unknown> {
-  const ctx = context(params.ctx?.thread ?? null, params.ctx?.turn ?? null);
+async function handle(method: string, params: any, signal: AbortSignal): Promise<unknown> {
+  const ctx = { ...context(params.ctx?.thread ?? null, params.ctx?.turn ?? null), signal };
   switch (method) {
     case "event": {
       // Handlers run in order; each result is merged into the data the next one sees.
@@ -211,14 +217,21 @@ createInterface({ input: process.stdin })
     } catch {
       return;
     }
-    if (msg.method) {
-      handle(msg.method, msg.params ?? {}).then(
-        (result) => write({ id: msg.id, result: result ?? null }),
-        (e) => {
-          console.error(`${msg.method} failed:`, e);
-          write({ id: msg.id, error: { message: e instanceof Error ? e.message : String(e) } });
-        },
-      );
+    if (msg.method === "cancel") {
+      running.get(msg.params?.id)?.abort();
+    } else if (msg.method) {
+      const controller = new AbortController();
+      running.set(msg.id, controller);
+      handle(msg.method, msg.params ?? {}, controller.signal)
+        .finally(() => running.delete(msg.id))
+        .then(
+          (result) => write({ id: msg.id, result: result ?? null }),
+          (e) => {
+            if (controller.signal.aborted) return; // nobody waits for it any more
+            console.error(`${msg.method} failed:`, e);
+            write({ id: msg.id, error: { message: e instanceof Error ? e.message : String(e) } });
+          },
+        );
     } else {
       const w = waiting.get(msg.id);
       if (!w) return;

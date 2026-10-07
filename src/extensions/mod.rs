@@ -29,6 +29,7 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message_in` may do real work on attachments (e.g. transcribe a voice note).
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Restarts after a crash before an extension stays down until `/reload`.
 const MAX_RESTARTS: u32 = 3;
@@ -335,6 +336,8 @@ impl Extensions {
 
     /// Stops every extension and starts what is on disk now. Returns the status report.
     pub async fn reload(&self) -> String {
+        let old: Vec<Arc<Host>> = self.running().into_iter().map(|(_, h)| h).collect();
+        shut_down(old).await;
         if let Err(e) = self.prepare_defaults() {
             eprintln!("could not prepare default extensions: {e}");
         }
@@ -359,6 +362,7 @@ impl Extensions {
     pub async fn load(&self, name: &str) -> Result<String> {
         let launch = self.launch(name)?;
         std::fs::remove_file(launch.dir().join(DISABLED)).ok();
+        shut_down(self.running().into_iter().filter(|(n, _)| n == name).map(|(_, h)| h).collect()).await;
         let (generation, state) = self.spawn(name, &launch).await;
         let ok = matches!(state, State::Running(_));
         let slot = Slot { name: name.to_string(), launch, state, generation, restarts: 0 };
@@ -384,8 +388,9 @@ impl Extensions {
     }
 
     /// Stops an extension and keeps it from starting until it is enabled or saved again.
-    pub fn disable(&self, name: &str) -> Result<()> {
+    pub async fn disable(&self, name: &str) -> Result<()> {
         let launch = self.launch(name)?;
+        shut_down(self.running().into_iter().filter(|(n, _)| n == name).map(|(_, h)| h).collect()).await;
         std::fs::write(launch.dir().join(DISABLED), "")?;
         let mut slots = self.slots.write().unwrap();
         slots.retain(|s| s.name != name); // the process is killed as it drops
@@ -399,7 +404,7 @@ impl Extensions {
         let r = match args.split_whitespace().collect::<Vec<_>>()[..] {
             [] => return self.status(),
             ["enable", name] => self.load(name).await.map(|_| ()),
-            ["disable", name] => self.disable(name),
+            ["disable", name] => self.disable(name).await,
             _ => return "Usage: /extensions [enable|disable <name>]".into(),
         };
         match r {
@@ -434,7 +439,9 @@ impl Extensions {
                 continue;
             }
             let params = json!({"name": event, "data": data, "ctx": ctx_json(chat)});
-            let timeout = if event == "message_in" { MESSAGE_TIMEOUT } else { EVENT_TIMEOUT };
+            let default = if event == "message_in" { MESSAGE_TIMEOUT } else { EVENT_TIMEOUT };
+            let own = host.manifest().timeouts.get(event).copied().map(Duration::from_millis);
+            let timeout = own.unwrap_or(default);
             match host.request("event", params, timeout).await {
                 Ok(v) if v.is_object() => data = v,
                 Ok(_) => {}
@@ -537,6 +544,16 @@ impl Extensions {
         let builtin = builtin_tools();
         slots.iter().map(|s| self.describe(s, &builtin)).collect::<Vec<_>>().join("\n")
     }
+}
+
+/// Tells extensions they are about to stop (the `shutdown` event), so they can clean up;
+/// each gets a couple of seconds.
+async fn shut_down(hosts: Vec<Arc<Host>>) {
+    let asked = hosts.iter().filter(|h| h.manifest().events.iter().any(|e| e == "shutdown")).map(|h| {
+        let params = json!({"name": "shutdown", "data": {}, "ctx": ctx_json(&Origin::default())});
+        h.request("event", params, SHUTDOWN_TIMEOUT)
+    });
+    futures_util::future::join_all(asked).await;
 }
 
 fn ctx_json(origin: &Origin) -> Value {

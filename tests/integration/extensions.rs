@@ -585,3 +585,57 @@ async fn extensions_only_get_what_they_declare() {
     // Answering in the thread of the call in progress needs nothing.
     chat.ask("/here", "answering here is fine").await;
 }
+
+const LIFECYCLE: &str = r#"
+import { writeFileSync } from "node:fs";
+
+export default function (august) {
+  const mark = (name) => writeFileSync(`${august.workspace}/${name}`, "yes");
+  // A long tool that stops when August stops waiting for it.
+  august.registerTool({
+    name: "slow",
+    description: "Takes long",
+    execute: (_, ctx) => new Promise((resolve) => ctx.signal.addEventListener("abort", () => { mark("aborted"); resolve("late"); })),
+  });
+  // A hook slower than its own timeout is skipped; the turn goes on without it.
+  august.on("before_turn", async ({ text }) => {
+    if (text.includes("hang")) await new Promise((r) => setTimeout(r, 3000));
+    return { text: text + " (seen by the hook)" };
+  }, { timeout: 300 });
+  august.on("shutdown", () => mark("shut-down"));
+}
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn extensions_hear_cancels_and_shutdowns_and_set_hook_timeouts() {
+    if !have_bun() {
+        return;
+    }
+    let llm: Llm = Box::new(|req| {
+        let text = last_user_text(req);
+        if text.contains("run slow") && messages(req).last().unwrap()["role"] != "tool" {
+            reply_tool("slow", json!({}))
+        } else {
+            reply_text(&format!("got: {}", text.split("] ").nth(1).unwrap_or(&text)))
+        }
+    });
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { home: &[("extensions/life/index.ts", LIFECYCLE)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+
+    // /stop while the extension's tool runs: the extension is told to stop.
+    chat.say("run slow").await;
+    chat.wait_for("`slow`").await;
+    chat.ask("/stop", "Stopping…").await;
+    chat.wait_until("the tool aborted", |_| gw.workspace.join("aborted").exists()).await;
+
+    // Its own timeout: the hanging hook is skipped, the quick one applies.
+    chat.ask("hang please", "got: hang please").await;
+    let last = chat.texts().last().unwrap().clone();
+    assert!(!last.contains("seen by the hook"), "{last}");
+    chat.ask("quick", "got: quick (seen by the hook)").await;
+
+    // A reload tells it to clean up first.
+    chat.ask("/reload", "Extensions reloaded").await;
+    assert!(gw.workspace.join("shut-down").exists());
+}

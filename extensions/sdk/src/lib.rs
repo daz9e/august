@@ -210,6 +210,9 @@ struct Inner {
     hooks: RwLock<Vec<(String, HookFn)>>,
     sections: RwLock<Vec<(String, String)>>,
     needs: RwLock<Vec<String>>,
+    timeouts: RwLock<HashMap<String, u64>>,
+    /// Calls from August still running, by request id, so a cancel can stop them.
+    running: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
     /// Set once `ready` was sent; later changes send a new manifest.
     started: AtomicBool,
     dir: PathBuf,
@@ -237,6 +240,8 @@ impl August {
             hooks: RwLock::default(),
             sections: RwLock::default(),
             needs: RwLock::default(),
+            timeouts: RwLock::default(),
+            running: Mutex::default(),
             started: AtomicBool::new(false),
             dir: env("AUGUST_EXTENSION_DIR"),
             workspace: env("AUGUST_WORKSPACE"),
@@ -391,6 +396,13 @@ impl August {
         self.changed();
     }
 
+    /// How long August waits for this extension's `event` hooks (default 10 s; e.g. longer for
+    /// a `tool_call` hook that asks the user).
+    pub fn hook_timeout(&self, event: &str, timeout: Duration) {
+        self.0.timeouts.write().unwrap().insert(event.into(), timeout.as_millis() as u64);
+        self.changed();
+    }
+
     /// A hook; returned fields replace the event's data (`None` leaves it unchanged).
     pub fn on<F, R>(&self, event: &str, run: F)
     where
@@ -416,6 +428,8 @@ impl August {
             "commands": commands.iter().map(|(n, d, _)| json!({"name": n, "description": d})).collect::<Vec<_>>(),
             "events": events,
             "needs": *self.0.needs.read().unwrap(),
+            "timeouts": *self.0.timeouts.read().unwrap(),
+            "protocol": 2,
             "sections": self.0.sections.read().unwrap().iter().map(|(n, t)| json!({"name": n, "text": t})).collect::<Vec<_>>(),
         })
     }
@@ -465,9 +479,13 @@ impl August {
         let mut lines = BufReader::new(tokio::io::stdin()).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
-            if let Some(method) = msg["method"].as_str().map(String::from) {
-                let (me, link) = (self.clone(), link.clone());
-                tokio::spawn(async move {
+            if msg["method"] == "cancel" {
+                if let Some(task) = msg["params"]["id"].as_u64().and_then(|id| self.0.running.lock().unwrap().remove(&id)) {
+                    task.abort();
+                }
+            } else if let Some(method) = msg["method"].as_str().map(String::from) {
+                let (me, link, id) = (self.clone(), link.clone(), msg["id"].as_u64());
+                let task = tokio::spawn(async move {
                     let thread = serde_json::from_value(msg["params"]["ctx"]["thread"].clone()).ok();
                     let turn = serde_json::from_value(msg["params"]["ctx"]["turn"].clone()).ok();
                     let ctx = Ctx { link: link.clone(), thread, turn };
@@ -479,7 +497,13 @@ impl August {
                         }
                     };
                     link.write(&reply);
+                    if let Some(id) = id {
+                        me.0.running.lock().unwrap().remove(&id);
+                    }
                 });
+                if let Some(id) = id {
+                    self.0.running.lock().unwrap().insert(id, task.abort_handle());
+                }
             } else if let Some(tx) = msg["id"].as_u64().and_then(|id| link.waiting.lock().unwrap().remove(&id)) {
                 let result = match msg.get("error") {
                     Some(e) => Err(e["message"].as_str().unwrap_or("error").to_string()),
