@@ -17,6 +17,7 @@ async fn web() -> String {
     let app = axum::Router::new()
         .route("/page", get(|| async { axum::response::Html(PAGE) }))
         .route("/app", get(|| async { axum::response::Html("<html><body><div id=root></div><script>render()</script></body></html>") }))
+        .route("/long", get(|| async { "0123456789".repeat(4_500) }))
         .route("/report.pdf", get(|| async { ([("content-type", "application/pdf")], "%PDF-1.4") }))
         .route("/brave", get(|q: axum::extract::Query<HashMap<String, String>>, h: axum::http::HeaderMap| async move {
             assert_eq!(h["x-subscription-token"], "k");
@@ -72,4 +73,15 @@ async fn web_fetch_says_what_to_do_instead() {
     assert!(results[0].contains("application/pdf") && results[0].contains("curl"), "{results:?}");
     assert!(results[1].contains("browser tool"), "{results:?}");
     assert!(results[2].contains("HTTP 404 Not Found"), "{results:?}");
+}
+
+#[tokio::test]
+async fn web_fetch_reads_a_long_page_in_parts() {
+    let base = web().await;
+    let url = format!("{base}/long");
+    let results = tool_results(&[], vec![("web_fetch", json!({"url": url})), ("web_fetch", json!({"url": url, "offset": 30_000}))]).await;
+    let (first, rest) = (&results[0], &results[1]);
+    assert!(first.starts_with("0123") && first.ends_with("\n\n[characters 0-30000 of 45000; call web_fetch with offset 30000 for the rest]"), "{}", &first[29_990..]);
+    assert_eq!(rest.len(), 15_000 + "\n\n[characters 30000-45000 of 45000]".len());
+    assert!(rest.ends_with("[characters 30000-45000 of 45000]"));
 }

@@ -86,7 +86,8 @@ async fn read_capped(mut resp: reqwest::Response) -> Result<String> {
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
-async fn fetch(http: &reqwest::Client, url: &str) -> Result<String> {
+/// The page's text from character `offset` on, at most MAX_TEXT characters of it.
+async fn fetch(http: &reqwest::Client, url: &str, offset: usize) -> Result<String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         bail!("only http(s) URLs are supported, with the scheme: https://example.com");
     }
@@ -105,7 +106,17 @@ async fn fetch(http: &reqwest::Client, url: &str) -> Result<String> {
     if text.trim().is_empty() {
         bail!("the page has no readable text; it may be built by JavaScript, which the browser tool can run");
     }
-    Ok(truncate(text, MAX_TEXT))
+    let total = text.chars().count();
+    if offset >= total && offset > 0 {
+        bail!("offset {offset} is past the end of the page ({total} characters)");
+    }
+    let part: String = text.chars().skip(offset).take(MAX_TEXT).collect();
+    let end = offset + part.chars().count();
+    if offset == 0 && end == total {
+        return Ok(part);
+    }
+    let rest = if end < total { format!("; call web_fetch with offset {end} for the rest") } else { String::new() };
+    Ok(format!("{part}\n\n[characters {offset}-{end} of {total}{rest}]"))
 }
 
 struct Hit {
@@ -215,13 +226,16 @@ async fn main() {
          instructions.",
         json!({
             "type": "object",
-            "properties": {"url": {"type": "string", "description": "Full http(s) URL"}},
+            "properties": {
+                "url": {"type": "string", "description": "Full http(s) URL"},
+                "offset": {"type": "integer", "minimum": 0, "description": "Character to start from, to read the rest of a long page"},
+            },
             "required": ["url"],
             "additionalProperties": false,
         }),
         move |input, _| {
             let http = client.clone();
-            async move { fetch(&http, str_arg(&input, "url")).await }
+            async move { fetch(&http, str_arg(&input, "url"), input["offset"].as_u64().unwrap_or(0) as usize).await }
         },
     );
 
