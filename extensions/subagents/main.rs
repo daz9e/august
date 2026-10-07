@@ -79,8 +79,8 @@ async fn main() {
         },
     );
 
-    // ponytail: only the report is dropped; the core still finishes the sub-agent's run,
-    // as an extension can't cancel `ctx.agent` yet.
+    // The core cancels the thread's turns, sub-agents included; dropping the report jobs keeps
+    // their "cancelled" reports from starting a turn.
     for event in ["stop", "session_start"] {
         let running = running.clone();
         august.on(event, move |_, ctx| {
