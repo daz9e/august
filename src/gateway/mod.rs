@@ -164,6 +164,10 @@ impl extensions::Core for ExtCore {
         Ok(gw.tools().call(name, input, &ctx).await)
     }
 
+    fn store(&self) -> Result<Arc<Db>> {
+        Ok(self.gateway()?.db.clone())
+    }
+
     async fn llm(&self, prompt: &str, system: &str) -> Result<String> {
         let provider = self.gateway()?.provider.read().unwrap().clone();
         let c = provider.complete(&crate::util::new_uuid(), system, &[Message::user_text(prompt)], &[]).await?;

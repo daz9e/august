@@ -131,6 +131,13 @@ const api = {
     commands.set(cmd.replace(/^\//, ""), command);
     changed();
   },
+  /** This extension's storage: JSON values by key, kept across restarts. */
+  store: {
+    get: (key: string) => call("store_get", { key }),
+    set: (key: string, value: unknown) => call("store_set", { key, value: value ?? null }),
+    delete: (key: string) => call("store_set", { key, value: null }),
+    list: (prefix = "") => call("store_list", { prefix }),
+  },
   messengers: () => call("messengers", {}),
   send: (thread: Thread, message: Message) => call("send", { thread, message }),
   edit: (thread: Thread, id: string, message: Message) => call("edit", { thread, id, message }),

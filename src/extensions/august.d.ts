@@ -146,6 +146,15 @@ declare module "august" {
     registerPromptSection(name: string, text: string): void;
     /** `/name` in Telegram and the terminal. */
     registerCommand(name: string, command: Command | Command["handler"]): void;
+    /** This extension's storage in August's database: JSON values by key, kept across
+     *  restarts and reloads (only this extension sees them). */
+    store: {
+      get<T = any>(key: string): Promise<T | null>;
+      set(key: string, value: unknown): Promise<void>;
+      delete(key: string): Promise<void>;
+      /** Entries whose key starts with `prefix`, in key order. */
+      list<T = any>(prefix?: string): Promise<{ key: string; value: T }[]>;
+    };
     /** Every messenger with its description and threads. */
     messengers(): Promise<Messenger[]>;
     /** Sends a message to any thread; resolves to its id. */

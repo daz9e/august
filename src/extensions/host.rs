@@ -115,9 +115,9 @@ impl Host {
                             }
                         }
                         Some(method) => {
-                            let (method, core, stdin) = (method.to_string(), core.clone(), stdin.clone());
+                            let (method, core, stdin, name) = (method.to_string(), core.clone(), stdin.clone(), name.clone());
                             tokio::spawn(async move {
-                                let reply = match serve(core.as_deref(), &method, &msg["params"]).await {
+                                let reply = match serve(core.as_deref(), &name, &method, &msg["params"]).await {
                                     Ok(result) => json!({"id": msg["id"], "result": result}),
                                     Err(e) => json!({"id": msg["id"], "error": {"message": format!("{e:#}")}}),
                                 };
@@ -208,8 +208,8 @@ fn message(params: &Value) -> anyhow::Result<OutMessage> {
     Ok(OutMessage { text: text.into(), buttons })
 }
 
-/// A call from the extension into August.
-async fn serve(core: Option<&dyn Core>, method: &str, params: &Value) -> anyhow::Result<Value> {
+/// A call from extension `name` into August.
+async fn serve(core: Option<&dyn Core>, name: &str, method: &str, params: &Value) -> anyhow::Result<Value> {
     let core = core.ok_or_else(|| anyhow::anyhow!("August is not ready yet"))?;
     let arg = |k: &str| params[k].as_str().ok_or_else(|| anyhow::anyhow!("missing string `{k}`"));
     Ok(match method {
@@ -234,6 +234,18 @@ async fn serve(core: Option<&dyn Core>, method: &str, params: &Value) -> anyhow:
         "callTool" => {
             let (output, is_error) = core.call_tool(&thread(params)?, arg("name")?, &params["input"]).await?;
             json!({"output": output, "isError": is_error})
+        }
+        "store_get" => match core.store()?.kv_get(name, arg("key")?)? {
+            Some(v) => serde_json::from_str(&v).unwrap_or(Value::Null),
+            None => Value::Null,
+        },
+        "store_set" => {
+            let value = (!params["value"].is_null()).then(|| params["value"].to_string());
+            core.store()?.kv_set(name, arg("key")?, value.as_deref()).map(|_| Value::Null)?
+        }
+        "store_list" => {
+            let rows = core.store()?.kv_list(name, params["prefix"].as_str().unwrap_or(""))?;
+            Value::Array(rows.into_iter().map(|(k, v)| json!({"key": k, "value": serde_json::from_str::<Value>(&v).unwrap_or(Value::Null)})).collect())
         }
         "llm" => json!(core.llm(arg("prompt")?, params["system"].as_str().filter(|s| !s.is_empty()).unwrap_or("You are a helpful assistant.")).await?),
         other => anyhow::bail!("unknown method {other}"),

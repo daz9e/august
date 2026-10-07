@@ -429,3 +429,25 @@ async fn extensions_add_prompt_sections_fixed_per_conversation() {
     chat.ask("third", "ok").await;
     assert!(system(2).contains("HINT-TWO") && !system(2).contains("HINT-ONE"), "{}", system(2));
 }
+
+const COUNTER: &str = r#"export default function (august) {
+  august.registerCommand("count", async () => {
+    const n = ((await august.store.get("count")) ?? 0) + 1;
+    await august.store.set("count", n);
+    await august.store.set(`seen:${n}`, { n });
+    return `count ${n}, seen ${(await august.store.list("seen:")).length}`;
+  });
+}"#;
+
+#[tokio::test]
+async fn extensions_keep_state_in_the_store_across_reloads() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("ok"))).await;
+    let gw = august(&fake, Setup { home: &[("extensions/counter/index.ts", COUNTER)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("/count", "count 1, seen 1").await;
+    chat.ask("/reload", "Extensions reloaded").await;
+    chat.ask("/count", "count 2, seen 2").await;
+}

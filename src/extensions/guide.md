@@ -99,6 +99,10 @@ Calling into August:
 - `await ctx.approve(action)` is August's own yes/no approval.
 - `august.workspace` is the agent's workspace folder.
 
+State: `august.store` keeps JSON values by key in August's database, across restarts
+(`await august.store.get(key)`, `set(key, value)`, `delete(key)`, `list(prefix)`); only your
+extension sees them. Files under `august.dir` work too.
+
 `august.registerPromptSection(name, text)` adds a section to the system prompt (e.g.
 "## Reminders" with when to use your tools). The prompt is fixed for a conversation so the
 provider can cache it: a new or changed section shows up from the next conversation.

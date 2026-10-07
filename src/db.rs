@@ -92,6 +92,12 @@ CREATE TABLE IF NOT EXISTS facts (
     text TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS kv (
+    scope TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (scope, key)
+);
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel TEXT NOT NULL,
@@ -304,6 +310,32 @@ impl Db {
             .query_map([], |r| Ok(Fact { id: r.get(0)?, text: r.get(1)? }))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(facts)
+    }
+
+    // ---- key-value storage (extensions keep their state here) -----------
+
+    pub fn kv_get(&self, scope: &str, key: &str) -> Result<Option<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT value FROM kv WHERE scope = ?1 AND key = ?2")?;
+        Ok(stmt.query_map(params![scope, key], |r| r.get(0))?.next().transpose()?)
+    }
+
+    /// Stores `value` under `key`; `None` deletes it.
+    pub fn kv_set(&self, scope: &str, key: &str, value: Option<&str>) -> Result<()> {
+        let conn = self.conn();
+        match value {
+            Some(v) => conn.execute("INSERT OR REPLACE INTO kv (scope, key, value) VALUES (?1, ?2, ?3)", params![scope, key, v])?,
+            None => conn.execute("DELETE FROM kv WHERE scope = ?1 AND key = ?2", params![scope, key])?,
+        };
+        Ok(())
+    }
+
+    /// `(key, value)` of every key starting with `prefix`, in key order.
+    pub fn kv_list(&self, scope: &str, prefix: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT key, value FROM kv WHERE scope = ?1 AND substr(key, 1, length(?2)) = ?2 ORDER BY key")?;
+        let rows = stmt.query_map(params![scope, prefix], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
     }
 
     // ---- scheduled tasks -----------------------------------------------

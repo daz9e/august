@@ -62,6 +62,8 @@ pub trait Core: Send + Sync {
     async fn call_tool(&self, thread: &Thread, name: &str, input: &Value) -> Result<(String, bool)>;
     /// One completion without tools on the configured model.
     async fn llm(&self, prompt: &str, system: &str) -> Result<String>;
+    /// The calling extension's storage: JSON values by key, kept across restarts.
+    fn store(&self) -> Result<Arc<crate::db::Db>>;
 }
 
 /// Options of `ctx.agent`.

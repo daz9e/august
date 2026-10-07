@@ -217,6 +217,23 @@ impl August {
         &self.0.workspace
     }
 
+    /// This extension's stored value at `key` (JSON), kept across restarts.
+    pub async fn get(&self, key: &str) -> Result<Option<Value>> {
+        let v = self.0.link.call("store_get", json!({"key": key})).await?;
+        Ok((!v.is_null()).then_some(v))
+    }
+
+    /// Stores `value` at `key`; `Value::Null` deletes it.
+    pub async fn set(&self, key: &str, value: Value) -> Result<()> {
+        self.0.link.call("store_set", json!({"key": key, "value": value})).await.map(drop)
+    }
+
+    /// `(key, value)` of every stored key starting with `prefix`, in key order.
+    pub async fn list(&self, prefix: &str) -> Result<Vec<(String, Value)>> {
+        let v = self.0.link.call("store_list", json!({"prefix": prefix})).await?;
+        Ok(v.as_array().into_iter().flatten().map(|e| (e["key"].as_str().unwrap_or_default().to_string(), e["value"].clone())).collect())
+    }
+
     /// Every messenger: description, capabilities and threads (see `august.d.ts`).
     pub async fn messengers(&self) -> Result<Value> {
         self.0.link.call("messengers", json!({})).await
