@@ -88,6 +88,7 @@ async function ask(thread: Thread, question: string, options: string[], timeout 
   }
   const none = reply?.cancelled ? "⏹ cancelled" : "⌛ no answer";
   await call("edit", { thread, id, message: `${text}\n→ ${answer ?? none}` }).catch(() => {});
+  if (reply?.cancelled) throw new Error("the user cancelled the question (/stop)");
   return answer;
 }
 

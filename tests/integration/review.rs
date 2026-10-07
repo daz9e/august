@@ -142,3 +142,24 @@ async fn scheduled_tasks_do_not_trigger_reviews() {
     // Only the user's own turn was reviewed.
     assert_eq!(fake.llm_requests().iter().filter(|r| is_review(r)).count(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_review_still_reports() {
+    // A real model may take longer than a hook's usual 10 s to review.
+    let llm: Llm = Box::new(|req| {
+        if !is_review(req) {
+            return reply_text("ok");
+        }
+        if msgs(req).last().unwrap()["role"] == "tool" {
+            std::thread::sleep(Duration::from_secs(11));
+            reply_text("Saved.")
+        } else {
+            reply_tool("remember", json!({"fact": "User is patient"}))
+        }
+    });
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { env: &[("AUGUST_REVIEW_MEMORY_EVERY", "1")], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("hi").await;
+    chat.wait_until("the review's note", |c| c.texts().iter().any(|t| t == "💾 Memory updated")).await;
+}

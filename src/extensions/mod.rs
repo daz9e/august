@@ -29,6 +29,8 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message_in` may do real work on attachments (e.g. transcribe a voice note).
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+/// Observe-only hooks run in the background, so they may take long.
+const OBSERVER_TIMEOUT: Duration = Duration::from_secs(3600);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Restarts after a crash before an extension stays down until `/reload`.
@@ -439,7 +441,12 @@ impl Extensions {
                 continue;
             }
             let params = json!({"name": event, "data": data, "ctx": ctx_json(chat)});
-            let default = if event == "message_in" { MESSAGE_TIMEOUT } else { EVENT_TIMEOUT };
+            let default = match event {
+                "message_in" => MESSAGE_TIMEOUT,
+                // Nobody waits for these: let them finish what they started (a fork, a judge).
+                "turn_end" | "llm_result" | "session_start" | "compaction" | "reaction" => OBSERVER_TIMEOUT,
+                _ => EVENT_TIMEOUT,
+            };
             let own = host.manifest().timeouts.get(event).copied().map(Duration::from_millis);
             let timeout = own.unwrap_or(default);
             match host.request("event", params, timeout).await {

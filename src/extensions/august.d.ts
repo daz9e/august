@@ -238,8 +238,8 @@ declare module "august" {
     /** Waits for what the listener takes (default timeout 5 minutes); ends the listener. */
     next(listener: number, opts?: { timeout?: number }): Promise<Reply>;
     /** Asks in `thread` with `options` as buttons and waits (default 5 minutes): resolves to
-     *  the option pressed, numbered or named, the user's own words, or null. Built on
-     *  listen + send + next. */
+     *  the option pressed, numbered or named, the user's own words, or null after the
+     *  timeout; throws if the user cancelled it with /stop. Built on listen + send + next. */
     ask(thread: Thread, question: string, options: string[], opts?: { timeout?: number }): Promise<string | null>;
     /** Hands `thread` a message as if the user sent it. */
     prompt(thread: Thread, text: string): Promise<void>;

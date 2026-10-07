@@ -414,7 +414,7 @@ async fn extensions_see_messengers_and_talk_to_any_thread() {
     first.say("/poke 2").await;
     second.question().await;
     second.ask("/stop", "Nothing is running").await;
-    first.wait_for("answer: null").await;
+    first.wait_for("the user cancelled the question").await;
     second.wait_for("→ ⏹ cancelled").await;
 
     // A listener without an answer gives up after its timeout, and says so.

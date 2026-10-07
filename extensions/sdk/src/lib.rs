@@ -4,7 +4,7 @@
 //! from August runs as its own task, so a handler can call back into August (`ctx.llm`,
 //! `ctx.ask`, ...) while others are served. stdout is the protocol; log with `eprintln!`.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::future::Future;
@@ -102,9 +102,13 @@ impl Link {
             }
             _ => None,
         };
-        let none = if reply["cancelled"].is_string() { "⏹ cancelled" } else { "⌛ no answer" };
+        let cancelled = reply["cancelled"].is_string();
+        let none = if cancelled { "⏹ cancelled" } else { "⌛ no answer" };
         let done = format!("{text}\n→ {}", answer.as_deref().unwrap_or(none));
         self.call("edit", json!({"thread": thread, "id": id, "message": done})).await.ok();
+        if cancelled {
+            bail!("the user cancelled the question (/stop)");
+        }
         Ok(answer)
     }
 }
@@ -172,7 +176,8 @@ impl Ctx {
     }
 
     /// Asks in the thread with `options` as buttons; the answer is the option pressed,
-    /// numbered or named, the user's own words, or `None` after `timeout`.
+    /// numbered or named, the user's own words, or `None` after `timeout`. Fails if the user
+    /// cancelled it (/stop).
     pub async fn ask(&self, question: &str, options: &[String], timeout: Duration) -> Result<Option<String>> {
         self.link.ask(self.thread()?, question, options, timeout).await
     }
