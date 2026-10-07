@@ -79,8 +79,9 @@ Messengers and messages — August's primitives, usable for any thread:
   `ctx.send(message)` sends to `ctx.thread`.
 - To wait for the user: `const l = await august.listen(thread, { buttons: [...ids], text: true })`
   *before* sending the question, then `await august.next(l, { timeout: 60_000 })` gives
-  `{ press: id }`, `{ text }` or null (timed out, or /stop or /new in that thread). What a
-  listener takes doesn't reach the agent. You decide how long to wait and what to do
+  `{ press: id }`, `{ text }`, `{ timeout: true }` or `{ cancelled: "stop" | "new" }`. What a
+  listener takes doesn't reach the agent; one nobody collects ends after its `ttl`
+  (default 10 minutes). You decide how long to wait and what to do
   without an answer (ask elsewhere, remind, give up).
 - `await ctx.ask(question, ["Yes", "Later"], { timeout })` (or `august.ask(thread, ...)`)
   does all that: buttons, and the answer as the option pressed, numbered or named, the

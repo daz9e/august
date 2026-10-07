@@ -218,7 +218,8 @@ async fn serve(core: Option<&dyn Core>, name: &str, method: &str, params: &Value
         "edit" => core.edit(&thread(params)?, arg("id")?, message(params)?).await.map(|_| Value::Null)?,
         "listen" => {
             let buttons: Vec<String> = serde_json::from_value(params["buttons"].clone()).unwrap_or_default();
-            json!(core.listen(&thread(params)?, buttons, params["text"] == true))
+            let ttl = Duration::from_millis(params["ttl_ms"].as_u64().unwrap_or(600_000));
+            json!(core.listen(&thread(params)?, buttons, params["text"] == true, ttl)?)
         }
         "next" => {
             let listener = params["listener"].as_u64().ok_or_else(|| anyhow::anyhow!("missing `listener`"))?;

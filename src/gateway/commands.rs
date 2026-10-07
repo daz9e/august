@@ -57,7 +57,7 @@ impl Gateway {
                 s
             }
             "stop" => {
-                self.waits.cancel(id);
+                self.waits.cancel(id, "stop");
                 // Extensions hear it first, so a loop of theirs doesn't start the next turn.
                 self.ext.emit("stop", serde_json::json!({}), &Some(id.clone())).await;
                 match state.cancel.lock().unwrap().as_ref() {
@@ -79,7 +79,7 @@ impl Gateway {
                 "📋 Queued.".into()
             }
             "new" | "reset" => {
-                self.waits.cancel(id);
+                self.waits.cancel(id, "new");
                 if let Some(n) = state.cancel.lock().unwrap().as_ref() {
                     n.notify_one();
                 }

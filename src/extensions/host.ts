@@ -68,7 +68,7 @@ async function ask(thread: Thread, question: string, options: string[], timeout 
   const key = Math.random().toString(36).slice(2, 10);
   const buttons = options.map((label, i) => ({ id: `${key}.${i}`, label }));
   // Listen before sending, so a quick answer can't slip past.
-  const listener = await call("listen", { thread, buttons: buttons.map((b) => b.id), text: true });
+  const listener = await call("listen", { thread, buttons: buttons.map((b) => b.id), text: true, ttl_ms: timeout + 5_000 });
   const text = `❓ ${question}`;
   const id = await call("send", { thread, message: { text, buttons } });
   const reply = await call("next", { listener, timeout_ms: timeout });
@@ -79,7 +79,8 @@ async function ask(thread: Thread, question: string, options: string[], timeout 
     const named = options.find((o) => o.toLowerCase() === reply.text.trim().toLowerCase());
     answer = (Number.isInteger(n) && options[n - 1]) || named || reply.text;
   }
-  await call("edit", { thread, id, message: `${text}\n→ ${answer ?? "⌛ no answer"}` }).catch(() => {});
+  const none = reply?.cancelled ? "⏹ cancelled" : "⌛ no answer";
+  await call("edit", { thread, id, message: `${text}\n→ ${answer ?? none}` }).catch(() => {});
   return answer;
 }
 
@@ -141,8 +142,8 @@ const api = {
   messengers: () => call("messengers", {}),
   send: (thread: Thread, message: Message) => call("send", { thread, message }),
   edit: (thread: Thread, id: string, message: Message) => call("edit", { thread, id, message }),
-  listen: (thread: Thread, opts: { buttons?: string[]; text?: boolean } = {}) =>
-    call("listen", { thread, buttons: opts.buttons ?? [], text: opts.text ?? false }),
+  listen: (thread: Thread, opts: { buttons?: string[]; text?: boolean; ttl?: number } = {}) =>
+    call("listen", { thread, buttons: opts.buttons ?? [], text: opts.text ?? false, ttl_ms: opts.ttl ?? 600_000 }),
   next: (listener: number, opts: { timeout?: number } = {}) => call("next", { listener, timeout_ms: opts.timeout ?? 300_000 }),
   ask: (thread: Thread, question: string, options: string[], opts: { timeout?: number } = {}) => ask(thread, question, options, opts.timeout),
   prompt: (thread: Thread, text: string) => call("prompt", { thread, text }),

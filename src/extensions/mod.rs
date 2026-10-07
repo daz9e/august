@@ -47,10 +47,11 @@ pub trait Core: Send + Sync {
     /// Replaces a sent message.
     async fn edit(&self, thread: &Thread, id: &str, message: OutMessage) -> Result<()>;
     /// Starts listening in `thread` for a press of one of `buttons` or (with `text`) a text
-    /// message; what it takes doesn't reach the agent. Returns the listener's id for `next`.
-    fn listen(&self, thread: &Thread, buttons: Vec<String>, text: bool) -> u64;
+    /// message; what it takes doesn't reach the agent. The listener ends after `ttl` even if
+    /// nobody calls `next`. Returns its id for `next`.
+    fn listen(&self, thread: &Thread, buttons: Vec<String>, text: bool, ttl: Duration) -> Result<u64>;
     /// Waits up to `timeout` for what the listener takes: `{"press": id}`, `{"text": ...}`,
-    /// or null (timed out, or the thread got /stop or /new). Ends the listener.
+    /// `{"timeout": true}` or `{"cancelled": "stop" | "new"}`. Ends the listener.
     async fn next(&self, listener: u64, timeout: Duration) -> Result<Value>;
     /// Hands `thread` a message as if the user sent it: joins the running turn, or starts one.
     async fn prompt(&self, thread: &Thread, text: &str) -> Result<()>;

@@ -19,6 +19,8 @@ pub struct Accept {
 pub enum Reply {
     Press(String),
     Text(String),
+    /// The thread got `/stop` or `/new` (the reason) before anything came.
+    Cancelled(&'static str),
 }
 
 struct Wait {
@@ -64,8 +66,15 @@ impl Waits {
         list.remove(i).tx.send(r).is_ok()
     }
 
-    /// Ends every wait in `thread` (on /stop or /new).
-    pub fn cancel(&self, thread: &Thread) {
-        self.list.lock().unwrap().retain(|w| &w.thread != thread);
+    /// Ends every wait in `thread` (on /stop or /new), telling them `why`.
+    pub fn cancel(&self, thread: &Thread, why: &'static str) {
+        let mut list = self.list.lock().unwrap();
+        for w in std::mem::take(&mut *list) {
+            if &w.thread == thread {
+                w.tx.send(Reply::Cancelled(why)).ok();
+            } else {
+                list.push(w);
+            }
+        }
     }
 }

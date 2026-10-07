@@ -109,23 +109,34 @@ impl extensions::Core for ExtCore {
         m.edit(&thread.id, id, &message).await
     }
 
-    fn listen(&self, thread: &Thread, buttons: Vec<String>, text: bool) -> u64 {
-        let Ok(gw) = self.gateway() else { return 0 };
+    fn listen(&self, thread: &Thread, buttons: Vec<String>, text: bool, ttl: std::time::Duration) -> Result<u64> {
+        let gw = self.gateway()?;
         let (id, rx) = gw.waits.add(thread.clone(), waits::Accept { buttons, text });
         gw.listeners.lock().unwrap().insert(id, rx);
-        id
+        // A listener nobody collects mustn't keep taking the user's messages.
+        let me = Arc::downgrade(&gw);
+        tokio::spawn(async move {
+            tokio::time::sleep(ttl).await;
+            if let Some(gw) = me.upgrade()
+                && gw.listeners.lock().unwrap().remove(&id).is_some()
+            {
+                gw.waits.remove(id);
+            }
+        });
+        Ok(id)
     }
 
     async fn next(&self, listener: u64, timeout: std::time::Duration) -> Result<Value> {
         let gw = self.gateway()?;
         let rx = gw.listeners.lock().unwrap().remove(&listener);
-        let rx = rx.ok_or_else(|| anyhow::anyhow!("no listener #{listener} (each one gives one event)"))?;
+        let rx = rx.ok_or_else(|| anyhow::anyhow!("no listener #{listener} (it gave its event, or its time ran out)"))?;
         let reply = tokio::time::timeout(timeout, rx).await.ok().and_then(Result::ok);
         gw.waits.remove(listener);
         Ok(match reply {
             Some(waits::Reply::Press(button)) => serde_json::json!({"press": button}),
             Some(waits::Reply::Text(text)) => serde_json::json!({"text": text}),
-            None => Value::Null,
+            Some(waits::Reply::Cancelled(why)) => serde_json::json!({"cancelled": why}),
+            None => serde_json::json!({"timeout": true}),
         })
     }
 

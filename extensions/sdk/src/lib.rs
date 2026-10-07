@@ -66,11 +66,14 @@ pub struct Button {
     pub label: String,
 }
 
-/// What a listener took (`August::next`).
+/// What a listener took (`August::next`), or why nothing came.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reply {
     Press(String),
     Text(String),
+    Timeout,
+    /// The thread got `/stop` or `/new` (the reason).
+    Cancelled(String),
 }
 
 impl Link {
@@ -84,7 +87,8 @@ impl Link {
         let buttons: Vec<Button> = options.iter().enumerate().map(|(i, o)| Button { id: format!("{key}.{i}"), label: o.clone() }).collect();
         // Listen before sending, so a quick answer can't slip past.
         let ids: Vec<&str> = buttons.iter().map(|b| b.id.as_str()).collect();
-        let listener = self.call("listen", json!({"thread": thread, "buttons": ids, "text": true})).await?;
+        let ttl = timeout.as_millis() as u64 + 5_000;
+        let listener = self.call("listen", json!({"thread": thread, "buttons": ids, "text": true, "ttl_ms": ttl})).await?;
         let text = format!("❓ {question}");
         let id = self.send(thread, &text, &buttons).await?;
         let reply = self.call("next", json!({"listener": listener, "timeout_ms": timeout.as_millis() as u64})).await?;
@@ -98,7 +102,8 @@ impl Link {
             }
             _ => None,
         };
-        let done = format!("{text}\n→ {}", answer.as_deref().unwrap_or("⌛ no answer"));
+        let none = if reply["cancelled"].is_string() { "⏹ cancelled" } else { "⌛ no answer" };
+        let done = format!("{text}\n→ {}", answer.as_deref().unwrap_or(none));
         self.call("edit", json!({"thread": thread, "id": id, "message": done})).await.ok();
         Ok(answer)
     }
@@ -250,18 +255,21 @@ impl August {
 
     /// Starts listening in `thread` for a press of one of `buttons` or (with `text`) a text
     /// message; what it takes doesn't reach the agent. Listen before sending the question.
-    pub async fn listen(&self, thread: &Thread, buttons: &[&str], text: bool) -> Result<u64> {
-        let v = self.0.link.call("listen", json!({"thread": thread, "buttons": buttons, "text": text})).await?;
+    /// It ends after `ttl` even if `next` is never called.
+    pub async fn listen(&self, thread: &Thread, buttons: &[&str], text: bool, ttl: Duration) -> Result<u64> {
+        let params = json!({"thread": thread, "buttons": buttons, "text": text, "ttl_ms": ttl.as_millis() as u64});
+        let v = self.0.link.call("listen", params).await?;
         v.as_u64().ok_or_else(|| anyhow!("bad listener id"))
     }
 
-    /// What the listener took, or `None` after `timeout` (or /stop, /new in the thread).
-    pub async fn next(&self, listener: u64, timeout: Duration) -> Result<Option<Reply>> {
+    /// What the listener took within `timeout`, or why nothing came.
+    pub async fn next(&self, listener: u64, timeout: Duration) -> Result<Reply> {
         let v = self.0.link.call("next", json!({"listener": listener, "timeout_ms": timeout.as_millis() as u64})).await?;
-        Ok(match (v["press"].as_str(), v["text"].as_str()) {
-            (Some(p), _) => Some(Reply::Press(p.into())),
-            (_, Some(t)) => Some(Reply::Text(t.into())),
-            _ => None,
+        Ok(match (v["press"].as_str(), v["text"].as_str(), v["cancelled"].as_str()) {
+            (Some(p), _, _) => Reply::Press(p.into()),
+            (_, Some(t), _) => Reply::Text(t.into()),
+            (_, _, Some(why)) => Reply::Cancelled(why.into()),
+            _ => Reply::Timeout,
         })
     }
 

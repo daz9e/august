@@ -26,8 +26,8 @@ declare module "august" {
     threads: { id: string; active: boolean; /** Unix ms of the last message from it. */ last_seen: number | null }[];
   }
 
-  /** What a listener took: a button press or a text message; null after the timeout or /stop. */
-  export type Reply = { press: string } | { text: string } | null;
+  /** What a listener took: a button press or a text message; or why nothing came. */
+  export type Reply = { press: string } | { text: string } | { timeout: true } | { cancelled: "stop" | "new" };
 
   export interface Context {
     /** The thread the event, tool call or command belongs to (null outside one). */
@@ -162,8 +162,9 @@ declare module "august" {
     /** Replaces a sent message (where the messenger can edit). */
     edit(thread: Thread, id: string, message: OutMessage): Promise<void>;
     /** Starts listening in `thread` for a press of one of `buttons` and/or (`text: true`) a text
-     *  message; what it takes doesn't reach the agent. Listen before you send the question. */
-    listen(thread: Thread, opts: { buttons?: string[]; text?: boolean }): Promise<number>;
+     *  message; what it takes doesn't reach the agent. Listen before you send the question.
+     *  The listener ends after `ttl` ms (default 10 minutes) even if `next` is never called. */
+    listen(thread: Thread, opts: { buttons?: string[]; text?: boolean; ttl?: number }): Promise<number>;
     /** Waits for what the listener takes (default timeout 5 minutes); ends the listener. */
     next(listener: number, opts?: { timeout?: number }): Promise<Reply>;
     /** Asks in `thread` with `options` as buttons and waits (default 5 minutes): resolves to

@@ -20,6 +20,8 @@ pub(super) enum Answer {
     Option(usize),
     /// Anything else the user wrote.
     Text(String),
+    /// The thread got /stop or /new first.
+    Cancelled,
 }
 
 /// Sends `text` to `thread` with `options` (as buttons where the messenger has enough,
@@ -50,13 +52,14 @@ pub(super) async fn ask(
         Err(_) => None,
     };
     waits.remove(wait);
-    let answer = reply.map(|r| match r {
-        Reply::Press(button) => Answer::Option(ids.iter().position(|id| *id == button).unwrap_or(0)),
+    let answer = reply.and_then(|r| match r {
+        Reply::Press(button) => Some(Answer::Option(ids.iter().position(|id| *id == button).unwrap_or(0))),
         Reply::Text(t) => {
             let by_number = t.parse::<usize>().ok().and_then(|n| n.checked_sub(1)).filter(|i| *i < options.len());
             let by_name = options.iter().position(|o| o.trim().eq_ignore_ascii_case(t.trim()));
-            by_number.or(by_name).map(Answer::Option).unwrap_or(Answer::Text(t))
+            Some(by_number.or(by_name).map(Answer::Option).unwrap_or(Answer::Text(t)))
         }
+        Reply::Cancelled(_) => Some(Answer::Cancelled),
     });
     Ok((sent?, answer))
 }
@@ -93,6 +96,7 @@ impl Approver for ChatApprover {
                 }
                 ("❌ Denied", false)
             }
+            Some(Answer::Cancelled) => ("⏹ Cancelled", false),
             None => ("⌛ Timed out, denied", false),
         };
         if self.messenger.describe().capabilities.edit {

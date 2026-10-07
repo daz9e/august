@@ -369,6 +369,11 @@ export default function (august: August) {
     const l = await august.listen(ctx.thread!, { text: true });
     return `got: ${JSON.stringify(await august.next(l, { timeout: 300 }))}`;
   });
+  // A listener nobody collects stops taking messages after its ttl.
+  august.registerCommand("forget", async (_, ctx) => {
+    await august.listen(ctx.thread!, { text: true, ttl: 200 });
+    return "listening briefly";
+  });
 }
 "#;
 
@@ -399,9 +404,18 @@ async fn extensions_see_messengers_and_talk_to_any_thread() {
     second.say("maybe later").await;
     first.wait_for("answer: maybe later").await;
     assert!(fake.llm_requests().is_empty(), "an answer started a turn");
+    // /stop in that thread cancels the question, and it says so.
+    first.say("/poke 2").await;
+    second.question().await;
+    second.ask("/stop", "Nothing is running").await;
+    first.wait_for("answer: null").await;
+    second.wait_for("→ ⏹ cancelled").await;
 
-    // A listener without an answer gives up after its timeout.
-    first.ask("/wait", "got: null").await;
+    // A listener without an answer gives up after its timeout, and says so.
+    first.ask("/wait", r#"got: {"timeout":true}"#).await;
+    first.ask("/forget", "listening briefly").await;
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    first.ask("hello", "the agent answered").await;
 }
 
 const HINTS: &str = r###"export default function (august) {
