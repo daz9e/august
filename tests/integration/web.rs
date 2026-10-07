@@ -18,6 +18,15 @@ async fn web() -> String {
         .route("/page", get(|| async { axum::response::Html(PAGE) }))
         .route("/app", get(|| async { axum::response::Html("<html><body><div id=root></div><script>render()</script></body></html>") }))
         .route("/long", get(|| async { "0123456789".repeat(4_500) }))
+        // Russian in windows-1251, named by the header or only by the page.
+        .route("/cp1251", get(|| async {
+            let body = encoding_rs::WINDOWS_1251.encode("<p>Привет, мир</p>").0.into_owned();
+            ([("content-type", "text/html; charset=windows-1251")], body)
+        }))
+        .route("/meta1251", get(|| async {
+            let body = encoding_rs::WINDOWS_1251.encode("<html><head><meta charset=\"windows-1251\"></head><body>Пока</body></html>").0.into_owned();
+            ([("content-type", "text/html")], body)
+        }))
         .route("/report.pdf", get(|| async { ([("content-type", "application/pdf")], "%PDF-1.4") }))
         .route("/brave", get(|q: axum::extract::Query<HashMap<String, String>>, h: axum::http::HeaderMap| async move {
             assert_eq!(h["x-subscription-token"], "k");
@@ -84,4 +93,13 @@ async fn web_fetch_reads_a_long_page_in_parts() {
     assert!(first.starts_with("0123") && first.ends_with("\n\n[characters 0-30000 of 45000; call web_fetch with offset 30000 for the rest]"), "{}", &first[29_990..]);
     assert_eq!(rest.len(), 15_000 + "\n\n[characters 30000-45000 of 45000]".len());
     assert!(rest.ends_with("[characters 30000-45000 of 45000]"));
+}
+
+#[tokio::test]
+async fn web_fetch_decodes_pages_in_their_charset() {
+    let base = web().await;
+    let fetch = |path: &str| ("web_fetch", json!({"url": format!("{base}{path}")}));
+    let results = tool_results(&[], vec![fetch("/cp1251"), fetch("/meta1251")]).await;
+    assert_eq!(results[0], "Привет, мир");
+    assert_eq!(results[1], "Пока");
 }

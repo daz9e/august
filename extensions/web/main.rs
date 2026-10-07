@@ -75,15 +75,23 @@ fn html_to_text(html: &str, base: Option<&reqwest::Url>) -> String {
     BLANK_LINES.replace_all(s.trim(), "\n\n").into_owned()
 }
 
-/// At most MAX_BODY bytes of a response body.
+static META_CHARSET: LazyLock<Regex> = LazyLock::new(|| re(r#"(?i)<meta[^>]+charset\s*=\s*["']?([\w-]+)"#));
+
+/// At most MAX_BODY bytes of a response body, decoded by the charset the server or the
+/// page names (UTF-8 if none).
 async fn read_capped(mut resp: reqwest::Response) -> Result<String> {
+    let kind = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_lowercase();
     let mut body = Vec::new();
     while body.len() < MAX_BODY {
         let Some(chunk) = resp.chunk().await? else { break };
         body.extend_from_slice(&chunk);
     }
     body.truncate(MAX_BODY);
-    Ok(String::from_utf8_lossy(&body).into_owned())
+    let named = kind.split("charset=").nth(1).map(|c| c.split(';').next().unwrap_or(c).trim().trim_matches('"').to_string());
+    let head = String::from_utf8_lossy(&body[..body.len().min(4096)]).into_owned();
+    let named = named.or_else(|| META_CHARSET.captures(&head).map(|c| c[1].to_string()));
+    let encoding = named.and_then(|n| encoding_rs::Encoding::for_label(n.as_bytes())).unwrap_or(encoding_rs::UTF_8);
+    Ok(encoding.decode(&body).0.into_owned())
 }
 
 /// The page's text from character `offset` on, at most MAX_TEXT characters of it.
