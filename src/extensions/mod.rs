@@ -46,6 +46,10 @@ pub trait Core: Send + Sync {
     async fn send(&self, thread: &Thread, message: OutMessage) -> Result<String>;
     /// Replaces a sent message.
     async fn edit(&self, thread: &Thread, id: &str, message: OutMessage) -> Result<()>;
+    /// Deletes a sent message (where the messenger can).
+    async fn delete(&self, thread: &Thread, id: &str) -> Result<()>;
+    /// Sets August's emoji reaction on a message, any message (empty removes it).
+    async fn react(&self, thread: &Thread, id: &str, emoji: &str) -> Result<()>;
     /// Starts listening in `thread` for a press of one of `buttons` or (with `text`) a text
     /// message; what it takes doesn't reach the agent. The listener ends after `ttl` even if
     /// nobody calls `next`. Returns its id for `next`.

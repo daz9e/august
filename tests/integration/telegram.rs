@@ -64,3 +64,29 @@ async fn commands_added_later_reach_the_menu() {
     let _gw = august(&fake, Setup { telegram: true, home: &[("extensions/late/index.ts", LATE_COMMAND)], ..Default::default() }).await;
     fake.wait_for(TIMEOUT, |f| f.calls("setMyCommands").iter().any(|r| r.text().contains("\"later\""))).await;
 }
+
+const REACT: &str = r#"export default function (august) {
+  august.on("message_in", async ({ id }, ctx) => { await august.react(ctx.thread, id, "👀"); });
+  august.on("reaction", async ({ message, emoji }, ctx) => { await ctx.send(`you reacted ${emoji} to ${message}`); });
+}"#;
+
+#[tokio::test]
+async fn reactions_go_both_ways() {
+    if !std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("bun").is_file())) {
+        return eprintln!("skipping: bun is not installed");
+    }
+    let reaction = json!({"update_id": 2, "message_reaction": {
+        "chat": {"id": CHAT, "type": "private"}, "message_id": 40, "date": 0,
+        "user": {"id": OWNER, "is_bot": false, "first_name": "Owner"},
+        "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": "👍"}],
+    }});
+    let fake = Fake::start(vec![message(1, json!({"text": "hi"})), reaction], HashMap::new(), Some(Box::new(|_| reply_text("ok")))).await;
+    let _gw = august(&fake, Setup { telegram: true, home: &[("extensions/react/index.ts", REACT)], ..Default::default() }).await;
+
+    // August reacts to the user's message…
+    fake.wait_for(TIMEOUT, |f| !f.calls("setMessageReaction").is_empty()).await;
+    let set = fake.calls("setMessageReaction")[0].json();
+    assert_eq!((set["message_id"].as_i64(), set["reaction"][0]["emoji"].as_str()), (Some(1), Some("👀")));
+    // …and hears the user's reaction.
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("you reacted 👍 to 40"))).await;
+}

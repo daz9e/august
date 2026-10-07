@@ -66,8 +66,10 @@ pub struct Attachment {
 
 #[derive(Debug, Clone)]
 pub enum InboundKind {
-    /// A message: text (or a caption) and any attached files.
-    Message { text: String, files: Vec<Attachment> },
+    /// A message: its id in the messenger, text (or a caption) and any attached files.
+    Message { id: String, text: String, files: Vec<Attachment> },
+    /// The user reacted to message `message` with `emoji` (an empty one: took it back).
+    Reaction { message: String, emoji: String },
     /// `/name args` (without the slash).
     Command { name: String, args: String },
     /// A press of the button with this `id` (given when the message was sent). The
@@ -150,8 +152,14 @@ pub struct Capabilities {
     pub audio_in: bool,
     /// A menu of `/commands`.
     pub commands: bool,
-    /// A "typing…" indicator.
-    pub typing: bool,
+    /// Shows that August is busy (e.g. "typing…").
+    pub presence: bool,
+    /// Sent messages can be deleted.
+    pub delete: bool,
+    /// Messages can carry and receive emoji reactions.
+    pub reactions: bool,
+    /// A message can answer another one (`reply_to`).
+    pub reply: bool,
     /// More than one thread (several chats or windows).
     pub threads: bool,
 }
@@ -198,13 +206,20 @@ pub trait Messenger: Send + Sync {
     async fn send(&self, thread: &str, message: &OutMessage) -> Result<String>;
     /// Replaces a sent message (where `capabilities.edit`).
     async fn edit(&self, thread: &str, id: &str, message: &OutMessage) -> Result<()>;
-    /// "typing…" indicator; best effort.
-    async fn typing(&self, chat: &str) -> Result<()>;
+    /// August starts (`busy`) or stops working in `thread`; shown however the messenger
+    /// shows it ("typing…", a prompt), and kept up by the messenger until it changes.
+    async fn presence(&self, _thread: &str, _busy: bool) {}
+    /// Deletes a sent message (where `capabilities.delete`).
+    async fn delete(&self, _thread: &str, _id: &str) -> Result<()> {
+        anyhow::bail!("this messenger can't delete messages")
+    }
+    /// Sets August's reaction on a message (where `capabilities.reactions`); empty removes it.
+    async fn react(&self, _thread: &str, _id: &str, _emoji: &str) -> Result<()> {
+        anyhow::bail!("this messenger has no reactions")
+    }
     async fn set_commands(&self, commands: &[CommandSpec]) -> Result<()>;
     /// Fetches the contents of an inbound attachment.
     async fn download(&self, file: &Attachment) -> Result<Vec<u8>>;
-    /// The gateway has nothing more to say in `chat` for now (a turn or command is done).
-    async fn idle(&self, _chat: &str) {}
 }
 
 #[async_trait]

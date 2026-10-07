@@ -109,6 +109,16 @@ impl extensions::Core for ExtCore {
         m.edit(&thread.id, id, &message).await
     }
 
+    async fn delete(&self, thread: &Thread, id: &str) -> Result<()> {
+        let (_, m) = self.messenger(thread)?;
+        m.delete(&thread.id, id).await
+    }
+
+    async fn react(&self, thread: &Thread, id: &str, emoji: &str) -> Result<()> {
+        let (_, m) = self.messenger(thread)?;
+        m.react(&thread.id, id, emoji).await
+    }
+
     fn listen(&self, thread: &Thread, buttons: Vec<String>, text: bool, ttl: std::time::Duration) -> Result<u64> {
         let gw = self.gateway()?;
         let (id, rx) = gw.waits.add(thread.clone(), waits::Accept { buttons, text });
@@ -311,19 +321,25 @@ impl Gateway {
             // A button of a question nobody waits for any more.
             InboundKind::Press { .. } => {}
             InboundKind::Command { name, args } => self.command(&channel, &ev.thread, &name, &args).await?,
-            InboundKind::Message { text, files } if text.is_empty() && files.is_empty() => {}
-            InboundKind::Message { text, files } => {
+            InboundKind::Reaction { message, emoji } => {
+                if self.ext.listens("reaction") {
+                    let data = serde_json::json!({"message": message, "emoji": emoji});
+                    self.ext.emit("reaction", data, &extensions::Origin::thread(ev.thread.clone())).await;
+                }
+            }
+            InboundKind::Message { text, files, .. } if text.is_empty() && files.is_empty() => {}
+            InboundKind::Message { id: message, text, files } => {
                 let state = self.chat(&ev.thread).await?;
                 let intake = state.intake.lock().await;
                 let (note, images, saved) = self.receive(&*channel, &files).await;
                 let mut text = [text, note].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
                 if self.ext.listens("message_in") {
-                    let data = self.ext.emit("message_in", serde_json::json!({"text": text, "files": saved}), &extensions::Origin::thread(ev.thread.clone())).await;
+                    let data = self.ext.emit("message_in", serde_json::json!({"id": message, "text": text, "files": saved}), &extensions::Origin::thread(ev.thread.clone())).await;
                     if data["handled"] == true {
                         if let Some(reply) = data["reply"].as_str().filter(|r| !r.is_empty()) {
                             channel.send(&chat, &OutMessage::text(reply)).await?;
                         }
-                        channel.idle(&chat).await;
+                        channel.presence(&chat, false).await;
                         return Ok(());
                     }
                     if let Some(t) = data["text"].as_str() {

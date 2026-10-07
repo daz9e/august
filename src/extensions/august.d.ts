@@ -20,7 +20,7 @@ declare module "august" {
     capabilities: {
       markdown: boolean; max_len: number; buttons: number; edit: boolean; edit_interval_ms: number;
       files_in: boolean; files_out: boolean; images: boolean; audio_in: boolean;
-      commands: boolean; typing: boolean; threads: boolean;
+      commands: boolean; presence: boolean; delete: boolean; reactions: boolean; reply: boolean; threads: boolean;
     };
     /** Anything else it offers, free form. */
     extra: Record<string, unknown>;
@@ -101,6 +101,8 @@ declare module "august" {
     /** A user message arrived (before the agent sees it). `files`: its attachments, already
      *  saved in the workspace (`path` is absolute); `voice` marks a recorded voice note. */
     message_in: {
+      /** The message's id in its messenger (for `react`, `reply_to`). */
+      id: string;
       text: string;
       files: { path: string; mime: string; kind: "voice" | "audio" | "image" | "video" | "document"; voice: boolean }[];
     };
@@ -122,6 +124,8 @@ declare module "august" {
       /** Not the user's visible conversation (`ctx.turn.mode` says which). */
       unattended: boolean;
     };
+    /** The user reacted to `message` with `emoji` (empty: took it back). Observe only. */
+    reaction: { message: string; emoji: string };
     /** The user sent /stop in the thread (observe only). */
     stop: {};
     /** Before each model call of a turn; `step` counts from 0, `system` is the full prompt. */
@@ -146,6 +150,7 @@ declare module "august" {
     tool_result: { output?: string; isError?: boolean };
     turn_end: void;
     stop: void;
+    reaction: void;
     /** `system` replaces the system prompt for this one call (breaks the prompt cache). */
     llm_call: { system?: string };
     /** Returned `messages` replace what the model sees for this one call; the stored
@@ -208,6 +213,10 @@ declare module "august" {
     send(thread: Thread, message: OutMessage): Promise<string>;
     /** Replaces a sent message (where the messenger can edit). */
     edit(thread: Thread, id: string, message: OutMessage): Promise<void>;
+    /** Deletes a sent message (where the messenger can). */
+    delete(thread: Thread, id: string): Promise<void>;
+    /** Sets August's emoji reaction on any message, the user's too (empty removes it). */
+    react(thread: Thread, id: string, emoji: string): Promise<void>;
     /** Starts listening in `thread` for a press of one of `buttons` and/or (`text: true`) a text
      *  message; what it takes doesn't reach the agent. Listen before you send the question.
      *  The listener ends after `ttl` ms (default 10 minutes) even if `next` is never called. */

@@ -8,7 +8,6 @@ use crate::llm::Block;
 use crate::tools::{FileSink, ToolCtx};
 use anyhow::Result;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 /// `send_file` from a chat turn: goes through the renderer so the file lands
@@ -54,6 +53,7 @@ impl Gateway {
         let state = self.chat(&id).await?;
         let mut agent = state.agent.lock().await; // turns in one chat run in order
         state.inbox.start();
+        channel.presence(chat, true).await;
         let (mut text, mut images) = (text.to_string(), images);
         loop {
             let r = self.turn_once(&state, &mut agent, channel.clone(), &id, chat, &text, images).await;
@@ -62,7 +62,7 @@ impl Gateway {
                 (text, images) = (left.join("\n"), Vec::new());
                 continue;
             }
-            channel.idle(chat).await;
+            channel.presence(chat, false).await;
             return r.map(|_| ());
         }
     }
@@ -81,16 +81,6 @@ impl Gateway {
         let (tag, cancel) = self.turns.begin(id, crate::agent::TurnMode::Visible, None, None);
         agent.set_provider(self.provider.read().unwrap().clone());
 
-        let typing = {
-            let (ch, chat) = (channel.clone(), chat.to_string());
-            let shows = ch.describe().capabilities.typing;
-            tokio::spawn(async move {
-                while shows {
-                    ch.typing(&chat).await.ok();
-                    tokio::time::sleep(Duration::from_secs(4)).await;
-                }
-            })
-        };
         let (tx, rx) = mpsc::unbounded_channel();
         let renderer = tokio::spawn(render(channel.clone(), chat.to_string(), rx));
 
@@ -147,7 +137,6 @@ impl Gateway {
         }
         self.turns.end(tag.id);
         self.turn_ended(id, &tag, text, &ended);
-        typing.abort();
         drop(tx);
         drop(ctx);
         drop(on_event);

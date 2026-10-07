@@ -136,7 +136,7 @@ impl Api {
                 json!({
                     "offset": offset,
                     "timeout": timeout,
-                    "allowed_updates": ["message", "callback_query"],
+                    "allowed_updates": ["message", "callback_query", "message_reaction"],
                 }),
             )
             .await?;

@@ -54,7 +54,7 @@ impl Waits {
     pub fn offer(&self, ev: &Inbound) -> bool {
         let reply = |w: &Wait| match &ev.kind {
             InboundKind::Press { button, .. } if w.accept.buttons.contains(button) => Some(Reply::Press(button.clone())),
-            InboundKind::Message { text, files } if w.accept.text && files.is_empty() && !text.trim().is_empty() => {
+            InboundKind::Message { text, files, .. } if w.accept.text && files.is_empty() && !text.trim().is_empty() => {
                 Some(Reply::Text(text.trim().to_string()))
             }
             _ => None,

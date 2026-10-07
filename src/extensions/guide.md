@@ -78,7 +78,11 @@ Messengers and messages — August's primitives, usable for any thread:
   its threads, the one the user wrote in last marked `active`.
 - `await august.send(thread, { text, buttons: [{ id, label }] })` sends a message (a plain
   string works too) and returns its id; `august.edit(thread, id, message)` replaces it.
-  `ctx.send(message)` sends to `ctx.thread`.
+  `ctx.send(message)` sends to `ctx.thread`. A message can also carry button rows
+  (`buttons: [[...], [...]]`), local `files` (the text is their caption) and `reply_to` (an
+  id). Where the messenger can: `august.delete(thread, id)`, and
+  `august.react(thread, id, "👍")` on any message, the user's too (`message_in` has its id).
+  The user's reactions arrive as the `reaction` event `{ message, emoji }`.
 - To wait for the user: `const l = await august.listen(thread, { buttons: [...ids], text: true })`
   *before* sending the question, then `await august.next(l, { timeout: 60_000 })` gives
   `{ press: id }`, `{ text }`, `{ timeout: true }` or `{ cancelled: "stop" | "new" }`. What a

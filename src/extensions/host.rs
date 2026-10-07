@@ -225,6 +225,8 @@ async fn serve(core: Option<&dyn Core>, name: &str, method: &str, params: &Value
         "messengers" => core.messengers().await?,
         "send" => json!(core.send(&thread(params)?, message(params)?).await?),
         "edit" => core.edit(&thread(params)?, arg("id")?, message(params)?).await.map(|_| Value::Null)?,
+        "delete" => core.delete(&thread(params)?, arg("id")?).await.map(|_| Value::Null)?,
+        "react" => core.react(&thread(params)?, arg("id")?, params["emoji"].as_str().unwrap_or("")).await.map(|_| Value::Null)?,
         "listen" => {
             let buttons: Vec<String> = serde_json::from_value(params["buttons"].clone()).unwrap_or_default();
             let ttl = Duration::from_millis(params["ttl_ms"].as_u64().unwrap_or(600_000));

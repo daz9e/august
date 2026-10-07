@@ -110,7 +110,10 @@ impl Clients {
             let kind = match serde_json::from_str::<ToAugust>(&line) {
                 Ok(ToAugust::Text { text }) => match super::parse_command(&text, None) {
                     Some((name, args)) => InboundKind::Command { name, args },
-                    None => InboundKind::Message { text: text.trim().to_string(), files: Vec::new() },
+                    None => {
+                        let id = format!("in-{}", self.next_message.fetch_add(1, Ordering::Relaxed));
+                        InboundKind::Message { id, text: text.trim().to_string(), files: Vec::new() }
+                    }
                 },
                 Ok(ToAugust::Press { button }) => InboundKind::Press { button },
                 Ok(ToAugust::Hello) | Err(_) => continue,
@@ -144,7 +147,10 @@ impl Messenger for Terminal {
                 images: false,
                 audio_in: false,
                 commands: false,
-                typing: false,
+                presence: true,
+                delete: false,
+                reactions: false,
+                reply: false,
                 threads: true,
             },
             extra: serde_json::json!({
@@ -192,10 +198,6 @@ impl Messenger for Terminal {
         self.0.to(thread, ToClient::Edit { id: id.into(), text: message.text.clone(), buttons: wire(&message.buttons) })
     }
 
-    async fn typing(&self, _thread: &str) -> Result<()> {
-        Ok(())
-    }
-
     async fn set_commands(&self, _commands: &[CommandSpec]) -> Result<()> {
         Ok(())
     }
@@ -204,7 +206,9 @@ impl Messenger for Terminal {
         bail!("the terminal has no attachments")
     }
 
-    async fn idle(&self, thread: &str) {
-        self.0.to(thread, ToClient::Idle).ok();
+    async fn presence(&self, thread: &str, busy: bool) {
+        if !busy {
+            self.0.to(thread, ToClient::Idle).ok();
+        }
     }
 }

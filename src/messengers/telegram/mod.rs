@@ -121,6 +121,20 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
         return Parsed::Press(press, id.to_string());
     }
 
+    let r = &u["message_reaction"];
+    if let (Some(chat), Some(message)) = (r["chat"]["id"].as_i64(), r["message_id"].as_i64()) {
+        let user = r["user"]["id"].as_i64().unwrap_or(0);
+        if !allowed.contains(&user) {
+            return Parsed::Ignore;
+        }
+        let emoji = r["new_reaction"].as_array().into_iter().flatten().find_map(|e| e["emoji"].as_str()).unwrap_or("");
+        return Parsed::Event(Inbound {
+            thread: chat_of(chat),
+            user: User { id: user.to_string(), name: display_name(&r["user"]) },
+            kind: InboundKind::Reaction { message: message.to_string(), emoji: emoji.to_string() },
+        });
+    }
+
     let m = &u["message"];
     let (Some(chat), Some(user)) = (m["chat"]["id"].as_i64(), m["from"]["id"].as_i64()) else {
         return Parsed::Ignore;
@@ -157,7 +171,7 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
             } else {
                 text.to_string()
             };
-            InboundKind::Message { text: cleaned.trim().to_string(), files }
+            InboundKind::Message { id: m["message_id"].to_string(), text: cleaned.trim().to_string(), files }
         }
     };
     Parsed::Event(Inbound {
@@ -216,19 +230,17 @@ fn attachments(m: &Value) -> Vec<Attachment> {
 pub struct Telegram {
     api: Api,
     allowed: Vec<i64>,
+    /// "typing…" kept up in these chats while August works.
+    typing: std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>,
 }
 
 impl Telegram {
     pub fn new(cfg: &Config) -> Self {
-        Self {
-            api: Api::new(&cfg.token),
-            allowed: cfg.allowed.clone(),
-        }
+        Self::with_api(Api::new(&cfg.token), cfg.allowed.clone())
     }
 
-    #[cfg(test)]
     fn with_api(api: Api, allowed: Vec<i64>) -> Self {
-        Self { api, allowed }
+        Self { api, allowed, typing: Default::default() }
     }
 }
 
@@ -322,7 +334,10 @@ impl Messenger for Telegram {
                 images: true,
                 audio_in: true,
                 commands: true,
-                typing: true,
+                presence: true,
+                delete: true,
+                reactions: true,
+                reply: true,
                 threads: true,
             },
             extra: json!({
@@ -447,11 +462,34 @@ impl Messenger for Telegram {
         }
     }
 
-    async fn typing(&self, chat: &str) -> Result<()> {
-        self.api
-            .call("sendChatAction", json!({"chat_id": chat_id(chat), "action": "typing"}))
-            .await
-            .map(|_| ())
+    async fn presence(&self, chat: &str, busy: bool) {
+        let mut typing = self.typing.lock().unwrap();
+        if let Some(old) = typing.remove(chat) {
+            old.abort();
+        }
+        if busy {
+            // Telegram shows "typing…" for about five seconds per call.
+            let (api, id) = (self.api.clone(), chat_id(chat));
+            let task = tokio::spawn(async move {
+                loop {
+                    api.call("sendChatAction", json!({"chat_id": id, "action": "typing"})).await.ok();
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                }
+            });
+            typing.insert(chat.to_string(), task.abort_handle());
+        }
+    }
+
+    async fn delete(&self, chat: &str, id: &str) -> Result<()> {
+        let message = id.parse::<i64>().context("bad message id")?;
+        self.api.call("deleteMessage", json!({"chat_id": chat_id(chat), "message_id": message})).await.map(drop)
+    }
+
+    async fn react(&self, chat: &str, id: &str, emoji: &str) -> Result<()> {
+        let message = id.parse::<i64>().context("bad message id")?;
+        let reaction = if emoji.is_empty() { json!([]) } else { json!([{"type": "emoji", "emoji": emoji}]) };
+        let params = json!({"chat_id": chat_id(chat), "message_id": message, "reaction": reaction});
+        self.api.call("setMessageReaction", params).await.map(drop)
     }
 
     async fn set_commands(&self, commands: &[CommandSpec]) -> Result<()> {

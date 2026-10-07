@@ -128,7 +128,7 @@ impl Gateway {
                 match self.ext.run_command(other, args, &Origin::thread(id.clone())).await {
                     Some(Ok(Some(reply))) => reply,
                     Some(Ok(None)) => {
-                        channel.idle(chat).await;
+                        channel.presence(chat, false).await;
                         return Ok(());
                     }
                     Some(Err(e)) => format!("⚠️ /{other} failed: {e}"),
@@ -137,7 +137,7 @@ impl Gateway {
             }
         };
         channel.send(chat, &OutMessage::text(reply)).await?;
-        channel.idle(chat).await;
+        channel.presence(chat, false).await;
         Ok(())
     }
 

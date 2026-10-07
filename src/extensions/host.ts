@@ -153,6 +153,8 @@ const api = {
   messengers: () => call("messengers", {}),
   send: (thread: Thread, message: Message) => call("send", { thread, message }),
   edit: (thread: Thread, id: string, message: Message) => call("edit", { thread, id, message }),
+  delete: (thread: Thread, id: string) => call("delete", { thread, id }),
+  react: (thread: Thread, id: string, emoji: string) => call("react", { thread, id, emoji }),
   listen: (thread: Thread, opts: { buttons?: string[]; text?: boolean; ttl?: number } = {}) =>
     call("listen", { thread, buttons: opts.buttons ?? [], text: opts.text ?? false, ttl_ms: opts.ttl ?? 600_000 }),
   next: (listener: number, opts: { timeout?: number } = {}) => call("next", { listener, timeout_ms: opts.timeout ?? 300_000 }),
