@@ -40,6 +40,10 @@ pub struct ClaudeCli {
 
 #[async_trait]
 impl LlmProvider for ClaudeCli {
+    fn context_window(&self) -> Option<usize> {
+        Some(200_000)
+    }
+
     fn name(&self) -> &str {
         "claude-cli"
     }

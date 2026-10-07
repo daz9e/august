@@ -24,6 +24,13 @@ const MAX_STEPS: usize = 150;
 fn max_steps() -> usize {
     std::env::var("AUGUST_MAX_STEPS").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(MAX_STEPS)
 }
+/// History size (tokens) at which older messages are summarised: `AUGUST_CONTEXT_TOKENS`,
+/// else 80% of the model's context window, else a default.
+fn context_limit(provider: &dyn LlmProvider) -> usize {
+    let set = std::env::var("AUGUST_CONTEXT_TOKENS").ok().and_then(|v| v.parse().ok());
+    set.or(provider.context_window().map(|w| w * 4 / 5)).unwrap_or(DEFAULT_CONTEXT_TOKENS)
+}
+
 /// How a turn runs. `Visible`: the user's conversation, streamed to the thread. `Quiet`:
 /// in the thread's conversation, nothing shown, the reply returned. `Fork`: on a copy of
 /// the conversation, nothing kept. `Fresh`: a new conversation (a sub-agent).
@@ -96,6 +103,7 @@ impl Agent {
     ) -> Result<Self> {
         let (session, history) = db.resume_session(chat_key)?;
         let stored = history.len();
+        let context_limit = context_limit(&*provider);
         Ok(Self {
             provider,
             tools,
@@ -108,10 +116,7 @@ impl Agent {
             session,
             stored,
             turn_start: stored,
-            context_limit: std::env::var("AUGUST_CONTEXT_TOKENS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(DEFAULT_CONTEXT_TOKENS),
+            context_limit,
             last_input_tokens: 0,
             compact_retry_at: 0,
             turn_tool_calls: 0,
@@ -132,6 +137,7 @@ impl Agent {
 
     pub fn set_provider(&mut self, provider: Arc<dyn LlmProvider>) {
         self.provider = provider;
+        self.context_limit = context_limit(&*self.provider);
     }
 
     /// Starts a new conversation; the old one stays searchable.

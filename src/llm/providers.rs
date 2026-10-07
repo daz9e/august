@@ -53,11 +53,101 @@ pub fn registry() -> &'static [&'static dyn ProviderDef] {
     &REGISTRY
 }
 
+/// Built-in providers, then the user's own from `providers.json`.
+pub fn all() -> impl Iterator<Item = &'static dyn ProviderDef> {
+    registry().iter().copied().chain(custom().iter().copied())
+}
+
 pub fn info(id: &str) -> Result<&'static dyn ProviderDef> {
-    registry().iter().copied().find(|p| p.id() == id).with_context(|| {
-        let ids: Vec<_> = registry().iter().map(|p| p.id()).collect();
+    all().find(|p| p.id() == id).with_context(|| {
+        let ids: Vec<_> = all().map(|p| p.id()).collect();
         format!("unknown provider: {id} ({})", ids.join(" | "))
     })
+}
+
+/// A provider of the user's own, from `~/.august/providers.json`: one of the wire formats
+/// August speaks (`openai`, `anthropic`) at another address, e.g.
+/// `{"openrouter": {"format": "openai", "base_url": "https://openrouter.ai/api/v1",
+/// "key_env": "OPENROUTER_API_KEY", "model": "anthropic/claude-sonnet-4.5", "context_window": 200000}}`.
+/// The key comes from `key_env`, else `credentials.json`, else none (local servers).
+#[derive(serde::Deserialize)]
+struct CustomConfig {
+    label: Option<String>,
+    format: String,
+    base_url: String,
+    key_env: Option<String>,
+    model: Option<String>,
+    context_window: Option<usize>,
+}
+
+struct CustomDef {
+    id: &'static str,
+    label: &'static str,
+    key_env: &'static str,
+    model: Option<&'static str>,
+    cfg: CustomConfig,
+}
+
+fn custom() -> &'static [&'static dyn ProviderDef] {
+    static CUSTOM: std::sync::OnceLock<Vec<&'static dyn ProviderDef>> = std::sync::OnceLock::new();
+    CUSTOM.get_or_init(|| {
+        let all: std::collections::BTreeMap<String, CustomConfig> = config::load("providers.json").unwrap_or_else(|e| {
+            eprintln!("providers.json: {e:#}");
+            Default::default()
+        });
+        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+        all.into_iter()
+            .filter(|(id, _)| !registry().iter().any(|p| p.id() == id))
+            .map(|(id, cfg)| {
+                let def = CustomDef {
+                    label: leak(cfg.label.clone().unwrap_or_else(|| id.clone())),
+                    key_env: leak(cfg.key_env.clone().unwrap_or_default()),
+                    model: cfg.model.clone().map(leak),
+                    id: leak(id),
+                    cfg,
+                };
+                &*Box::leak(Box::new(def)) as &'static dyn ProviderDef
+            })
+            .collect()
+    })
+}
+
+#[async_trait]
+impl ProviderDef for CustomDef {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+    fn label(&self) -> &'static str {
+        self.label
+    }
+    fn auth(&self) -> Auth {
+        Auth::ApiKey
+    }
+    fn key_env(&self) -> &'static str {
+        self.key_env
+    }
+    fn default_model(&self) -> Option<&'static str> {
+        self.model
+    }
+    async fn build(&self, sel: &Selection) -> Result<Arc<dyn LlmProvider>> {
+        let key = credential(self)?.map(|c| c.key).unwrap_or_default();
+        let model = need_model(self, sel)?;
+        Ok(match self.cfg.format.as_str() {
+            "openai" => Arc::new(llm::openai::OpenAi::new(self.cfg.base_url.clone(), key, model).with_context_window(self.cfg.context_window)),
+            "anthropic" => Arc::new(llm::anthropic::Anthropic::new(&self.cfg.base_url, key, model, sel.effort.clone())),
+            other => anyhow::bail!("provider {}: unknown format `{other}` (openai or anthropic)", self.id),
+        })
+    }
+    async fn list_models(&self, cred: Option<&ApiCredential>) -> Result<Vec<String>> {
+        if self.cfg.format != "openai" {
+            return Ok(self.model.map(String::from).into_iter().collect());
+        }
+        let mut req = crate::util::http_client().get(format!("{}/models", self.cfg.base_url.trim_end_matches('/')));
+        if let Some(c) = cred.filter(|c| !c.key.is_empty()) {
+            req = req.bearer_auth(&c.key);
+        }
+        Ok(model_ids(req.send().await?.error_for_status()?.json().await?))
+    }
 }
 
 fn env(key: &str) -> Option<String> {

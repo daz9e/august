@@ -273,6 +273,10 @@ impl Anthropic {
 
 #[async_trait]
 impl LlmProvider for Anthropic {
+    fn context_window(&self) -> Option<usize> {
+        Some(200_000)
+    }
+
     fn name(&self) -> &str {
         &self.model
     }

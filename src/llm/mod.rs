@@ -209,6 +209,11 @@ pub struct Completion {
 pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
 
+    /// The model's context window in tokens, when the provider knows it.
+    fn context_window(&self) -> Option<usize> {
+        None
+    }
+
     /// `session` is a stable id for the conversation (gateways use it for routing
     /// and prompt caching); providers that don't need it ignore it.
 

@@ -54,6 +54,10 @@ where
 
 #[async_trait]
 impl LlmProvider for Resilient {
+    fn context_window(&self) -> Option<usize> {
+        self.primary.context_window()
+    }
+
     fn name(&self) -> &str {
         self.primary.name()
     }

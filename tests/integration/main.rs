@@ -14,6 +14,7 @@ mod review;
 mod inbox;
 mod limits;
 mod tasks;
+mod providers;
 mod telegram;
 mod terminal;
 mod subtasks;

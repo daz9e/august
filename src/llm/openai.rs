@@ -9,6 +9,8 @@ pub struct OpenAi {
     api_key: String,
     model: String,
     session_header: Option<&'static str>,
+    /// The model's context window, if configured.
+    window: Option<usize>,
 }
 
 impl OpenAi {
@@ -19,7 +21,14 @@ impl OpenAi {
             api_key,
             model,
             session_header: None,
+            window: None,
         }
+    }
+
+    /// The model's context window, as configured.
+    pub fn with_context_window(mut self, tokens: Option<usize>) -> Self {
+        self.window = tokens;
+        self
     }
 
     /// Sends the conversation id in this header (e.g. `x-opencode-session`).
@@ -286,6 +295,10 @@ impl OpenAi {
 
 #[async_trait]
 impl LlmProvider for OpenAi {
+    fn context_window(&self) -> Option<usize> {
+        self.window
+    }
+
     fn name(&self) -> &str {
         &self.model
     }
