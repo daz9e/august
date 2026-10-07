@@ -386,7 +386,9 @@ impl Seen {
             "edit" => {
                 if let Some(m) = self.msgs.iter_mut().find(|m| m.id == ev["id"]) {
                     m.text = ev["text"].as_str().unwrap().into();
-                    m.edited = true;
+                    m.buttons = ev["buttons"].as_array().into_iter().flatten()
+                        .map(|b| (b["id"].as_str().unwrap().to_string(), b["label"].as_str().unwrap().to_string())).collect();
+                    m.edited = m.buttons.is_empty();
                 }
                 self.history.push(ev["text"].as_str().unwrap().into());
             }

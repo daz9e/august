@@ -86,8 +86,16 @@ impl Screen {
                 }
                 self.print(&text, true);
             }
-            ToClient::Edit { id, text } => {
-                self.open.retain(|(open, _)| *open != id); // an edit settles a question (answered or timed out)
+            ToClient::Edit { id, text, buttons } => {
+                // An edit without buttons settles a question (answered or timed out); one with
+                // buttons asks (again).
+                self.open.retain(|(open, _)| *open != id);
+                if !buttons.is_empty() {
+                    self.asked.insert(id.clone());
+                    self.open.push_back((id.clone(), buttons));
+                    self.shown.insert(id, text.clone());
+                    return self.print(&text, true);
+                }
                 let old = self.shown.insert(id.clone(), text.clone()).unwrap_or_default();
                 let added = text.strip_prefix(old.as_str());
                 if self.asked.contains(&id) {

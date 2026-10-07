@@ -129,6 +129,6 @@ shell commands in a container.
   `august.dir`.
 - Timeouts: hooks 10 s (`message_in` 2 min), commands 60 s, tools 10 min, setup 30 s. A failing or slow hook is skipped
   (August continues as if it returned nothing); a crashed extension is restarted.
-- Built-in tool and command names can't be overridden.
+- Built-in command names can't be taken; a tool with a built-in tool's name replaces it.
 
 ## Full API types

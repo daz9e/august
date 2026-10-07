@@ -8,7 +8,7 @@
 //! - client → August: `{"type":"hello"}` first, then `{"type":"text","text":...}` (a
 //!   message or `/command`) and `{"type":"press","button":...}`.
 //! - August → client: `{"type":"hello","thread":...}`, `{"type":"send","id":...,"text":...,
-//!   "buttons":[{"id":...,"label":...}]}`, `{"type":"edit","id":...,"text":...}`,
+//!   "buttons":[{"id":...,"label":...}]}`, `{"type":"edit","id":...,"text":...,"buttons":[...]}`,
 //!   `{"type":"file","path":...,"caption":...}` and `{"type":"idle"}` (nothing more to say
 //!   for now).
 
@@ -47,7 +47,7 @@ pub struct WireButton {
 pub enum ToClient {
     Hello { thread: String },
     Send { id: String, text: String, buttons: Vec<WireButton> },
-    Edit { id: String, text: String },
+    Edit { id: String, text: String, buttons: Vec<WireButton> },
     File { path: String, caption: String },
     Idle,
 }
@@ -185,7 +185,8 @@ impl Messenger for Terminal {
     }
 
     async fn edit(&self, thread: &str, id: &str, message: &OutMessage) -> Result<()> {
-        self.0.to(thread, ToClient::Edit { id: id.into(), text: message.text.clone() })
+        let buttons = message.buttons.iter().map(|b| WireButton { id: b.id.clone(), label: b.label.clone() }).collect();
+        self.0.to(thread, ToClient::Edit { id: id.into(), text: message.text.clone(), buttons })
     }
 
     async fn typing(&self, _thread: &str) -> Result<()> {

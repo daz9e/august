@@ -183,6 +183,7 @@ export default function (august: August) {
     return `peek ${args}: ${output} (error: ${isError})`;
   });
   august.registerCommand("ask", async (args, ctx) => `llm says: ${await ctx.llm(args, { system: "SYS-X" })}`);
+  august.registerCommand("share", async (_, ctx) => (await ctx.callTool("send_file", { path: "note.txt", caption: "the note" })).output);
 }
 "#;
 
@@ -219,6 +220,9 @@ async fn extensions_hook_model_calls_call_into_august_and_can_be_disabled() {
     // ctx.callTool runs a built-in tool in the chat; ctx.llm asks the model without tools.
     chat.ask("/peek one", "peek one: note body (error: false)").await;
     chat.ask("/ask what is six times seven", "llm says: forty-two").await;
+    // A tool run by an extension can send files to the thread.
+    chat.ask("/share", "sent note.txt").await;
+    assert!(chat.files().iter().any(|(p, c)| p.ends_with("note.txt") && c == "the note"), "{:?}", chat.files());
     let ask = fake.llm_requests().into_iter().find(|r| last_user_text(r).contains("six times seven")).unwrap();
     assert_eq!(system(&ask), "SYS-X");
     assert!(ask["tools"].as_array().is_none_or(|t| t.is_empty()));

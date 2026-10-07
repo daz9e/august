@@ -160,6 +160,13 @@ impl Ctx {
         Ok(self.in_thread("approve", json!({"action": action})).await? == true)
     }
 
+    /// Runs any agent tool (built-in, MCP or an extension's) for the thread, with its hooks
+    /// and approvals: `(output, is_error)`.
+    pub async fn call_tool(&self, name: &str, input: Value) -> Result<(String, bool)> {
+        let v = self.in_thread("callTool", json!({"name": name, "input": input})).await?;
+        Ok((v["output"].as_str().unwrap_or_default().to_string(), v["isError"] == true))
+    }
+
     /// One completion on the configured model, without tools.
     pub async fn llm(&self, prompt: &str, system: Option<&str>) -> Result<String> {
         let v = self.link.call("llm", json!({"prompt": prompt, "system": system})).await?;

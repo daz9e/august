@@ -161,12 +161,13 @@ impl extensions::Core for ExtCore {
 
     async fn call_tool(&self, thread: &Thread, name: &str, input: &Value) -> Result<(String, bool)> {
         let (gw, m) = self.messenger(thread)?;
+        let files = turn::ThreadFiles { messenger: m.clone(), thread: thread.id.clone() };
         let ctx = ToolCtx {
             workspace: gw.workspace.clone(),
             approver: Arc::new(gw.approver(m, thread.clone(), None)),
             db: gw.db.clone(),
             origin: Some(thread.clone()),
-            files: None,
+            files: Some(Arc::new(files)),
             extensions: Some(gw.ext.clone()),
             unattended: false,
             notify: None,

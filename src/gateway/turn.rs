@@ -26,6 +26,19 @@ impl FileSink for ChatFiles {
     }
 }
 
+/// `send_file` outside a turn (a tool an extension runs): straight to the thread.
+pub(super) struct ThreadFiles {
+    pub(super) messenger: Arc<dyn Messenger>,
+    pub(super) thread: String,
+}
+
+#[async_trait::async_trait]
+impl FileSink for ThreadFiles {
+    async fn send_file(&self, path: &std::path::Path, caption: &str) -> Result<()> {
+        self.messenger.send_file(&self.thread, path, caption).await
+    }
+}
+
 /// Background notes (what the review saved) go straight to the chat.
 struct ChatNotes {
     channel: Arc<dyn Messenger>,
