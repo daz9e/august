@@ -2,7 +2,8 @@
 //! `mcp_<server>_<tool>`. Stdio servers run as child processes (one JSON-RPC message per
 //! line); `url` servers speak streamable HTTP. Servers that answer within SETUP_WAIT are
 //! ready for the first message, slower ones add their tools when they connect. A server
-//! that fails to start or crashes is reported by `/mcp` and its tools removed.
+//! that fails to start is reported by `/mcp`; one that crashes loses its tools until it is
+//! started again, a few seconds later.
 
 use august_ext::{August, truncate};
 use serde::Deserialize;
@@ -12,7 +13,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, Notify, oneshot};
@@ -24,6 +25,10 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(600);
 const SETUP_WAIT: Duration = Duration::from_secs(20);
 /// Stderr lines kept to explain a failed start or a crash.
 const TAIL_LINES: usize = 20;
+/// Restarts of a crashed server in a row (1 s, 2 s, 4 s apart) before it stays down.
+const RESTARTS: u32 = 3;
+/// A server that ran this long before crashing gets its restarts back.
+const RESTART_RESET: Duration = Duration::from_secs(60);
 /// Longest tool name providers accept.
 const MAX_NAME: usize = 64;
 const MAX_OUTPUT: usize = 50_000;
@@ -305,8 +310,8 @@ fn render(result: &Value) -> Result<String, String> {
     if result["isError"] == true { Err(text) } else { Ok(text) }
 }
 
-/// Connects, lists the tools and registers them; a crashed stdio server's tools are removed.
-async fn connect(august: &August, status: &Status, taken: &StdMutex<HashSet<String>>, name: &str, cfg: &ServerConfig) -> Result<(), String> {
+/// Connects, lists the tools and registers them; returns the server and its tool names.
+async fn connect(august: &August, taken: &StdMutex<HashSet<String>>, name: &str, cfg: &ServerConfig) -> Result<(Arc<Server>, Vec<String>), String> {
     let link = match (&cfg.command, &cfg.url) {
         (Some(command), _) => Link::Stdio(StdioLink::spawn(name, command, cfg)?),
         (None, Some(url)) => Link::Http(HttpLink { client: reqwest::Client::new(), url: url.clone(), headers: cfg.headers.clone(), session: StdMutex::default() }),
@@ -336,28 +341,54 @@ async fn connect(august: &August, status: &Status, taken: &StdMutex<HashSet<Stri
         let local = tool_name(&mut taken.lock().unwrap(), name, &remote);
         let description = t["description"].as_str().filter(|d| !d.is_empty()).map(String::from).unwrap_or_else(|| format!("Tool `{remote}` of the MCP server `{name}`"));
         let schema = if t["inputSchema"].is_object() { t["inputSchema"].clone() } else { json!({"type": "object"}) };
-        let server = server.clone();
+        let (server, name) = (server.clone(), name.to_string());
         august.register_tool(&local, &description, schema, move |input, _| {
-            let (server, remote) = (server.clone(), remote.clone());
+            let (server, remote, name) = (server.clone(), remote.clone(), name.clone());
             async move {
                 let args = if input.is_object() { input } else { json!({}) };
                 let result = server.request("tools/call", json!({"name": remote, "arguments": args}), CALL_TIMEOUT).await;
-                result.and_then(|r| render(&r)).map_err(|e| anyhow::anyhow!(e))
+                result.and_then(|r| render(&r)).map_err(|e| match server.crashed() {
+                    Some(_) => anyhow::anyhow!("the MCP server `{name}` crashed ({e}); August restarts it, so its tools are back in a few seconds unless it keeps crashing"),
+                    None => anyhow::anyhow!(e),
+                })
             }
         });
         tools.push(local);
     }
-    if let Link::Stdio(s) = &server.link {
-        let (gone, august, tools) = (s.gone.clone(), august.clone(), tools.clone());
-        tokio::spawn(async move {
-            gone.notified().await;
-            for t in &tools {
-                august.unregister_tool(t);
+    Ok((server, tools))
+}
+
+/// Connects the server and, after a stdio server crashes, removes its tools and starts it
+/// again, unless it crashed RESTARTS times without running RESTART_RESET in between.
+/// `first` is told when the first attempt is over.
+async fn keep(august: August, status: Status, taken: Arc<StdMutex<HashSet<String>>>, name: String, cfg: ServerConfig, first: oneshot::Sender<()>) {
+    let mut first = Some(first);
+    let mut crashes = 0;
+    loop {
+        let connected = connect(&august, &taken, &name, &cfg).await;
+        first.take().map(|tx| tx.send(()));
+        let (server, tools) = match connected {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("{name}: {e}");
+                return set(&status, &name, State::Failed(e));
             }
-        });
+        };
+        let up = Instant::now();
+        set(&status, &name, State::Running { server: server.clone(), tools: tools.clone() });
+        let Link::Stdio(s) = &server.link else { return };
+        s.gone.notified().await;
+        for t in &tools {
+            august.unregister_tool(t);
+            taken.lock().unwrap().remove(t);
+        }
+        crashes = if up.elapsed() > RESTART_RESET { 1 } else { crashes + 1 };
+        if crashes > RESTARTS {
+            return eprintln!("{name}: crashed {RESTARTS} times in a row, not restarting");
+        }
+        tokio::time::sleep(Duration::from_secs(1 << (crashes - 1))).await;
+        set(&status, &name, State::Connecting);
     }
-    set(status, name, State::Running { server, tools });
-    Ok(())
 }
 
 fn set(status: &Status, name: &str, state: State) {
@@ -410,13 +441,9 @@ async fn main() {
     let mut connecting = Vec::new();
     for (name, cfg) in config.servers {
         status.lock().unwrap().push((name.clone(), State::Connecting));
-        let (august, status, taken) = (august.clone(), status.clone(), taken.clone());
-        connecting.push(tokio::spawn(async move {
-            if let Err(e) = connect(&august, &status, &taken, &name, &cfg).await {
-                eprintln!("{name}: {e}");
-                set(&status, &name, State::Failed(e));
-            }
-        }));
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(keep(august.clone(), status.clone(), taken.clone(), name, cfg, tx));
+        connecting.push(rx);
     }
     tokio::time::timeout(SETUP_WAIT, futures_util::future::join_all(connecting)).await.ok();
     august.run().await;

@@ -28,7 +28,10 @@ for line in sys.stdin:
              "properties": {"text": {"type": "string"}}, "required": ["text"]}},
             {"name": "fail.hard", "description": "Always fails", "inputSchema": {"type": "object"}},
             {"name": "fail hard", "description": "Also fails", "inputSchema": {"type": "object"}},
+            {"name": "crash", "description": "Kills the server", "inputSchema": {"type": "object"}},
         ]}
+    elif method == "tools/call" and msg["params"]["name"] == "crash":
+        sys.exit("crashed on purpose")
     elif method == "tools/call" and msg["params"]["name"] == "echo":
         text = os.environ["GREETING"] + " " + msg["params"]["arguments"]["text"]
         result = {"content": [{"type": "text", "text": text}, {"type": "image", "data": "", "mimeType": "image/png"}]}
@@ -133,8 +136,40 @@ async fn mcp_server_tools_become_agent_tools() {
 
     // /mcp lists every server, including the one that could not start.
     // Names that clean up to the same one are told apart.
-    assert!(status.contains("fake — tools: mcp_fake_echo, mcp_fake_fail_hard, mcp_fake_fail_hard_2"), "{status}");
+    assert!(status.contains("fake — tools: mcp_fake_echo, mcp_fake_fail_hard, mcp_fake_fail_hard_2, mcp_fake_crash"), "{status}");
     assert!(status.contains("web — tools: mcp_web_time"), "{status}");
     assert!(status.contains("could not run /nonexistent/mcp-server"), "{status}");
     assert!(status.contains("dies — the server exited: bye"), "{status}");
+}
+
+#[tokio::test]
+async fn crashed_server_is_started_again() {
+    if !have_python() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("server.py");
+    std::fs::write(&script, SERVER_PY).unwrap();
+    let config = json!({"servers": {"fake": {"command": "python3", "args": [script], "env": {"GREETING": "hello"}}}}).to_string();
+    let llm: Llm = Box::new(|req| {
+        let last = messages(req).last().unwrap();
+        if last["role"] == "tool" {
+            return reply_text(&format!("Result: {}", last["content"].as_str().unwrap_or("")));
+        }
+        let text = last["content"].as_str().unwrap_or("");
+        if text.contains("crash") { reply_tool("mcp_fake_crash", json!({})) } else { reply_tool("mcp_fake_echo", json!({"text": "again"})) }
+    });
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup { home: &[("mcp.json", &config)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+
+    let crashed = chat.ask("crash it", "Result:").await;
+    assert!(crashed.contains("crashed on purpose") && crashed.contains("August restarts it"), "{crashed}");
+    // Its tools come back once it runs again.
+    let start = std::time::Instant::now();
+    while !chat.ask("/mcp", "fake").await.contains("✅ fake") {
+        assert!(start.elapsed() < TIMEOUT, "the server was not started again");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    chat.ask("echo please", "Result: hello again").await;
 }
