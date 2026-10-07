@@ -254,6 +254,7 @@ impl Gateway {
             "text": text,
             "reply": outcome.reply,
             "status": outcome.status,
+            "error": outcome.error,
             "toolCalls": outcome.tool_calls.len(),
             "unattended": tag.mode != TurnMode::Visible,
         });

@@ -32,8 +32,13 @@ type Shared = Arc<Mutex<Goals>>;
 async fn judge(goals: Shared, max_turns: u32, data: Value, ctx: Ctx) -> anyhow::Result<()> {
     let k = ctx.key();
     let Some(goal) = goals.lock().unwrap().by_chat.get(&k).cloned() else { return Ok(()) };
-    if data["unattended"] == true {
-        return Ok(());
+    if data["unattended"] == true || data["status"] == "cancelled" {
+        return Ok(()); // not the user's turn, or /stop (which drops the goal itself)
+    }
+    if data["status"] == "error" {
+        goals.lock().unwrap().by_chat.retain(|_, g| g.id != goal.id);
+        let why = data["error"].as_str().unwrap_or("unknown error");
+        return ctx.send(&format!("⏸ Goal paused: the last turn failed ({why}). Set it again with /goal to continue.")).await.map(drop);
     }
     let reply = data["reply"].as_str().unwrap_or_default();
     let verdict = match ctx.llm(&format!("Goal:\n{}\n\nThe assistant's latest reply:\n{reply}", goal.text), Some(JUDGE)).await {

@@ -110,6 +110,8 @@ declare module "august" {
       text: string;
       reply: string;
       status: "ok" | "error" | "cancelled";
+      /** Why it failed (`status: "error"`). */
+      error: string | null;
       /** How many tool calls the turn made. */
       toolCalls: number;
       /** Not the user's visible conversation (`ctx.turn.mode` says which). */

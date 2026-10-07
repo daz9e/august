@@ -2,7 +2,7 @@
 //! the turn budget for the goal runs out.
 
 use crate::support::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::time::Duration;
 
 fn is_judge(req: &Value) -> bool {
@@ -101,4 +101,24 @@ async fn stop_drops_the_goal() {
     let (fake, _gw, mut chat) = endless_goal().await;
     chat.ask("/stop", "Goal dropped.").await;
     assert_work_stops(&fake).await;
+}
+
+#[tokio::test]
+async fn goal_pauses_when_a_turn_fails() {
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let llm: Llm = Box::new(move |req| {
+        if is_judge(req) {
+            return reply_text("CONTINUE: more steps needed");
+        }
+        match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => reply_text("step 1"),
+            _ => json!({"error": {"message": "the model is down"}}),
+        }
+    });
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.say("/goal count to three").await;
+    let paused = chat.wait_for("Goal paused: the last turn failed").await;
+    assert!(paused.text.contains("the model is down"), "{}", paused.text);
 }
