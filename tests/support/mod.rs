@@ -218,8 +218,10 @@ pub fn with_usage(mut reply: Value, prompt: u64, completion: u64, cached: u64) -
 pub struct Gateway {
     child: Child,
     pub workspace: PathBuf,
-    /// `AUGUST_HOME` (only with the fake LLM).
+    /// `AUGUST_HOME`.
     pub home: PathBuf,
+    /// How it was started, to start it again (`restart`).
+    command: Vec<(String, String)>,
     _dir: tempfile::TempDir,
 }
 
@@ -269,31 +271,52 @@ fn spawn(fake: &Fake, setup: Setup) -> Gateway {
     for (name, bytes) in setup.seed {
         std::fs::write(workspace.join(name), bytes).unwrap();
     }
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_august"));
-    cmd.arg("gateway")
-        .env_clear()
-        .current_dir(dir.path()) // no project .env
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", dir.path())
-        .env("AUGUST_HOME", &home)
-        .env("AUGUST_WORKSPACE", &workspace)
-        .env("AUGUST_PROVIDER", "openai")
-        .env("AUGUST_MODEL", "fake-model")
-        .env("OPENAI_API_KEY", "test")
-        .env("OPENAI_BASE_URL", format!("{}/v1", fake.url))
-        .stdout(Stdio::null())
-        .stderr(if std::env::var_os("TEST_GATEWAY_LOG").is_some() { Stdio::inherit() } else { Stdio::null() });
+    let mut env: Vec<(String, String)> = vec![
+        ("PATH".into(), std::env::var("PATH").unwrap_or_default()),
+        ("HOME".into(), dir.path().display().to_string()),
+        ("AUGUST_HOME".into(), home.display().to_string()),
+        ("AUGUST_WORKSPACE".into(), workspace.display().to_string()),
+        ("AUGUST_PROVIDER".into(), "openai".into()),
+        ("AUGUST_MODEL".into(), "fake-model".into()),
+        ("OPENAI_API_KEY".into(), "test".into()),
+        ("OPENAI_BASE_URL".into(), format!("{}/v1", fake.url)),
+    ];
     if setup.telegram {
-        cmd.env("TELEGRAM_API_BASE", &fake.url)
-            .env("TELEGRAM_BOT_TOKEN", TOKEN)
-            .env("TELEGRAM_ALLOWED_USERS", OWNER.to_string());
+        env.push(("TELEGRAM_API_BASE".into(), fake.url.clone()));
+        env.push(("TELEGRAM_BOT_TOKEN".into(), TOKEN.into()));
+        env.push(("TELEGRAM_ALLOWED_USERS".into(), OWNER.to_string()));
     }
-    cmd.envs(setup.env.iter().copied());
-    let child = cmd.spawn().expect("start august gateway");
-    Gateway { child, workspace, home, _dir: dir }
+    env.extend(setup.env.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    let child = start(&env, dir.path());
+    Gateway { child, workspace, home, command: env, _dir: dir }
+}
+
+fn start(env: &[(String, String)], dir: &Path) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_august"))
+        .arg("gateway")
+        .env_clear()
+        .current_dir(dir) // no project .env
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .stdout(Stdio::null())
+        .stderr(if std::env::var_os("TEST_GATEWAY_LOG").is_some() { Stdio::inherit() } else { Stdio::null() })
+        .spawn()
+        .expect("start august gateway")
 }
 
 impl Gateway {
+    /// Stops August and starts it again on the same home and workspace; ready when it listens.
+    pub async fn restart(&mut self) {
+        self.child.kill().ok();
+        self.child.wait().ok();
+        self.child = start(&self.command, self._dir.path());
+        let socket = self.home.join("august.sock");
+        let since = Instant::now();
+        while tokio::net::UnixStream::connect(&socket).await.is_err() {
+            assert!(since.elapsed() < Duration::from_secs(20), "August did not come back");
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    }
+
     /// A new chat: a thread of the terminal messenger, spoken to over its socket.
     pub async fn chat(&self) -> Chat {
         let stream = tokio::net::UnixStream::connect(self.home.join("august.sock")).await.unwrap();

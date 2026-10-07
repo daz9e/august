@@ -13,7 +13,8 @@ use std::sync::atomic::Ordering;
 impl Gateway {
     pub(super) async fn subagent(&self, channel: Arc<dyn Messenger>, id: Thread, task: &str, opts: AgentOpts) -> Result<String> {
         let n = self.subagents.fetch_add(1, Ordering::Relaxed) + 1;
-        let key = format!("{}:{}#agent{n}", id.messenger, id.id);
+        // A key of its own, so it starts fresh instead of resuming an older sub-agent's session.
+        let key = format!("{}#agent-{}", id.key(), &crate::util::new_uuid()[..8]);
         let mut tools = self.tools().without(&opts.exclude);
         if let Some(only) = &opts.tools {
             tools = tools.only(only);

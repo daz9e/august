@@ -89,3 +89,34 @@ async fn failed_subtask_is_reported_to_the_chat() {
     let relay = chat.wait_for("relay:").await.text;
     assert!(relay.contains("Subtask #1 failed: Count the stars"), "{relay}");
 }
+
+#[tokio::test]
+async fn a_subtask_after_a_restart_starts_fresh() {
+    let llm: Llm = Box::new(|req| {
+        if is_child(req) {
+            let users = msgs(req).iter().filter(|m| m["role"] == "user").count();
+            return reply_text(&format!("child saw {users} user messages"));
+        }
+        let last = msgs(req).last().unwrap();
+        if last["role"] == "tool" {
+            return reply_text("delegated");
+        }
+        let text = last_user(req);
+        if text.contains("[Subtask") {
+            return reply_text(&format!("relay: {}", text.lines().last().unwrap_or("")));
+        }
+        reply_tool("delegate_task", json!({"goal": "Count the stars"}))
+    });
+    let fake = Fake::llm(llm).await;
+    let mut gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.say("count stars").await;
+    chat.wait_for("relay: child saw 1 user messages").await;
+
+    gw.restart().await;
+    let mut chat = gw.chat().await;
+    chat.say("count stars again").await;
+    // Not the old sub-agent's conversation continued.
+    chat.wait_for("relay: child saw 1 user messages").await;
+    assert!(!chat.texts().iter().any(|t| t.contains("child saw 2")), "{:?}", chat.texts());
+}
