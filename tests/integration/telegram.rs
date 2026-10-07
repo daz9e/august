@@ -90,3 +90,16 @@ async fn reactions_go_both_ways() {
     // …and hears the user's reaction.
     fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("you reacted 👍 to 40"))).await;
 }
+
+#[tokio::test]
+async fn the_bot_token_never_reaches_the_model() {
+    // A file that can't be downloaded: the model hears why, but not the URL with the token.
+    let update = message(1, json!({"caption": "look", "document": {"file_id": "gone", "file_name": "a.pdf"}}));
+    let fake = Fake::start(vec![update], HashMap::new(), Some(Box::new(|_| reply_text("Seen.")))).await;
+    let _gw = august(&fake, Setup { telegram: true, ..Default::default() }).await;
+
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("Seen."))).await;
+    let req = fake.llm_requests().last().unwrap().to_string();
+    assert!(req.contains("could not be received"), "{req}");
+    assert!(!req.contains(&format!("bot{TOKEN}")), "{req}");
+}

@@ -91,10 +91,10 @@ impl Api {
             .timeout(FILE_TIMEOUT)
             .send()
             .await
-            .context("telegram: file download failed")?
-            .error_for_status()
+            .and_then(|r| r.error_for_status())
+            .map_err(no_token)
             .context("telegram: file download failed")?;
-        Ok(resp.bytes().await?.to_vec())
+        Ok(resp.bytes().await.map_err(no_token)?.to_vec())
     }
 
     /// Sends a request built by `build`; waits and retries on flood control (429).
@@ -103,6 +103,7 @@ impl Api {
             let resp = build()
                 .send()
                 .await
+                .map_err(no_token)
                 .with_context(|| format!("telegram {method}: request failed"))?;
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
@@ -142,6 +143,11 @@ impl Api {
             .await?;
         Ok(v.as_array().cloned().unwrap_or_default())
     }
+}
+
+/// The error without its URL, which holds the bot token and must not reach logs.
+fn no_token(e: reqwest::Error) -> reqwest::Error {
+    e.without_url()
 }
 
 /// Telegram refused the HTML (unbalanced tags, ...): the caller retries as plain text.
