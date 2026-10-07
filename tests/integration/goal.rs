@@ -34,7 +34,24 @@ async fn goal_keeps_the_agent_working_until_reached() {
     assert!(texts.iter().any(|t| t.contains("step 3")) && !texts.iter().any(|t| t.contains("step 4")));
     let reqs = fake.llm_requests();
     assert_eq!(reqs.iter().filter(|r| is_judge(r)).count(), 3);
-    assert!(reqs.iter().any(|r| r.to_string().contains("[Goal not reached yet: more steps needed]")));
+    // Each nudge says what is missing and how much of the budget is used.
+    assert!(reqs.iter().any(|r| r.to_string().contains("[Goal not reached yet (turn 2 of 20): more steps needed]")));
+}
+
+#[tokio::test]
+async fn goal_pauses_when_it_cannot_be_checked() {
+    let llm: Llm = Box::new(|req| {
+        if is_judge(req) {
+            return serde_json::json!({"error": {"message": "judge unavailable"}}); // not a completion
+        }
+        reply_text("working")
+    });
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.say("/goal count to three").await;
+    let paused = chat.wait_for("Goal paused").await.text;
+    assert!(paused.contains("judge unavailable") && paused.contains("/goal"), "{paused}");
 }
 
 #[tokio::test]

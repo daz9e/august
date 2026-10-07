@@ -39,8 +39,18 @@ async fn judge(goals: Shared, max_turns: u32, data: Value, ctx: Ctx) -> anyhow::
     let verdict = match ctx.llm(&format!("Goal:\n{}\n\nThe assistant's latest reply:\n{reply}", goal.text), Some(JUDGE)).await {
         Ok(v) => v.trim().to_string(),
         Err(e) => {
-            goals.lock().unwrap().by_chat.remove(&k);
-            return ctx.send(&format!("⚠️ Could not check the goal, pausing it: {e:#}")).await.map(drop);
+            let ours = {
+                let mut g = goals.lock().unwrap();
+                let ours = g.by_chat.get(&k).is_some_and(|current| current.id == goal.id);
+                if ours {
+                    g.by_chat.remove(&k);
+                }
+                ours
+            };
+            if !ours {
+                return Ok(()); // dropped or replaced while judging
+            }
+            return ctx.send(&format!("⚠️ Goal paused: could not check it ({e:#}). Set it again with /goal to continue.")).await.map(drop);
         }
     };
     let turns = {
@@ -68,7 +78,7 @@ async fn judge(goals: Shared, max_turns: u32, data: Value, ctx: Ctx) -> anyhow::
         goals.lock().unwrap().by_chat.remove(&k);
         return ctx.send(&format!("⏸ Goal paused after {turns} turns. Still missing: {missing}\nSet it again with /goal to continue.")).await.map(drop);
     }
-    ctx.prompt(&format!("[Goal not reached yet: {missing}] Keep working towards the goal: {}", goal.text)).await
+    ctx.prompt(&format!("[Goal not reached yet (turn {turns} of {max_turns}): {missing}] Keep working towards the goal: {}", goal.text)).await
 }
 
 #[tokio::main(flavor = "current_thread")]
