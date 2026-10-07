@@ -108,8 +108,13 @@ impl Host {
                     };
                     match msg["method"].as_str() {
                         // `ready` once started, `manifest` when it registers more later.
-                        Some("ready" | "manifest") => {
+                        Some(m @ ("ready" | "manifest")) => {
                             *manifest.write().unwrap() = parse_manifest(&msg["params"]);
+                            if m == "manifest"
+                                && let Some(core) = &core
+                            {
+                                core.changed();
+                            }
                             if let Some(tx) = ready_tx.take() {
                                 tx.send(()).ok();
                             }

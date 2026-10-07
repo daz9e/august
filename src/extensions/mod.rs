@@ -65,6 +65,8 @@ pub trait Core: Send + Sync {
     async fn llm(&self, prompt: &str, system: &str) -> Result<String>;
     /// The calling extension's storage: JSON values by key, kept across restarts.
     fn store(&self) -> Result<Arc<crate::db::Db>>;
+    /// What extensions offer changed (one was loaded, or registered something at runtime).
+    fn changed(&self);
 }
 
 /// Options of `ctx.agent`.
@@ -346,6 +348,9 @@ impl Extensions {
             slots.sort_by(|a, b| a.name.cmp(&b.name));
             self.describe(slots.iter().find(|s| s.name == name).unwrap(), &builtin_tools())
         };
+        if let Some(core) = self.core.read().unwrap().clone() {
+            core.changed();
+        }
         if !ok {
             anyhow::bail!("{line}");
         }

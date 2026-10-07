@@ -175,6 +175,12 @@ impl extensions::Core for ExtCore {
         Ok(gw.tools().call(name, input, &ctx).await)
     }
 
+    fn changed(&self) {
+        if let Ok(gw) = self.gateway() {
+            tokio::spawn(async move { gw.publish_commands().await });
+        }
+    }
+
     fn store(&self) -> Result<Arc<Db>> {
         Ok(self.gateway()?.db.clone())
     }

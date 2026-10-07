@@ -50,3 +50,17 @@ async fn strangers_are_turned_away() {
     fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("not authorized"))).await;
     assert!(fake.llm_requests().is_empty());
 }
+
+const LATE_COMMAND: &str = r#"export default function (august) {
+  setTimeout(() => august.registerCommand("later", { description: "Added later", handler: () => "here" }), 300);
+}"#;
+
+#[tokio::test]
+async fn commands_added_later_reach_the_menu() {
+    if !std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("bun").is_file())) {
+        return eprintln!("skipping: bun is not installed");
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("ok"))).await;
+    let _gw = august(&fake, Setup { telegram: true, home: &[("extensions/late/index.ts", LATE_COMMAND)], ..Default::default() }).await;
+    fake.wait_for(TIMEOUT, |f| f.calls("setMyCommands").iter().any(|r| r.text().contains("\"later\""))).await;
+}
