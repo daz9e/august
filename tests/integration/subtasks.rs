@@ -62,7 +62,8 @@ async fn subtasks_run_in_the_background_and_report_back() {
         assert!(!all.contains("compare fruit"), "a sub-agent doesn't see the chat");
         assert!(all.contains("be quick"));
         let tools: Vec<&str> = c["tools"].as_array().unwrap().iter().filter_map(|t| t["function"]["name"].as_str()).collect();
-        assert!(tools.contains(&"shell") && !tools.contains(&"delegate_task") && !tools.contains(&"remember"), "{tools:?}");
+        // Nobody answers a sub-agent's questions.
+        assert!(tools.contains(&"shell") && !tools.contains(&"delegate_task") && !tools.contains(&"remember") && !tools.contains(&"clarify"), "{tools:?}");
     }
 }
 
@@ -119,4 +120,27 @@ async fn a_subtask_after_a_restart_starts_fresh() {
     // Not the old sub-agent's conversation continued.
     chat.wait_for("relay: child saw 1 user messages").await;
     assert!(!chat.texts().iter().any(|t| t.contains("child saw 2")), "{:?}", chat.texts());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_drops_running_subtasks() {
+    let llm: Llm = Box::new(|req| {
+        if is_child(req) {
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            return reply_text("late report");
+        }
+        if msgs(req).last().unwrap()["role"] == "tool" {
+            return reply_text("delegated");
+        }
+        reply_tool("delegate_task", json!({"goal": "Count the stars"}))
+    });
+    let fake = Fake::llm(llm).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.ask("count stars", "delegated").await;
+    chat.ask("/stop", "Dropped 1 running subtask").await;
+
+    // The sub-agent's run ends, but its report doesn't start a turn.
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    assert!(fake.llm_requests().iter().filter(|r| !is_child(r)).all(|r| !last_user(r).contains("[Subtask")));
 }
