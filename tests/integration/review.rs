@@ -70,7 +70,7 @@ async fn review_can_only_save_and_read() {
     .await;
     let review = fake.llm_requests().into_iter().filter(|r| is_review(r)).last().unwrap();
     let out = msgs(&review).last().unwrap()["content"].as_str().unwrap().to_string();
-    assert!(out.contains("not available during the review"), "{out}");
+    assert!(out.contains("not available here"), "{out}");
 }
 
 #[tokio::test]

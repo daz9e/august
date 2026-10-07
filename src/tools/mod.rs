@@ -33,29 +33,19 @@ pub trait FileSink: Send + Sync {
     async fn send_file(&self, path: &std::path::Path, caption: &str) -> Result<()>;
 }
 
-/// Posts a short message to the chat a turn ran in, also after the turn is over.
-#[async_trait]
-pub trait Notifier: Send + Sync {
-    async fn notify(&self, text: &str);
-}
-
 #[derive(Clone)]
 pub struct ToolCtx {
     pub workspace: PathBuf,
     pub approver: Arc<dyn Approver>,
     pub db: Arc<Db>,
-    /// `(channel, chat)` the turn runs in; `None` in the terminal REPL.
     /// The thread and turn this runs for.
     pub origin: crate::extensions::Origin,
-    /// Where `send_file` delivers files; `None` when there is no chat (terminal REPL).
+    /// Where `send_file` delivers files; `None` when there is no thread to send to.
     pub files: Option<Arc<dyn FileSink>>,
     /// Loaded extensions, for `save_extension`; `None` when they are off.
     pub extensions: Option<Arc<Extensions>>,
-    /// Nobody is following along (a scheduled task or a subtask): no background review,
-    /// no scheduling or delegating more work.
+    /// Nobody is following along (a quiet, fork or fresh turn): no scheduling more work.
     pub unattended: bool,
-    /// Where the background review reports what it saved.
-    pub notify: Option<Arc<dyn Notifier>>,
     /// Messages the user sends while the turn runs.
     pub inbox: Option<Arc<crate::agent::Inbox>>,
 }

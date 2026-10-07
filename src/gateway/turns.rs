@@ -194,7 +194,6 @@ impl Gateway {
             files: Some(Arc::new(ThreadFiles { messenger: messenger.clone(), thread: thread.id.clone() })),
             extensions: Some(self.ext.clone()),
             unattended: true,
-            notify: None,
             inbox: None,
         };
         let outcome = match tag.mode {

@@ -4,7 +4,6 @@ mod compaction;
 mod fork;
 mod inbox;
 mod prompt;
-mod review;
 mod store;
 
 pub use inbox::Inbox;
@@ -84,7 +83,6 @@ pub struct Agent {
     compact_retry_at: usize,
     /// Tool calls the running turn made.
     turn_tool_calls: usize,
-    review_counters: review::Counters,
 }
 
 impl Agent {
@@ -117,7 +115,6 @@ impl Agent {
             last_input_tokens: 0,
             compact_retry_at: 0,
             turn_tool_calls: 0,
-            review_counters: review::Counters::default(),
         })
     }
 
@@ -280,23 +277,6 @@ impl Agent {
         match &result {
             Ok(_) => {
                 self.persist();
-                if !ctx.unattended {
-                    if let Some(review) = self.review_due(ctx, self.turn_tool_calls) {
-                        let notify = ctx.notify.clone();
-                        tokio::spawn(async move {
-                            match review.run().await {
-                                Ok(changes) if changes.is_empty() => eprintln!("review: nothing to save"),
-                                Ok(changes) => {
-                                    eprintln!("review: {}", changes.join("; "));
-                                    if let (Some(n), Some(text)) = (notify, review::notice(&changes)) {
-                                        n.notify(&text).await;
-                                    }
-                                }
-                                Err(e) => eprintln!("review failed: {e:#}"),
-                            }
-                        });
-                    }
-                }
             }
             Err(_) => self.rollback_turn(),
         }

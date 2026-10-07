@@ -39,21 +39,6 @@ impl FileSink for ThreadFiles {
     }
 }
 
-/// Background notes (what the review saved) go straight to the chat.
-struct ChatNotes {
-    channel: Arc<dyn Messenger>,
-    chat: String,
-}
-
-#[async_trait::async_trait]
-impl crate::tools::Notifier for ChatNotes {
-    async fn notify(&self, text: &str) {
-        if let Err(e) = self.channel.send(&self.chat, &crate::messengers::OutMessage::text(text)).await {
-            eprintln!("could not post a note to the chat: {e:#}");
-        }
-    }
-}
-
 impl Gateway {
     /// Runs a turn once the chat is free, then whatever the user sent meanwhile that the
     /// turn didn't pick up.
@@ -121,7 +106,6 @@ impl Gateway {
             files: Some(Arc::new(ChatFiles(tx.clone()))),
             extensions: Some(self.ext.clone()),
             unattended: scheduled,
-            notify: Some(Arc::new(ChatNotes { channel: channel.clone(), chat: chat.to_string() })),
             inbox: Some(state.inbox.clone()),
         };
         let streamed = Arc::new(std::sync::atomic::AtomicBool::new(false));

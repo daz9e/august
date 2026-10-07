@@ -185,7 +185,6 @@ impl extensions::Core for ExtCore {
             files: Some(Arc::new(files)),
             extensions: Some(gw.ext.clone()),
             unattended: false,
-            notify: None,
             inbox: None,
         };
         Ok(gw.tools().call(name, input, &ctx).await)

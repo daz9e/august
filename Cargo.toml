@@ -47,6 +47,10 @@ name = "august-ext-mcp"
 path = "extensions/mcp/main.rs"
 
 [[bin]]
+name = "august-ext-review"
+path = "extensions/review/main.rs"
+
+[[bin]]
 name = "august-ext-subagents"
 path = "extensions/subagents/main.rs"
 
