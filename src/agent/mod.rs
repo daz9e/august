@@ -68,7 +68,7 @@ pub struct Agent {
     system: String,
     /// The system prompt a `before_turn` hook set for the running turn.
     turn_system: Option<String>,
-    /// Facts and skills as shown in the system prompt, fixed for the session.
+    /// The session's own and the extensions' prompt sections, fixed for the session.
     snapshot: Option<String>,
     history: Vec<Message>,
     db: Arc<dyn SessionStore>,

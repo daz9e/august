@@ -19,7 +19,7 @@ pub fn system_prompt(workspace: &std::path::Path, surface: &str) -> String {
 impl Agent {
     /// System prompt for the next model call: the base prompt plus a snapshot of the
     /// extensions' sections. The snapshot is taken once per session
-    /// (and again after a compaction), so the prompt prefix stays byte-identical and
+    /// (and again after the history is replaced), so the prompt prefix stays byte-identical and
     /// provider caching works; changes show up in the next session.
     pub(super) fn system_now(&mut self) -> String {
         if self.snapshot.is_none() {

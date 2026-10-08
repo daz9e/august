@@ -24,8 +24,6 @@ use std::time::Duration;
 const HOST_TS: &str = include_str!("host.ts");
 const TYPES: &str = include_str!("august.d.ts");
 const GUIDE: &str = include_str!("guide.md");
-/// The extensions that ship with August, as binaries `august-ext-<name>` next to `august`.
-const DEFAULTS: &[&str] = &["approvals", "browser", "clarify", "commands", "compaction", "extend", "goal", "mcp", "memory", "messaging", "openai", "render", "review", "scheduler", "skills", "subagents", "voice", "web"];
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message_in` may do real work on attachments (e.g. transcribe a voice note).
@@ -126,7 +124,7 @@ pub fn dir() -> PathBuf {
     crate::config::home().join("extensions")
 }
 
-/// The extension-writing guide with the API types, served as a built-in skill.
+/// The extension-writing guide with the API types (op `guide`).
 pub fn guide() -> String {
     format!("Extensions live in {}.\n\n{GUIDE}\n```ts\n{TYPES}```\n", dir().display())
 }
@@ -174,10 +172,26 @@ fn enabled(name: &str) -> bool {
     crate::config::unit("extensions", name).map_or(true, |v| v["enabled"] != false)
 }
 
+/// The folder of the running binary, where the extensions that ship with August are.
+fn bin_dir() -> PathBuf {
+    let exe = std::env::current_exe().unwrap_or_default();
+    exe.parent().unwrap_or(Path::new(".")).to_path_buf()
+}
+
 /// `august-ext-<name>` next to the running binary.
 fn default_binary(name: &str) -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_default();
-    exe.parent().unwrap_or(Path::new(".")).join(format!("august-ext-{name}"))
+    bin_dir().join(format!("august-ext-{name}"))
+}
+
+/// The extensions that ship with August: binaries `august-ext-<name>` next to `august`.
+fn shipped() -> Vec<String> {
+    let names = std::fs::read_dir(bin_dir()).into_iter().flatten().filter_map(|e| e.ok());
+    let mut names: Vec<String> = names
+        .filter_map(|e| e.file_name().to_str()?.strip_prefix("august-ext-").map(String::from))
+        .filter(|n| valid_name(n) && default_binary(n).is_file())
+        .collect();
+    names.sort();
+    names
 }
 
 fn stopped(data: &Value) -> bool {
@@ -223,28 +237,24 @@ impl Extensions {
                 found.push((name, Launch::Script(entry)));
             }
         }
-        for name in DEFAULTS {
-            if !found.iter().any(|(n, _)| n == name) {
-                let launch = Launch::Binary { exe: default_binary(name), dir: self.defaults_dir().join(name) };
-                found.push((name.to_string(), launch));
+        for name in shipped() {
+            if !found.iter().any(|(n, _)| *n == name) {
+                let launch = Launch::Binary { exe: default_binary(&name), dir: self.defaults_dir().join(&name) };
+                found.push((name, launch));
             }
         }
         found.sort_by(|a, b| a.0.cmp(&b.0));
         found
     }
 
-    /// Folders of the defaults (dropping the TypeScript copies earlier versions wrote there),
-    /// and the skills August ships in `.runtime/skills`.
+    /// Folders of the defaults (dropping the TypeScript copies earlier versions wrote there).
     fn prepare_defaults(&self) -> std::io::Result<()> {
-        for name in DEFAULTS {
+        for name in shipped() {
             let folder = self.defaults_dir().join(name);
             std::fs::create_dir_all(&folder)?;
             std::fs::remove_file(folder.join("index.ts")).ok();
         }
-        let skill = self.dir.join(".runtime/skills/writing-extensions");
-        std::fs::create_dir_all(&skill)?;
-        let about = "How to extend August itself with TypeScript extensions (tools, slash commands, hooks); read before `save_extension`";
-        std::fs::write(skill.join("SKILL.md"), format!("---\nname: writing-extensions\ndescription: {about}\n---\n{}", guide()))
+        Ok(())
     }
 
     /// Writes `host.ts` next to the extensions and returns `(bun, host.ts)`.

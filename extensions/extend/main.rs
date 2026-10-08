@@ -1,5 +1,6 @@
 //! `extend`: the agent writes extensions for August itself (`save_extension`); the core
 //! starts it and marks it as the agent's. `extensions` lists them and turns them on and off.
+//! The core's extension guide ships as the `writing-extensions` skill.
 
 use anyhow::{anyhow, bail};
 use august_ext::{August, str_arg};
@@ -15,6 +16,7 @@ async fn main() {
     let august = August::new();
     august.needs(&["admin"]);
     let dir = PathBuf::from(std::env::var("AUGUST_EXTENSIONS").unwrap_or_default());
+    let skills = dir.join(".runtime/skills/writing-extensions");
     let me = august.clone();
     august.register_tool(
         "save_extension",
@@ -76,5 +78,20 @@ async fn main() {
             }
         },
     );
+    // The guide comes from the core, so it waits for the connection `run` serves.
+    let me = august.clone();
+    tokio::spawn(async move {
+        let write = async {
+            let guide = me.call("guide", json!({})).await?;
+            std::fs::create_dir_all(&skills)?;
+            let about = "How to extend August itself with TypeScript extensions (tools, slash commands, hooks); read before `save_extension`";
+            let text = format!("---\nname: writing-extensions\ndescription: {about}\n---\n{}", guide.as_str().unwrap_or_default());
+            std::fs::write(skills.join("SKILL.md"), text)?;
+            anyhow::Ok(())
+        };
+        if let Err(e) = write.await {
+            eprintln!("could not write the writing-extensions skill: {e:#}");
+        }
+    });
     august.run().await;
 }
