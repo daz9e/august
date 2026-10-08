@@ -143,6 +143,11 @@ impl Ctx {
         self.link.call(method, params).await
     }
 
+    /// Runs operation `op` of the core's table for this thread (`thread` filled in).
+    pub async fn call(&self, op: &str, params: Value) -> Result<Value> {
+        self.in_thread(op, if params.is_object() { params } else { json!({}) }).await
+    }
+
     /// `messenger:id` of the thread, or `none`.
     pub fn key(&self) -> String {
         self.thread.as_ref().map(Thread::key).unwrap_or_else(|| "none".into())
