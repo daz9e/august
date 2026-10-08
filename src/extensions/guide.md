@@ -234,6 +234,8 @@ refuses the rest: `august.needs("messaging", "turns")` in its setup.
 - `memory`: `august.memory()`;
 - `config`: `august.config.get/set` (any unit's settings);
 - `admin`: `august.extensions.*` (other extensions: list, enable, disable, reload; a reload restarts every extension but yours).
+- `user`: act for the user, as a slash command does: `august.call(op, { ...params, as_user: true })`
+  counts as the user's (hooks see `by: "user"`, and it may turn extensions on and off).
 
 Answering in the call's own thread while it runs (`ctx.send`, `ctx.ask`), the store,
 `ctx.approve`, your own settings, and reading `ops`, `tools`, `commands`, `status` need

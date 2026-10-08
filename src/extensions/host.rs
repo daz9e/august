@@ -263,10 +263,13 @@ impl Drop for CancelOnDrop {
 }
 
 /// Whether the extension may make this call: the operation's permission (from the core's
-/// table) must be among what it declared it needs. Answering in the thread of a call in
+/// table) must be among what it declared it needs, and `user` to act for the user. Answering in the thread of a call in
 /// progress needs no `messaging`.
 fn allowed(manifest: &RwLock<Manifest>, busy: &Busy, method: &str, params: &Value) -> anyhow::Result<()> {
     let Some(op) = ops::find(method) else { anyhow::bail!("unknown method {method}") };
+    if params["as_user"] == true && !manifest.read().unwrap().needs.iter().any(|n| n == "user") {
+        anyhow::bail!("acting for the user (`as_user`) needs the `user` permission: declare it with august.needs(\"user\")");
+    }
     let Some(need) = op.permission else { return Ok(()) };
     if manifest.read().unwrap().needs.iter().any(|n| n == need) {
         return Ok(());

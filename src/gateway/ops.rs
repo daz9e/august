@@ -123,6 +123,8 @@ pub(super) fn message(params: &Value) -> Result<OutMessage> {
 impl Gateway {
     /// Runs operation `name` for `caller`.
     pub(crate) async fn op(self: &Arc<Self>, caller: Caller<'_>, name: &str, p: &Value) -> Result<Value> {
+        // `as_user` (a slash command, say): the extension acts for the user.
+        let caller = if p["as_user"] == true { Caller::User } else { caller };
         // `"thread": "home"` is the user's home thread.
         let home;
         let p = if p["thread"] == "home" {
