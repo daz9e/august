@@ -7,6 +7,8 @@
 
 mod host;
 
+pub use host::{ProviderInfo, RpcError};
+
 use crate::llm::ToolSpec;
 use crate::messengers::Thread;
 use anyhow::Result;
@@ -23,7 +25,7 @@ const HOST_TS: &str = include_str!("host.ts");
 const TYPES: &str = include_str!("august.d.ts");
 const GUIDE: &str = include_str!("guide.md");
 /// The extensions that ship with August, as binaries `august-ext-<name>` next to `august`.
-const DEFAULTS: &[&str] = &["approvals", "browser", "clarify", "commands", "extend", "goal", "mcp", "memory", "messaging", "review", "scheduler", "skills", "subagents", "voice", "web"];
+const DEFAULTS: &[&str] = &["approvals", "browser", "clarify", "commands", "extend", "goal", "mcp", "memory", "messaging", "openai", "review", "scheduler", "skills", "subagents", "voice", "web"];
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message_in` may do real work on attachments (e.g. transcribe a voice note).
@@ -451,6 +453,34 @@ impl Extensions {
                 State::Failed(_) | State::Disabled => None,
             })
             .collect()
+    }
+
+    /// Model providers the running extensions offer.
+    pub fn providers(&self) -> Vec<ProviderInfo> {
+        self.running().iter().flat_map(|(_, h)| h.manifest().providers.clone()).collect()
+    }
+
+    /// Calls `method` on the extension that offers provider `id`, waiting for it to start.
+    /// `stream` receives its `stream` notifications.
+    pub async fn call_provider(
+        &self,
+        id: &str,
+        method: &str,
+        params: Value,
+        stream: Option<tokio::sync::mpsc::UnboundedSender<Value>>,
+    ) -> Result<Value, RpcError> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let host = loop {
+            if let Some((_, h)) = self.running().into_iter().find(|(_, h)| h.manifest().providers.iter().any(|p| p.id == id)) {
+                break h;
+            }
+            if std::time::Instant::now() > deadline {
+                let ids: Vec<_> = self.providers().into_iter().map(|p| p.id).collect();
+                return Err(format!("no provider `{id}` (running: {})", ids.join(", ")).into());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        host.request_with(method, params, Duration::from_secs(600), stream).await
     }
 
     /// True when some extension handles `event` (so callers can skip building its data).

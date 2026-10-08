@@ -40,7 +40,7 @@ pub struct Responses<A> {
 impl<A: TokenSource> Responses<A> {
     pub fn new(base_url: &str, auth: A, model: String, effort: Option<String>) -> Self {
         Self {
-            http: crate::util::http_client(),
+            http: crate::http_client(),
             url: format!("{}/responses", base_url.trim_end_matches('/')),
             auth,
             model,

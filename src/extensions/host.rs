@@ -22,7 +22,22 @@ pub const PROTOCOL: u64 = 2;
 /// Stderr lines kept to explain a failed start or a crash.
 const TAIL_LINES: usize = 20;
 
-type Waiting = Arc<StdMutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+type Waiting = Arc<StdMutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
+/// Where `stream` notifications of a running request go, by request id.
+type Streams = Arc<StdMutex<HashMap<u64, tokio::sync::mpsc::UnboundedSender<Value>>>>;
+
+/// An error reply: its message, and the kind an extension attached (a provider's failure).
+#[derive(Debug)]
+pub struct RpcError {
+    pub message: String,
+    pub kind: Option<String>,
+}
+
+impl From<String> for RpcError {
+    fn from(message: String) -> Self {
+        Self { message, kind: None }
+    }
+}
 type Tail = Arc<StdMutex<VecDeque<String>>>;
 
 /// What an extension has registered (sent once it started, again whenever it changes).
@@ -44,8 +59,18 @@ pub struct Manifest {
     pub settings: Value,
     /// Events it emits itself (`august.defineEvent`).
     pub emits: Vec<EventDef>,
+    /// Model providers it offers.
+    pub providers: Vec<ProviderInfo>,
     /// Extensions whose events it emits in their place (it took over their namespace).
     pub replaces: Vec<String>,
+}
+
+/// A model provider an extension offers.
+#[derive(Debug, Clone)]
+pub struct ProviderInfo {
+    pub id: String,
+    pub label: String,
+    pub default_model: Option<String>,
 }
 
 /// An event an extension declares; others subscribe to it as `<namespace>:<name>`.
@@ -72,6 +97,7 @@ pub struct Host {
     next_id: AtomicU64,
     manifest: Arc<RwLock<Manifest>>,
     busy: Busy,
+    streams: Streams,
     /// Killed when the host is dropped.
     _child: Child,
 }
@@ -130,10 +156,11 @@ impl Host {
         let waiting: Waiting = Arc::default();
         let manifest: Arc<RwLock<Manifest>> = Arc::default();
         let busy: Busy = Arc::default();
+        let streams: Streams = Arc::default();
         let (ready_tx, ready_rx) = oneshot::channel::<()>();
         {
             let (stdin, waiting, tail, name) = (stdin.clone(), waiting.clone(), tail.clone(), name.to_string());
-            let (manifest, busy) = (manifest.clone(), busy.clone());
+            let (manifest, busy, streams) = (manifest.clone(), busy.clone(), streams.clone());
             tokio::spawn(async move {
                 let mut ready_tx = Some(ready_tx);
                 let mut lines = BufReader::new(stdout).lines();
@@ -153,6 +180,12 @@ impl Host {
                             }
                             if let Some(tx) = ready_tx.take() {
                                 tx.send(()).ok();
+                            }
+                        }
+                        Some("stream") if msg.get("id").is_none() => {
+                            let sender = msg["params"]["request"].as_u64().and_then(|id| streams.lock().unwrap().get(&id).cloned());
+                            if let Some(tx) = sender {
+                                tx.send(msg["params"]["event"].clone()).ok();
                             }
                         }
                         Some(method) => {
@@ -175,7 +208,10 @@ impl Host {
                                 continue;
                             };
                             let result = match msg.get("error") {
-                                Some(e) => Err(e["message"].as_str().unwrap_or("extension error").to_string()),
+                                Some(e) => Err(RpcError {
+                                    message: e["message"].as_str().unwrap_or("extension error").to_string(),
+                                    kind: e["kind"].as_str().map(String::from),
+                                }),
                                 None => Ok(msg["result"].clone()),
                             };
                             tx.send(result).ok();
@@ -184,7 +220,7 @@ impl Host {
                 }
                 // The process is gone: fail whatever still waits for it.
                 for (_, tx) in waiting.lock().unwrap().drain() {
-                    tx.send(Err("the extension process exited".into())).ok();
+                    tx.send(Err("the extension process exited".to_string().into())).ok();
                 }
                 stderr_done.await.ok();
                 if ready_tx.is_none() {
@@ -209,7 +245,7 @@ impl Host {
             }
             Err(_) => return Err(format!("did not start within {} s", START_TIMEOUT.as_secs())),
         }
-        Ok(Host { stdin, waiting, next_id: AtomicU64::new(1), manifest, busy, _child: child })
+        Ok(Host { stdin, waiting, next_id: AtomicU64::new(1), manifest, busy, streams, _child: child })
     }
 
     pub fn manifest(&self) -> RwLockReadGuard<'_, Manifest> {
@@ -217,12 +253,25 @@ impl Host {
     }
 
     pub async fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+        self.request_with(method, params, timeout, None).await.map_err(|e| e.message)
+    }
+
+    /// Like `request`, but `stream` notifications of the extension for this request go to
+    /// `stream`; the error keeps the kind the extension gave it. All of them are in the
+    /// channel by the time the result returns.
+    pub async fn request_with(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        stream: Option<tokio::sync::mpsc::UnboundedSender<Value>>,
+    ) -> Result<Value, RpcError> {
         // While this call runs, the extension may answer in its thread without `messaging`.
         let thread = call_thread(&params);
         if let Some(t) = &thread {
             *self.busy.lock().unwrap().entry(t.clone()).or_default() += 1;
         }
-        let result = self.request_inner(method, params, timeout).await;
+        let result = self.request_inner(method, params, timeout, stream).await;
         if let Some(t) = thread {
             let mut busy = self.busy.lock().unwrap();
             if let Some(n) = busy.get_mut(&t) {
@@ -235,8 +284,24 @@ impl Host {
         result
     }
 
-    async fn request_inner(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+    async fn request_inner(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        stream: Option<tokio::sync::mpsc::UnboundedSender<Value>>,
+    ) -> Result<Value, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        struct Unstream<'a>(&'a Streams, u64);
+        impl Drop for Unstream<'_> {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().remove(&self.1);
+            }
+        }
+        let _unstream = stream.map(|tx| {
+            self.streams.lock().unwrap().insert(id, tx);
+            Unstream(&self.streams, id)
+        });
         let (tx, rx) = oneshot::channel();
         self.waiting.lock().unwrap().insert(id, tx);
         // If this call is dropped (its turn was cancelled) or times out, the extension is told
@@ -246,12 +311,12 @@ impl Host {
         if write_line(&self.stdin, &msg).await.is_err() {
             guard.done = true;
             self.waiting.lock().unwrap().remove(&id);
-            return Err("the extension process exited".into());
+            return Err("the extension process exited".to_string().into());
         }
         let r = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("the extension process exited".into()),
-            Err(_) => return Err(format!("timed out after {} s", timeout.as_secs())),
+            Ok(Err(_)) => Err("the extension process exited".to_string().into()),
+            Err(_) => return Err(format!("timed out after {} s", timeout.as_secs()).into()),
         };
         guard.done = true;
         r
@@ -340,5 +405,15 @@ fn parse_manifest(params: &Value) -> Manifest {
             })
             .collect(),
         replaces: list("replaces").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
+        providers: list("providers")
+            .iter()
+            .filter_map(|p| {
+                Some(ProviderInfo {
+                    id: p["id"].as_str()?.to_string(),
+                    label: p["label"].as_str().unwrap_or_default().to_string(),
+                    default_model: p["default_model"].as_str().map(String::from),
+                })
+            })
+            .collect(),
     }
 }

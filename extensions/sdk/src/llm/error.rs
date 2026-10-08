@@ -24,6 +24,27 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RateLimit => "rate_limit",
+            Self::Overloaded => "overloaded",
+            Self::Network => "network",
+            Self::Auth => "auth",
+            Self::Quota => "quota",
+            Self::ContextTooLong => "context_too_long",
+            Self::Refused => "refused",
+            Self::BadRequest => "bad_request",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        [Self::RateLimit, Self::Overloaded, Self::Network, Self::Auth, Self::Quota, Self::ContextTooLong, Self::Refused, Self::BadRequest]
+            .into_iter()
+            .find(|k| k.as_str() == s)
+            .unwrap_or(Self::Other)
+    }
+
     /// Whether trying again (or another provider) can help.
     pub fn transient(self) -> bool {
         matches!(self, Self::RateLimit | Self::Overloaded | Self::Network)

@@ -75,7 +75,8 @@ async fn login() -> Result<()> {
             crate::llm::claude_cli::check_installed().await?;
             println!("using `{}`; sign in there with `claude auth login` if needed", crate::llm::claude_cli::bin());
         }
-        Auth::ApiKey | Auth::KeyAndUrl => {
+        Auth::Extension => bail!("{} is configured with `august config` (extensions.<name>.settings)", p.id()),
+        Auth::ApiKey => {
             let existing = creds.get(p.id()).cloned();
             let keep = existing.is_some()
                 && Confirm::with_theme(&theme())
@@ -101,31 +102,9 @@ async fn login() -> Result<()> {
     choose_model(p, current.or(p.default_model())).await
 }
 
-fn ask_credential(p: &dyn ProviderDef, existing: Option<&ApiCredential>) -> Result<ApiCredential> {
-    let base_url = if p.auth() == Auth::KeyAndUrl {
-        let default = existing
-            .and_then(|c| c.base_url.clone())
-            .unwrap_or_else(|| "https://api.openai.com/v1".into());
-        Some(
-            Input::<String>::with_theme(&theme())
-                .with_prompt("Base URL")
-                .default(default)
-                .interact_text()?,
-        )
-    } else {
-        None
-    };
-    let key = Password::with_theme(&theme())
-        .with_prompt(if p.auth() == Auth::KeyAndUrl {
-            "API key (empty for local servers)"
-        } else {
-            "API key"
-        })
-        .allow_empty_password(p.auth() == Auth::KeyAndUrl)
-        .interact()?
-        .trim()
-        .to_string();
-    Ok(ApiCredential { key, base_url })
+fn ask_credential(_p: &dyn ProviderDef, _existing: Option<&ApiCredential>) -> Result<ApiCredential> {
+    let key = Password::with_theme(&theme()).with_prompt("API key").interact()?.trim().to_string();
+    Ok(ApiCredential { key, base_url: None })
 }
 
 /// Picks a model from the provider's list (or a typed id) and makes it the default.

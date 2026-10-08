@@ -22,12 +22,12 @@ async fn an_older_home_is_moved_into_one_file_per_unit() {
 
     let read = |p: &str| std::fs::read_to_string(gw.home.join(p)).unwrap_or_default();
     assert!(read("config/august.json").contains("myllm"), "{}", read("config/august.json"));
-    let provider = read("config/providers/myllm.json");
-    assert!(provider.contains("old-key") && provider.contains("openai"), "{provider}");
+    let provider = read("config/extensions/openai.json");
+    assert!(provider.contains("old-key") && provider.contains("myllm"), "{provider}");
     assert!(!gw.home.join("credentials.json").exists() && gw.home.join("config/.migrated/credentials.json").exists());
 
     // A paused extension stays paused; the key is shown masked.
     chat.ask("/extensions", "⏸ web").await;
-    let key = chat.ask("/config providers.myllm.key", "providers.myllm.key").await;
+    let key = chat.ask("/config extensions.openai.settings.endpoints.myllm.key", "endpoints.myllm.key").await;
     assert!(key.contains("••••") && !key.contains("old-key"), "{key}");
 }

@@ -4,6 +4,8 @@
 //! from August runs as its own task, so a handler can call back into August (`ctx.llm`,
 //! `ctx.ask`, ...) while others are served. stdout is the protocol; log with `eprintln!`.
 
+pub mod llm;
+
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
@@ -20,6 +22,8 @@ use tokio::sync::oneshot;
 type Fut<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
 type ToolFn = Arc<dyn Fn(Value, Ctx) -> Fut<String> + Send + Sync>;
 type CommandFn = Arc<dyn Fn(String, Ctx) -> Fut<Option<String>> + Send + Sync>;
+type CompleteFn = Arc<dyn Fn(llm::Request, Stream) -> Fut<llm::Completion> + Send + Sync>;
+type ModelsFn = Arc<dyn Fn(String) -> Fut<Vec<llm::ModelInfo>> + Send + Sync>;
 /// Returns fields that replace the event's data (`None` leaves it as is).
 type HookFn = Arc<dyn Fn(Value, Ctx) -> Fut<Option<Value>> + Send + Sync>;
 
@@ -43,6 +47,34 @@ impl Link {
         self.write(&json!({"id": id, "method": method, "params": params}));
         rx.await.map_err(|_| anyhow!("August went away"))?.map_err(|e| anyhow!(e))
     }
+}
+
+/// Where a provider sends what the model says as it arrives.
+#[derive(Clone)]
+pub struct Stream {
+    link: Arc<Link>,
+    request: u64,
+}
+
+impl Stream {
+    fn event(&self, event: Value) {
+        self.link.write(&json!({"method": "stream", "params": {"request": self.request, "event": event}}));
+    }
+
+    /// A piece of the reply text.
+    pub fn text(&self, text: &str) {
+        if !text.is_empty() {
+            self.event(json!({"type": "text", "text": text}));
+        }
+    }
+}
+
+struct Provider {
+    id: String,
+    label: String,
+    default_model: Option<String>,
+    models: ModelsFn,
+    complete: CompleteFn,
 }
 
 /// A conversation in a messenger: a Telegram chat, a terminal window, ...
@@ -136,6 +168,8 @@ pub struct Ctx {
     pub turn: Option<Turn>,
     /// How many extension events this call is nested in (sent back with `emit`).
     depth: u64,
+    /// The id of the request being served.
+    request: u64,
 }
 
 impl Ctx {
@@ -247,6 +281,7 @@ struct Inner {
     /// Events it declared (`define_event`), as the manifest lists them.
     emits: RwLock<Vec<Value>>,
     replaces: RwLock<Vec<String>>,
+    providers: RwLock<Vec<Provider>>,
     /// Calls from August still running, by request id, so a cancel can stop them.
     running: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
     /// Set once `ready` was sent; later changes send a new manifest.
@@ -275,6 +310,7 @@ impl August {
             commands: RwLock::default(),
             emits: RwLock::default(),
             replaces: RwLock::default(),
+            providers: RwLock::default(),
             hooks: RwLock::default(),
             sections: RwLock::default(),
             settings: RwLock::new(Value::Null),
@@ -465,6 +501,35 @@ impl August {
         self.changed();
     }
 
+    /// A model provider. `complete` answers one model call, sending text through the
+    /// stream as it arrives; `models(query)` lists what it offers. A provider is chosen by
+    /// its `id` (`provider` in `august.json`); calling this again with an id replaces it.
+    pub fn register_provider<M, MR, C, CR>(&self, id: &str, label: &str, default_model: Option<&str>, models: M, complete: C)
+    where
+        M: Fn(String) -> MR + Send + Sync + 'static,
+        MR: Future<Output = Result<Vec<llm::ModelInfo>>> + Send + 'static,
+        C: Fn(llm::Request, Stream) -> CR + Send + Sync + 'static,
+        CR: Future<Output = Result<llm::Completion>> + Send + 'static,
+    {
+        let provider = Provider {
+            id: id.into(),
+            label: label.into(),
+            default_model: default_model.map(String::from),
+            models: Arc::new(move |id| Box::pin(models(id))),
+            complete: Arc::new(move |req, stream| Box::pin(complete(req, stream))),
+        };
+        let mut providers = self.0.providers.write().unwrap();
+        providers.retain(|p| p.id != id);
+        providers.push(provider);
+        drop(providers);
+        self.changed();
+    }
+
+    pub fn unregister_provider(&self, id: &str) {
+        self.0.providers.write().unwrap().retain(|p| p.id != id);
+        self.changed();
+    }
+
     /// Takes over the event namespace of extensions this one stands in for.
     pub fn replaces(&self, extensions: &[&str]) {
         self.0.replaces.write().unwrap().extend(extensions.iter().map(|e| e.to_string()));
@@ -514,6 +579,7 @@ impl August {
             "settings": *self.0.settings.read().unwrap(),
             "emits": *self.0.emits.read().unwrap(),
             "replaces": *self.0.replaces.read().unwrap(),
+            "providers": self.0.providers.read().unwrap().iter().map(|p| json!({"id": p.id, "label": p.label, "default_model": p.default_model})).collect::<Vec<_>>(),
         })
     }
 
@@ -550,6 +616,19 @@ impl August {
                 let reply = run(params["args"].as_str().unwrap_or_default().to_string(), ctx).await?;
                 Ok(reply.map(Value::String).unwrap_or(Value::Null))
             }
+            "complete" => {
+                let req = llm::Request::from_json(params).ok_or_else(|| anyhow!("bad complete request"))?;
+                let run = self.0.providers.read().unwrap().iter().find(|p| p.id == req.provider).map(|p| p.complete.clone());
+                let run = run.ok_or_else(|| anyhow!("no provider named {}", req.provider))?;
+                Ok(run(req, Stream { link: ctx.link.clone(), request: ctx.request }).await?.to_json())
+            }
+            "models" => {
+                let id = params["provider"].as_str().unwrap_or_default();
+                let run = self.0.providers.read().unwrap().iter().find(|p| p.id == id).map(|p| p.models.clone());
+                let run = run.ok_or_else(|| anyhow!("no provider named {id}"))?;
+                let models = run(id.to_string()).await?;
+                Ok(Value::Array(models.iter().map(llm::ModelInfo::to_json).collect()))
+            }
             other => Err(anyhow!("unknown method {other}")),
         }
     }
@@ -572,12 +651,12 @@ impl August {
                     let thread = serde_json::from_value(msg["params"]["ctx"]["thread"].clone()).ok();
                     let turn = serde_json::from_value(msg["params"]["ctx"]["turn"].clone()).ok();
                     let depth = msg["params"]["ctx"]["depth"].as_u64().unwrap_or(0);
-                    let ctx = Ctx { link: link.clone(), thread, turn, depth };
+                    let ctx = Ctx { link: link.clone(), thread, turn, depth, request: id.unwrap_or(0) };
                     let reply = match me.handle(&method, &msg["params"], ctx).await {
                         Ok(result) => json!({"id": msg["id"], "result": result}),
                         Err(e) => {
                             eprintln!("{method} failed: {e:#}");
-                            json!({"id": msg["id"], "error": {"message": format!("{e:#}")}})
+                            json!({"id": msg["id"], "error": {"message": format!("{e:#}"), "kind": llm::error::ErrorKind::of(&e).as_str()}})
                         }
                     };
                     link.write(&reply);

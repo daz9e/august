@@ -250,5 +250,6 @@ pub async fn start(chans: Vec<Arc<dyn Messenger>>) -> Result<()> {
         workspace.display()
     );
     let ext = Extensions::new(extensions::dir());
+    crate::llm::remote::use_extensions(&ext);
     Gateway::new(chans, provider, model, workspace, Db::open()?, ext).run().await
 }

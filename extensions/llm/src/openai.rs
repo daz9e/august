@@ -16,7 +16,7 @@ pub struct OpenAi {
 impl OpenAi {
     pub fn new(base_url: String, api_key: String, model: String) -> Self {
         Self {
-            http: crate::util::http_client(),
+            http: crate::http_client(),
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             model,

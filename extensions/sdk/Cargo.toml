@@ -5,6 +5,8 @@ edition = "2024"
 description = "SDK for August's default extensions: the extension protocol over stdio"
 
 [dependencies]
+async-trait = "0.1"
+base64 = "0.23.1"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

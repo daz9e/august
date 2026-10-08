@@ -315,8 +315,27 @@ fn migrate() -> Result<()> {
     if old("config.json").exists() {
         write("august", "", read_json(&old("config.json"))?)?;
     }
-    for (id, v) in objects("providers.json")?.into_iter().chain(objects("credentials.json")?) {
-        write("providers", &id, v)?;
+    let mut providers = objects("providers.json")?;
+    for (id, v) in objects("credentials.json")? {
+        let entry = providers.entry(id).or_insert_with(|| serde_json::json!({}));
+        for (k, val) in v.as_object().into_iter().flatten() {
+            entry[k] = val.clone();
+        }
+    }
+    // OpenAI-compatible providers are settings of the `openai` extension.
+    let mut openai = serde_json::json!({});
+    for (id, v) in providers {
+        if id == "openai" {
+            openai["key"] = v["key"].clone();
+            openai["base_url"] = v["base_url"].clone();
+        } else if v["format"] == "openai" {
+            openai["endpoints"][&id] = v;
+        } else {
+            write("providers", &id, v)?;
+        }
+    }
+    if openai.as_object().is_some_and(|o| o.values().any(|v| !v.is_null())) {
+        write("extensions", "openai", serde_json::json!({"settings": openai}))?;
     }
     for (id, v) in objects("channels.json")? {
         write("messengers", &id, v)?;

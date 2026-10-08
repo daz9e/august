@@ -11,14 +11,14 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Auth {
     ApiKey,
-    /// API key optional, base URL required (OpenAI, OpenRouter, Ollama, ...).
-    KeyAndUrl,
     /// Browser sign-in (ChatGPT).
     OAuth,
     /// Browser sign-in with the Codex CLI client (legacy ChatGPT login).
     CodexOAuth,
     /// A local CLI that holds its own login (Claude Code).
     Cli,
+    /// An extension holds the settings and the login.
+    Extension,
 }
 
 /// One vendor: identity, how it authenticates, and how to build / list it.
@@ -41,14 +41,13 @@ pub trait ProviderDef: Send + Sync {
 
 /// All providers, in menu order.
 pub fn registry() -> &'static [&'static dyn ProviderDef] {
-    static REGISTRY: [&dyn ProviderDef; 7] = [
+    static REGISTRY: [&dyn ProviderDef; 6] = [
         &OpenCode { go: true },
         &OpenCode { go: false },
         &AnthropicDef,
         &ClaudeCliDef,
         &ChatGptDef,
         &CodexDef,
-        &OpenAiDef,
     ];
     &REGISTRY
 }
@@ -58,11 +57,44 @@ pub fn all() -> impl Iterator<Item = &'static dyn ProviderDef> {
     registry().iter().copied().chain(custom().iter().copied())
 }
 
+/// A built-in provider, or else one an extension offers (resolved when it is first used).
 pub fn info(id: &str) -> Result<&'static dyn ProviderDef> {
-    all().find(|p| p.id() == id).with_context(|| {
-        let ids: Vec<_> = all().map(|p| p.id()).collect();
-        format!("unknown provider: {id} ({})", ids.join(" | "))
-    })
+    anyhow::ensure!(config::valid_name(id), "bad provider id: {id}");
+    if let Some(p) = all().find(|p| p.id() == id) {
+        return Ok(p);
+    }
+    static REMOTE: std::sync::Mutex<Vec<&'static RemoteDef>> = std::sync::Mutex::new(Vec::new());
+    let mut remote = REMOTE.lock().unwrap();
+    if let Some(p) = remote.iter().find(|p| p.id == id) {
+        return Ok(*p);
+    }
+    let def: &'static RemoteDef = Box::leak(Box::new(RemoteDef { id: Box::leak(id.to_string().into_boxed_str()) }));
+    remote.push(def);
+    Ok(def)
+}
+
+/// A provider an extension offers; the extension answers for everything about it.
+struct RemoteDef {
+    id: &'static str,
+}
+
+#[async_trait]
+impl ProviderDef for RemoteDef {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+    fn label(&self) -> &'static str {
+        self.id
+    }
+    fn auth(&self) -> Auth {
+        Auth::Extension
+    }
+    async fn build(&self, sel: &Selection) -> Result<Arc<dyn LlmProvider>> {
+        Ok(Arc::new(llm::remote::Remote::new(self.id, sel.model.as_deref().unwrap_or_default(), &sel.effort)))
+    }
+    async fn list_models(&self, _cred: Option<&ApiCredential>) -> Result<Vec<String>> {
+        Ok(llm::remote::models(self.id).await?.into_iter().map(|m| m.id).collect())
+    }
 }
 
 /// A provider of the user's own, `config/providers/<id>.json`: one of the wire formats
@@ -77,7 +109,6 @@ struct CustomConfig {
     base_url: String,
     key_env: Option<String>,
     model: Option<String>,
-    context_window: Option<usize>,
 }
 
 struct CustomDef {
@@ -145,7 +176,7 @@ impl ProviderDef for CustomDef {
         let key = credential(self)?.map(|c| c.key).unwrap_or_default();
         let model = need_model(self, sel)?;
         Ok(match self.cfg.format.as_str() {
-            "openai" => Arc::new(llm::openai::OpenAi::new(self.cfg.base_url.clone(), key, model).with_context_window(self.cfg.context_window)),
+            "openai" => anyhow::bail!("provider {}: OpenAI-compatible endpoints are settings of the `openai` extension now (`endpoints`)", self.id),
             "anthropic" => Arc::new(llm::anthropic::Anthropic::new(&self.cfg.base_url, key, model, sel.effort.clone())),
             other => anyhow::bail!("provider {}: unknown format `{other}` (openai or anthropic)", self.id),
         })
@@ -166,31 +197,14 @@ fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-pub const OPENAI_DEFAULT_URL: &str = "https://api.openai.com/v1";
-
 /// Credential for an API-key provider: env first, then its settings file.
 pub fn credential(p: &dyn ProviderDef) -> Result<Option<ApiCredential>> {
-    if matches!(p.auth(), Auth::OAuth | Auth::Cli) {
+    if !matches!(p.auth(), Auth::ApiKey) {
         return Ok(None);
     }
     let stored = config::credentials()?.remove(p.id());
     let key = env(p.key_env()).or_else(|| stored.as_ref().map(|c| c.key.clone()));
-    let base_url = (p.auth() == Auth::KeyAndUrl).then(|| {
-        env("OPENAI_BASE_URL")
-            .or_else(|| stored.as_ref().and_then(|c| c.base_url.clone()))
-            .unwrap_or_else(|| OPENAI_DEFAULT_URL.into())
-    });
-    Ok(match (key, p.auth()) {
-        (Some(key), _) => Some(ApiCredential { key, base_url }),
-        // Local servers like Ollama need no key.
-        (None, Auth::KeyAndUrl) if stored.is_some() || env("OPENAI_BASE_URL").is_some() => {
-            Some(ApiCredential {
-                key: String::new(),
-                base_url,
-            })
-        }
-        _ => None,
-    })
+    Ok(key.map(|key| ApiCredential { key, base_url: None }))
 }
 
 fn require(p: &dyn ProviderDef, cred: Option<ApiCredential>) -> Result<ApiCredential> {
@@ -477,41 +491,6 @@ impl ProviderDef for CodexDef {
     }
     async fn list_models(&self, _cred: Option<&ApiCredential>) -> Result<Vec<String>> {
         llm::chatgpt::codex::list_models(&crate::util::http_client()).await
-    }
-}
-
-struct OpenAiDef;
-
-#[async_trait]
-impl ProviderDef for OpenAiDef {
-    fn id(&self) -> &'static str {
-        "openai"
-    }
-    fn label(&self) -> &'static str {
-        "OpenAI-compatible (OpenAI, OpenRouter, Ollama, ...)"
-    }
-    fn auth(&self) -> Auth {
-        Auth::KeyAndUrl
-    }
-    fn key_env(&self) -> &'static str {
-        "OPENAI_API_KEY"
-    }
-    async fn build(&self, sel: &Selection) -> Result<Arc<dyn LlmProvider>> {
-        let c = require(self, credential(self)?)?;
-        Ok(Arc::new(llm::openai::OpenAi::new(
-            c.base_url.unwrap_or_else(|| OPENAI_DEFAULT_URL.into()),
-            c.key,
-            need_model(self, sel)?,
-        )))
-    }
-    async fn list_models(&self, cred: Option<&ApiCredential>) -> Result<Vec<String>> {
-        let c = require(self, cred.cloned())?;
-        let url = c.base_url.as_deref().unwrap_or(OPENAI_DEFAULT_URL);
-        let mut req = crate::util::http_client().get(format!("{}/models", url.trim_end_matches('/')));
-        if !c.key.is_empty() {
-            req = req.bearer_auth(&c.key);
-        }
-        Ok(model_ids(req.send().await?.error_for_status()?.json().await?))
     }
 }
 

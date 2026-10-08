@@ -28,7 +28,7 @@ impl Anthropic {
     pub fn new(base_url: &str, api_key: String, model: String, effort: String) -> Self {
         let base_url = base_url.trim_end_matches('/');
         Self {
-            http: crate::util::http_client(),
+            http: crate::http_client(),
             url: format!("{base_url}/messages"),
             official: base_url == API_BASE,
             api_key,

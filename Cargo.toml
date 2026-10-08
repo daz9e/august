@@ -6,6 +6,7 @@ default-run = "august"
 
 [dependencies]
 august-ext = { path = "extensions/sdk" }
+august-llm = { path = "extensions/llm" }
 anyhow = "1"
 async-trait = "0.1"
 base64 = "0.23.1"
@@ -63,6 +64,10 @@ path = "extensions/memory/main.rs"
 [[bin]]
 name = "august-ext-messaging"
 path = "extensions/messaging/main.rs"
+
+[[bin]]
+name = "august-ext-openai"
+path = "extensions/openai/main.rs"
 
 [[bin]]
 name = "august-ext-review"
