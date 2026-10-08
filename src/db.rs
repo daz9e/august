@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_chat ON sessions(chat_key, created_at);
+CREATE TABLE IF NOT EXISTS bindings (
+    chat_key TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id)
+);
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -96,6 +100,13 @@ impl Db {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
+        // Columns added after the first release.
+        for (column, ddl) in [("name", "ALTER TABLE sessions ADD COLUMN name TEXT"), ("settings", "ALTER TABLE sessions ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'")] {
+            let has: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = ?1", [column], |r| r.get::<_, i64>(0))? > 0;
+            if !has {
+                conn.execute_batch(ddl)?;
+            }
+        }
         Ok(Arc::new(Self { conn: Mutex::new(conn) }))
     }
 
@@ -105,12 +116,17 @@ impl Db {
 
     // ---- conversations -------------------------------------------------
 
-    /// The newest session of `chat_key` (created if there is none) and its live messages.
+    /// The session `chat_key` is bound to (created if there is none) and its live messages.
     pub fn resume_session(&self, chat_key: &str) -> Result<(String, Vec<Message>)> {
         let id = match self.latest_session(chat_key)? {
             Some(id) => id,
             None => return Ok((self.new_session(chat_key)?, Vec::new())),
         };
+        Ok((id.clone(), self.live(&id)?))
+    }
+
+    /// A session's live messages (what the model sees).
+    pub fn live(&self, id: &str) -> Result<Vec<Message>> {
         let conn = self.conn();
         let mut stmt =
             conn.prepare("SELECT role, content FROM messages WHERE session_id = ?1 AND archived = 0 ORDER BY id")?;
@@ -119,13 +135,17 @@ impl Db {
             .filter_map(|r| r.ok())
             .filter_map(|(role, content)| Message::from_parts(&role, &content))
             .collect();
-        Ok((id, msgs))
+        Ok(msgs)
     }
 
-    /// The chat's current session (the newest one).
+    /// The chat's current session: the one bound to it, else its newest.
     fn latest_session(&self, chat_key: &str) -> Result<Option<String>> {
-        Ok(self
-            .conn()
+        let conn = self.conn();
+        let bound = conn.query_row("SELECT session_id FROM bindings WHERE chat_key = ?1", [chat_key], |r| r.get(0)).optional()?;
+        if bound.is_some() {
+            return Ok(bound);
+        }
+        Ok(conn
             .query_row(
                 "SELECT id FROM sessions WHERE chat_key = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 [chat_key],
@@ -134,13 +154,86 @@ impl Db {
             .optional()?)
     }
 
+    /// A new session started in `chat_key`, which is bound to it from now on.
     pub fn new_session(&self, chat_key: &str) -> Result<String> {
         let id = crate::util::new_uuid();
         self.conn().execute(
             "INSERT INTO sessions (id, chat_key, created_at) VALUES (?1, ?2, ?3)",
             params![id, chat_key, now()],
         )?;
+        self.bind(chat_key, &id)?;
         Ok(id)
+    }
+
+    /// Makes `session` the conversation of `chat_key`.
+    pub fn bind(&self, chat_key: &str, session: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO bindings (chat_key, session_id) VALUES (?1, ?2) ON CONFLICT(chat_key) DO UPDATE SET session_id = ?2",
+            params![chat_key, session],
+        )?;
+        Ok(())
+    }
+
+    /// Sessions, newest first, of the chat that started them (all when `None`):
+    /// `{id, chat, name, settings, created_at, messages, bound: [chats]}`.
+    pub fn sessions(&self, chat_key: Option<&str>) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.chat_key, s.name, s.settings, s.created_at,
+                    (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id),
+                    (SELECT group_concat(b.chat_key, char(10)) FROM bindings b WHERE b.session_id = s.id)
+             FROM sessions s WHERE ?1 IS NULL OR s.chat_key = ?1 ORDER BY s.created_at DESC, s.rowid DESC",
+        )?;
+        let rows = stmt.query_map([chat_key], |r| {
+            let settings: String = r.get(3)?;
+            let bound: Option<String> = r.get(6)?;
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "chat": r.get::<_, String>(1)?,
+                "name": r.get::<_, Option<String>>(2)?,
+                "settings": serde_json::from_str::<serde_json::Value>(&settings).unwrap_or_default(),
+                "created_at": r.get::<_, i64>(4)?,
+                "messages": r.get::<_, i64>(5)?,
+                "bound": bound.map(|b| b.split('\n').map(String::from).collect::<Vec<_>>()).unwrap_or_default(),
+            }))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// One session (see `sessions`), if it exists.
+    pub fn session(&self, id: &str) -> Result<Option<serde_json::Value>> {
+        Ok(self.sessions(None)?.into_iter().find(|s| s["id"] == id))
+    }
+
+    /// Renames a session (`None` keeps the name) and merges `settings` into its settings
+    /// (a null field deletes it).
+    pub fn update_session(&self, id: &str, name: Option<&str>, settings: &serde_json::Value) -> Result<()> {
+        let conn = self.conn();
+        let current: String = conn
+            .query_row("SELECT settings FROM sessions WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?
+            .with_context(|| format!("no session `{id}`"))?;
+        let mut merged: serde_json::Value = serde_json::from_str(&current).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(o) = merged.as_object_mut() {
+            for (k, v) in settings.as_object().into_iter().flatten() {
+                if v.is_null() {
+                    o.remove(k);
+                } else {
+                    o.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        conn.execute("UPDATE sessions SET settings = ?2 WHERE id = ?1", params![id, merged.to_string()])?;
+        if let Some(name) = name {
+            conn.execute("UPDATE sessions SET name = ?2 WHERE id = ?1", params![id, name])?;
+        }
+        Ok(())
+    }
+
+    /// A session's settings (`{model, system, tools}`, each optional).
+    pub fn session_settings(&self, id: &str) -> Result<serde_json::Value> {
+        let s: Option<String> = self.conn().query_row("SELECT settings FROM sessions WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        Ok(s.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(|| serde_json::json!({})))
     }
 
     /// Stores messages at the end of a session. `index` makes their text searchable.
@@ -340,6 +433,15 @@ impl crate::agent::SessionStore for Db {
     }
     fn new_session(&self, chat_key: &str) -> Result<String> {
         Db::new_session(self, chat_key)
+    }
+    fn live(&self, session: &str) -> Result<Vec<Message>> {
+        Db::live(self, session)
+    }
+    fn bind(&self, chat_key: &str, session: &str) -> Result<()> {
+        Db::bind(self, chat_key, session)
+    }
+    fn session_settings(&self, session: &str) -> Result<serde_json::Value> {
+        Db::session_settings(self, session)
     }
     fn append(&self, session: &str, msgs: &[Message], index: bool) -> Result<()> {
         Db::append(self, session, msgs, index)

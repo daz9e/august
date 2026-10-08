@@ -205,7 +205,10 @@ const api = {
   memory: () => call("memory", {}),
   model: { set: (model: string) => call("model_set", { model }) },
   sessions: {
-    new: (thread: Thread) => call("session_new", { thread }),
+    list: (thread?: Thread) => call("sessions", { thread }),
+    new: (thread: Thread, opts: { name?: string; settings?: object } = {}) => call("session_new", { thread, ...opts }),
+    update: (session: string, change: { name?: string; settings?: object }) => call("session_update", { session, ...change }),
+    switch: (thread: Thread, session: string) => call("session_switch", { thread, session }),
     compact: (thread: Thread) => call("compact", { thread }),
     usage: (thread: Thread) => call("usage", { thread }),
   },

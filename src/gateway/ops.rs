@@ -48,7 +48,10 @@ pub const OPS: &[Op] = &[
     op("callTool", Some("tools"), "Run an agent tool {thread, name, input}"),
     op("llm", Some("llm"), "One completion {prompt, system} without tools"),
     op("model_set", Some("models"), "Switch to {model} of the current provider"),
-    op("session_new", SESSIONS, "Start a new conversation in {thread}"),
+    op("sessions", SESSIONS, "Stored conversations, newest first, of {thread} or all: {id, chat, name, settings, messages, bound}"),
+    op("session_new", SESSIONS, "Start a new conversation in {thread}, optionally with {name, settings}; returns its id"),
+    op("session_update", SESSIONS, "Rename {session} ({name}) or change its {settings}: {model, system, tools}, null deletes"),
+    op("session_switch", SESSIONS, "Continue stored {session} in {thread}"),
     op("compact", SESSIONS, "Summarise older messages of {thread}: {before, after} or null"),
     op("usage", SESSIONS, "Token usage of {thread}'s conversation and of today"),
     op("memory", Some("memory"), "The facts August remembers: [{id, text}]"),
@@ -190,11 +193,25 @@ impl Gateway {
                 let (provider, model) = self.switch_model(arg("model")?).await?;
                 json!({"provider": provider, "model": model})
             }
-            "session_new" => {
+            "sessions" => json!(self.db.sessions(thread(p).ok().map(|t| t.key()).as_deref())?),
+            "session_new" | "session_switch" => {
                 let t = thread(p)?;
                 self.waits.cancel(&t, "new");
                 self.turns.cancel_thread(&t);
-                self.chat(&t).await?.agent.lock().await.reset()?;
+                let chat = self.chat(&t).await?;
+                let mut agent = chat.agent.lock().await;
+                if name == "session_switch" {
+                    let id = arg("session")?;
+                    anyhow::ensure!(self.db.session(id)?.is_some(), "no session `{id}`");
+                    agent.switch(id)?;
+                } else {
+                    agent.reset()?;
+                    self.db.update_session(agent.session(), p["name"].as_str(), &p["settings"])?;
+                }
+                json!(agent.session())
+            }
+            "session_update" => {
+                self.db.update_session(arg("session")?, p["name"].as_str(), &p["settings"])?;
                 Value::Null
             }
             "compact" => match self.chat(&thread(p)?).await?.agent.lock().await.compact(true).await? {

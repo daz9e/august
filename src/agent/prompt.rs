@@ -24,7 +24,8 @@ impl Agent {
     pub(super) fn system_now(&mut self) -> String {
         if self.snapshot.is_none() {
             let extensions = self.tools.extensions().map(|e| e.prompt_sections()).unwrap_or_default();
-            self.snapshot = Some(memory_section(&*self.db) + &crate::skills::prompt_section() + &extensions);
+            let own = self.settings["system"].as_str().map(|s| format!("\n\n{}", s.trim())).unwrap_or_default();
+            self.snapshot = Some(own + &memory_section(&*self.db) + &crate::skills::prompt_section() + &extensions);
         }
         self.turn_system.as_ref().unwrap_or(&self.system).clone() + self.snapshot.as_deref().unwrap_or_default()
     }

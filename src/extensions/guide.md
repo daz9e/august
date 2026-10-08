@@ -165,8 +165,12 @@ helpers for the common ones:
   `owner` (`august` or the extension).
 - `august.status(thread?)`: `{ provider, model, workspace, busy }`.
 - `august.model.set(id)`: switch the model, like `/model id`.
-- `august.sessions.new(thread)`, `.compact(thread)`, `.usage(thread)`: like `/new`,
-  `/compact`, `/usage`.
+- `august.sessions.new(thread, { name, settings })`, `.compact(thread)`, `.usage(thread)`:
+  like `/new`, `/compact`, `/usage`.
+- Conversations are stored and addressable: `august.sessions.list(thread?)`,
+  `.switch(thread, id)` continues one in a thread, `.update(id, { name, settings })`. A
+  conversation's `settings` — `model` (`provider:model` or a model of the active provider),
+  `system` (added to the system prompt), `tools` (only these) — apply from its next turn.
 - `august.stop(thread)`: like `/stop`.
 - `august.memory()`: the remembered facts, like `/memory`.
 - `august.extensions.list()`, `.enable(name)`, `.disable(name)`, `.reload()`: like

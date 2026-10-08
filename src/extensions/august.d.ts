@@ -73,6 +73,20 @@ declare module "august" {
   /** An operation of the core's table. */
   export type Op = { name: string; permission: Permission | null; about: string };
 
+  /** A conversation's own settings. `model`: a model of the active provider or
+   *  `provider:model`; `system`: instructions added to the system prompt; `tools`: only these. */
+  export type SessionSettings = { model?: string; system?: string; tools?: string[] };
+  export type SessionInfo = {
+    id: string;
+    /** The chat (`messenger:id`) that started it. */
+    chat: string;
+    name: string | null;
+    settings: SessionSettings;
+    created_at: number;
+    messages: number;
+    bound: string[];
+  };
+
   export type UsageTotal = { calls: number; input: number; output: number; cache_read: number; cache_write: number };
 
   export type ExtensionInfo = {
@@ -353,8 +367,16 @@ declare module "august" {
     model: { set(model: string): Promise<{ provider: string; model: string }> };
     /** A thread's conversation. Need `sessions`. */
     sessions: {
-      /** Starts a new conversation, as /new does. */
-      new(thread: Thread): Promise<void>;
+      /** Stored conversations, newest first: of the chat that started them, or all. `bound`:
+       *  the chats whose current conversation it is. */
+      list(thread?: Thread): Promise<SessionInfo[]>;
+      /** Starts a new conversation, as /new does; returns its id. */
+      new(thread: Thread, opts?: { name?: string; settings?: SessionSettings }): Promise<string>;
+      /** Renames a conversation or changes its settings (a null field deletes it); takes
+       *  effect from its next turn. */
+      update(session: string, change: { name?: string; settings?: Partial<Record<keyof SessionSettings, any>> }): Promise<void>;
+      /** Continues a stored conversation in `thread`. */
+      switch(thread: Thread, session: string): Promise<string>;
       /** Summarises older messages; estimated tokens, or null if there was nothing to do. */
       compact(thread: Thread): Promise<{ before: number; after: number } | null>;
       /** Token usage of its current conversation, and of today across all threads. */

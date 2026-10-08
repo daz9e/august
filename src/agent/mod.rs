@@ -90,6 +90,10 @@ pub struct Agent {
     compact_retry_at: usize,
     /// Tool calls the running turn made.
     turn_tool_calls: usize,
+    /// The session's settings as of the running turn: `{model, system, tools}`.
+    settings: Value,
+    /// The provider for the session's own `model`, if it has one.
+    session_provider: Option<Arc<dyn LlmProvider>>,
 }
 
 impl Agent {
@@ -120,6 +124,8 @@ impl Agent {
             last_input_tokens: 0,
             compact_retry_at: 0,
             turn_tool_calls: 0,
+            settings: json!({}),
+            session_provider: None,
         })
     }
 
@@ -153,6 +159,53 @@ impl Agent {
         Ok(())
     }
 
+    /// Continues another stored session in this chat (the chat is bound to it from now on).
+    pub fn switch(&mut self, session: &str) -> Result<()> {
+        let history = self.db.live(session)?;
+        self.db.bind(&self.chat_key, session)?;
+        self.session = session.to_string();
+        self.stored = history.len();
+        self.turn_start = history.len();
+        self.history = history;
+        self.snapshot = None;
+        self.last_input_tokens = 0;
+        self.compact_retry_at = 0;
+        Ok(())
+    }
+
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+
+    /// Picks up the session's settings; a change takes effect from this turn.
+    async fn load_settings(&mut self) -> Result<()> {
+        let settings = self.db.session_settings(&self.session)?;
+        if settings == self.settings {
+            return Ok(());
+        }
+        self.session_provider = match settings["model"].as_str() {
+            Some(m) => Some(crate::llm::providers::build_spec(m).await?),
+            None => None,
+        };
+        self.settings = settings;
+        self.snapshot = None;
+        Ok(())
+    }
+
+    /// The model this session talks to.
+    fn provider(&self) -> Arc<dyn LlmProvider> {
+        self.session_provider.clone().unwrap_or_else(|| self.provider.clone())
+    }
+
+    /// The tools offered in this session (all, or the ones its settings name).
+    fn specs(&self) -> Vec<ToolSpec> {
+        let mut specs = self.tools.specs();
+        if let Some(keep) = self.settings["tools"].as_array() {
+            specs.retain(|s| keep.iter().any(|k| k == s.name.as_str()));
+        }
+        specs
+    }
+
     /// The thread for hooks outside a turn: `telegram:5#task1` -> `telegram:5`.
     fn chat_ref(&self) -> Origin {
         let thread = self.chat_key.split_once(':').map(|(m, id)| crate::messengers::Thread::new(m, id.split('#').next().unwrap_or(id)));
@@ -175,7 +228,7 @@ impl Agent {
         on_event: &mut (dyn FnMut(Event) + Send),
     ) -> Result<Completion> {
         let mut system = self.system_now();
-        let mut provider = self.provider.clone();
+        let mut provider = self.provider();
         let mut specs = std::borrow::Cow::Borrowed(specs);
         if let Some(ext) = self.tools.extensions().filter(|e| e.listens("llm_call")) {
             let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -274,6 +327,7 @@ impl Agent {
         ctx: &ToolCtx,
         on_event: &mut (dyn FnMut(Event) + Send),
     ) -> Result<String> {
+        self.load_settings().await?;
         self.turn_start = self.history.len();
         self.turn_system = None;
         self.turn_tool_calls = 0;
@@ -312,7 +366,7 @@ impl Agent {
         let mut user = Message::user_text(format!("[{stamp}] {user_text}"));
         user.content.extend(attachments);
         self.history.push(user);
-        let specs = self.tools.specs();
+        let specs = self.specs();
 
         let limit = max_steps();
         for step in 0..limit {

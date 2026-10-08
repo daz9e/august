@@ -26,11 +26,11 @@ impl Agent {
     /// The conversation as it is now, to fork.
     pub fn fork(&mut self) -> Fork {
         Fork {
-            provider: self.provider.clone(),
+            provider: self.provider(),
             session: self.session.clone(),
             system: self.system_now(),
             history: self.history.clone(),
-            specs: self.tools.specs(),
+            specs: self.specs(),
             tools: self.tools.clone(),
         }
     }
