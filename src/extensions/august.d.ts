@@ -36,6 +36,11 @@ declare module "august" {
    *  in the thread's conversation, nothing shown, the reply returned; `fork`: on a copy of the
    *  conversation (same prompt and tools, so the provider's cache holds), nothing kept;
    *  `fresh`: a new conversation (a sub-agent). */
+  /** `source`: who it is from (default `ext:<your name>`; `user` passes it as the user's);
+   *  the model sees `[from <source>]` before it. `deliver`: `steer` (default) joins the
+   *  running turn before its next model call or starts one; `followUp` runs as its own turn
+   *  after the current one; `nextTurn` waits for the next turn without starting one. */
+  export type PromptOpts = { source?: string; deliver?: "steer" | "followUp" | "nextTurn" };
   export type TurnMode = "visible" | "quiet" | "fork" | "fresh";
   export type Turn = { id: number; mode: TurnMode; source?: string; parent?: number };
   export type TurnRequest = {
@@ -90,8 +95,8 @@ declare module "august" {
     signal: AbortSignal;
     /** Sends a message to that thread; resolves to its id (for `august.edit`). */
     send(message: OutMessage): Promise<string>;
-    /** Hands the thread `text` as if the user sent it: joins the running turn, or starts one. */
-    prompt(text: string): Promise<void>;
+    /** Hands the thread a message (see `PromptOpts`); passes `message_in`. */
+    prompt(text: string, opts?: PromptOpts): Promise<void>;
     /** Runs a sub-agent for this thread (a `fresh` turn under this one): a new conversation,
      *  the thread's approvals, nobody to answer questions. Resolves to its final reply; throws
      *  if it failed or was cancelled (/stop cancels all of a thread's turns).
@@ -123,10 +128,12 @@ declare module "august" {
     /** A user message arrived (before the agent sees it). `files`: its attachments, already
      *  saved in the workspace (`path` is absolute); `voice` marks a recorded voice note. */
     message_in: {
-      /** The message's id in its messenger (for `react`, `reply_to`). */
-      id: string;
+      /** The message's id in its messenger (for `react`, `reply_to`); null for a `prompt`. */
+      id: string | null;
       text: string;
       files: { path: string; mime: string; kind: "voice" | "audio" | "image" | "video" | "document"; voice: boolean }[];
+      /** `user` for what came from a messenger, else the `source` of a `prompt`. */
+      source: string;
     };
     /** A turn is about to start; `system` is the base system prompt. */
     before_turn: { text: string; system: string };
@@ -286,8 +293,8 @@ declare module "august" {
      *  the option pressed, numbered or named, the user's own words, or null after the
      *  timeout; throws if the user cancelled it with /stop. Built on listen + send + next. */
     ask(thread: Thread, question: string, options: string[], opts?: { timeout?: number }): Promise<string | null>;
-    /** Hands `thread` a message as if the user sent it. */
-    prompt(thread: Thread, text: string): Promise<void>;
+    /** Hands `thread` a message (see `PromptOpts`); passes `message_in`. */
+    prompt(thread: Thread, text: string, opts?: PromptOpts): Promise<void>;
     /** Turns: start a quiet, fork or fresh one and get its id; wait for its outcome (once;
      *  `{ status: "running" }` if the timeout passes first); cancel it; list running ones. */
     turns: {

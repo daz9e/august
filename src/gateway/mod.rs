@@ -169,6 +169,24 @@ impl Gateway {
         Ok(chat)
     }
 
+    /// Runs the `message_in` hook on a message for `thread`: its text as the hooks left it, or
+    /// `None` when one handled it (its reply, if any, is sent).
+    async fn message_in(&self, channel: &Arc<dyn Messenger>, thread: &Thread, data: Value) -> Result<Option<String>> {
+        let text = data["text"].as_str().unwrap_or_default().to_string();
+        if !self.ext.listens("message_in") {
+            return Ok(Some(text));
+        }
+        let data = self.ext.emit("message_in", data, &extensions::Origin::thread(thread.clone())).await;
+        if data["handled"] == true {
+            if let Some(reply) = data["reply"].as_str().filter(|r| !r.is_empty()) {
+                channel.send(&thread.id, &OutMessage::text(reply)).await?;
+            }
+            channel.presence(&thread.id, false).await;
+            return Ok(None);
+        }
+        Ok(Some(data["text"].as_str().map(String::from).unwrap_or(text)))
+    }
+
     async fn handle(self: Arc<Self>, ev: Inbound) -> Result<()> {
         let Some(channel) = self.channels.get(&ev.thread.messenger).cloned() else {
             return Ok(());
@@ -195,19 +213,11 @@ impl Gateway {
                 let intake = state.intake.lock().await;
                 let (note, images, saved) = self.receive(&*channel, &files).await;
                 let mut text = [text, note].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
-                if self.ext.listens("message_in") {
-                    let data = self.ext.emit("message_in", serde_json::json!({"id": message, "text": text, "files": saved}), &extensions::Origin::thread(ev.thread.clone())).await;
-                    if data["handled"] == true {
-                        if let Some(reply) = data["reply"].as_str().filter(|r| !r.is_empty()) {
-                            channel.send(&chat, &OutMessage::text(reply)).await?;
-                        }
-                        channel.presence(&chat, false).await;
-                        return Ok(());
-                    }
-                    if let Some(t) = data["text"].as_str() {
-                        text = t.to_string();
-                    }
-                }
+                let data = serde_json::json!({"id": message, "text": text, "files": saved, "source": "user"});
+                let Some(t) = self.message_in(&channel, &ev.thread, data).await? else {
+                    return Ok(());
+                };
+                text = t;
                 // While a turn runs, plain text goes to it instead of waiting for it to end.
                 if images.is_empty() && state.inbox.offer(&text) {
                     drop(intake);

@@ -11,6 +11,8 @@ pub struct Inbox(Mutex<State>);
 struct State {
     busy: bool,
     pending: Vec<String>,
+    /// Kept for the next turn, without starting one.
+    stashed: Vec<String>,
 }
 
 impl Inbox {
@@ -26,6 +28,16 @@ impl Inbox {
             s.pending.push(text.to_string());
         }
         s.busy
+    }
+
+    /// Keeps `text` for the next turn, whenever it comes.
+    pub fn stash(&self, text: &str) {
+        self.0.lock().unwrap().stashed.push(text.to_string());
+    }
+
+    /// What was stashed for this turn.
+    pub fn unstash(&self) -> Vec<String> {
+        std::mem::take(&mut self.0.lock().unwrap().stashed)
     }
 
     /// A turn of the chat runs, or is about to run what was sent meanwhile.

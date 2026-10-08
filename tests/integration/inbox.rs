@@ -5,7 +5,7 @@ use crate::support::*;
 use serde_json::{Value, json};
 use std::time::Duration;
 
-const MARK: &str = "[The user sent this while you were working]";
+const MARK: &str = "[Sent while you were working; unmarked lines are from the user]";
 
 fn msgs(req: &Value) -> &Vec<Value> {
     req["messages"].as_array().unwrap()

@@ -26,18 +26,24 @@ impl Gateway {
         agent.run_turn(task, &ctx, &mut |_| {}).await
     }
 
-    /// Hands a message to the chat as if the user sent it: into the running turn, or as
-    /// a new one.
-    pub(super) async fn deliver(self: &Arc<Self>, channel: Arc<dyn Messenger>, id: Thread, text: &str) {
-        let offered = match self.chat(&id).await {
-            Ok(state) => state.inbox.offer(text),
-            Err(e) => return eprintln!("gateway: {e:#}"),
+    /// Hands the chat a message from `source` (`user`, or e.g. `ext:goal`) after the
+    /// `message_in` hook. `deliver`: `steer` joins the running turn or starts one, `followUp`
+    /// runs as its own turn after the current one, `nextTurn` waits for the next turn
+    /// without starting one. The model sees who sent it unless it is the user.
+    pub(super) async fn deliver(self: &Arc<Self>, channel: Arc<dyn Messenger>, id: Thread, text: &str, source: &str, deliver: &str) -> Result<()> {
+        let data = serde_json::json!({"id": null, "text": text, "files": [], "source": source});
+        let Some(text) = self.message_in(&channel, &id, data).await? else {
+            return Ok(());
         };
-        if !offered {
-            let chat = id.id.clone();
-            if let Err(e) = self.turn(channel, id, &chat, text, Vec::new()).await {
-                eprintln!("gateway: {e:#}");
-            }
+        let text = if source == "user" { text } else { format!("[from {source}] {text}") };
+        let state = self.chat(&id).await?;
+        let chat = id.id.clone();
+        match deliver {
+            "nextTurn" => state.inbox.stash(&text),
+            "followUp" => self.turn(channel, id, &chat, &text, Vec::new()).await?,
+            _ if state.inbox.offer(&text) => {}
+            _ => self.turn(channel, id, &chat, &text, Vec::new()).await?,
         }
+        Ok(())
     }
 }

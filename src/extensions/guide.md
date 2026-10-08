@@ -40,7 +40,8 @@ export default function (august: August) {
 Handlers get `(data, ctx)`. Returned fields replace the event's data; return nothing to
 leave it unchanged.
 
-- `message_in` `{ text, files }`: a user message, before the agent sees it. `files` are its
+- `message_in` `{ id, text, files, source }`: a message for the thread, before the agent
+  sees it; `source` is `user` for what came from a messenger, else a `prompt`'s source. `files` are its
   attachments, already saved (`{ path, mime, voice }`). Return `{ text }` to rewrite it, or
   `{ handled: true, reply? }` to swallow it.
 - `message_out` `{ kind: send|edit, id, text, buttons, files, reply_to }`: before August
@@ -109,8 +110,12 @@ Messengers and messages — August's primitives, usable for any thread:
 - `await ctx.ask(question, ["Yes", "Later"], { timeout })` (or `august.ask(thread, ...)`)
   does all that: buttons, and the answer as the option pressed, numbered or named, the
   user's own words, or null.
-- `ctx.prompt(text)` / `august.prompt(thread, text)` hand a thread a message as if the user
-  sent it (joins a running turn, or starts one).
+- `ctx.prompt(text, opts)` / `august.prompt(thread, text, opts)` hand a thread a message.
+  `source` says who it is from (default `ext:<your name>`; the model sees `[from <source>]`,
+  `user` passes it as the user's); `deliver` is `steer` (default: joins the running turn
+  before its next model call, or starts one), `followUp` (its own turn after the current
+  one) or `nextTurn` (waits for the next turn without starting one). It passes `message_in`
+  like a user's message, with its `source`.
 
 Calling into August:
 - `await ctx.callTool("read_file", { path: "notes.md" })` runs any agent tool (built-in,

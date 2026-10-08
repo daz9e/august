@@ -158,6 +158,14 @@ impl Ctx {
         self.in_thread("prompt", json!({"text": text})).await.map(drop)
     }
 
+    /// Like `prompt`, with `opts`: `source` (who it is from, shown to the model; default
+    /// `ext:<name>`) and `deliver` (`steer`, `followUp` or `nextTurn`).
+    pub async fn prompt_with(&self, text: &str, opts: Value) -> Result<()> {
+        let mut params = json!({"text": text});
+        params.as_object_mut().unwrap().extend(opts.as_object().cloned().unwrap_or_default());
+        self.in_thread("prompt", params).await.map(drop)
+    }
+
     /// Runs a sub-agent with a fresh conversation for the thread; returns its final reply.
     /// `opts`: `{system, tools, exclude}`.
     /// Fails if it failed or was cancelled (/stop cancels all of a thread's turns).

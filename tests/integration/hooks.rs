@@ -208,3 +208,34 @@ async fn turn_settled_comes_when_nothing_runs_in_the_thread() {
     let (bg, settled) = (texts.iter().position(|t| t == "background turn ended"), texts.iter().position(|t| t == "settled"));
     assert!(bg.is_some() && bg < settled, "{texts:?}");
 }
+
+const SENDER: &str = r#"
+export default function (august) {
+  august.on("message_in", async ({ source }, ctx) => { await ctx.send(`message_in from ${source}`); });
+  august.registerCommand("stash", async (_, ctx) => { await ctx.prompt("remember the milk", { deliver: "nextTurn" }); return "stashed"; });
+  august.registerCommand("report", async (_, ctx) => { await ctx.prompt("all done", { source: "subagent" }); return "reported"; });
+}
+"#;
+
+#[tokio::test]
+async fn prompts_carry_their_source_and_delivery() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|req| reply_text(&format!("got: {}", last_user_text(req).replace('\n', " | "))))).await;
+    let gw = august(&fake, Setup { home: &[("extensions/sender/index.ts", SENDER)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+
+    // A nextTurn message starts nothing; it rides along with the next turn.
+    chat.ask("/stash", "stashed").await;
+    chat.wait_for("message_in from ext:sender").await;
+    chat.ask("hello", "remember the milk | ").await;
+    assert_eq!(fake.llm_requests().len(), 1);
+    assert!(chat.texts().iter().any(|t| t.contains("milk") && t.ends_with("hello")), "{:?}", chat.texts());
+
+    // Another source is shown to the model and to message_in.
+    chat.ask("/report", "reported").await;
+    chat.wait_for("[from subagent] all done").await;
+    chat.wait_for("message_in from subagent").await;
+    chat.wait_for("message_in from user").await;
+}

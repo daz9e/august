@@ -54,7 +54,10 @@ impl Gateway {
         let mut agent = state.agent.lock().await; // turns in one chat run in order
         state.inbox.start();
         channel.presence(chat, true).await;
-        let (mut text, mut images) = (text.to_string(), images);
+        let stashed = state.inbox.unstash();
+        let text = stashed.into_iter().chain([text.to_string()]).collect::<Vec<_>>().join("\n");
+        let mut images = images;
+        let mut text = text;
         loop {
             let r = self.turn_once(&state, &mut agent, channel.clone(), &id, chat, &text, images).await;
             let left = state.inbox.finish();

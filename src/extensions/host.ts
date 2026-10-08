@@ -114,7 +114,7 @@ function context(thread: Thread | null, turn: Turn | null = null) {
     thread,
     turn,
     send: (message: Message) => inThread("send", { message }),
-    prompt: (text: string) => inThread("prompt", { text }),
+    prompt: (text: string, opts: { source?: string; deliver?: string } = {}) => inThread("prompt", { text, ...opts }),
     agent: (task: string, opts: object = {}) => runTurn(need(), { ...opts, text: task, mode: "fresh", parent: turn?.id }),
     ask: async (question: string, options: string[], opts: { timeout?: number } = {}) => ask(need(), question, options, opts.timeout),
     approve: (action: string) => inThread("approve", { action }),
@@ -174,7 +174,7 @@ const api = {
     call("listen", { thread, buttons: opts.buttons ?? [], text: opts.text ?? false, ttl_ms: opts.ttl ?? 600_000 }),
   next: (listener: number, opts: { timeout?: number } = {}) => call("next", { listener, timeout_ms: opts.timeout ?? 300_000 }),
   ask: (thread: Thread, question: string, options: string[], opts: { timeout?: number } = {}) => ask(thread, question, options, opts.timeout),
-  prompt: (thread: Thread, text: string) => call("prompt", { thread, text }),
+  prompt: (thread: Thread, text: string, opts: { source?: string; deliver?: string } = {}) => call("prompt", { thread, text, ...opts }),
   turns: {
     start: (thread: Thread, turn: object) => call("turn_start", { thread, turn }),
     wait: (id: number, opts: { timeout?: number } = {}) => call("turn_wait", { id, timeout_ms: opts.timeout }),

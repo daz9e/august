@@ -153,8 +153,18 @@ impl Gateway {
                 let t = thread(p)?;
                 let m = self.messenger(&t)?;
                 let (gw, text) = (self.clone(), arg("text")?.to_string());
+                let source = p["source"].as_str().map(String::from).unwrap_or_else(|| match caller {
+                    Caller::Extension(name) => format!("ext:{name}"),
+                    Caller::User => "user".into(),
+                });
+                let deliver = p["deliver"].as_str().unwrap_or("steer").to_string();
+                anyhow::ensure!(["steer", "followUp", "nextTurn"].contains(&deliver.as_str()), "`deliver` is steer, followUp or nextTurn");
                 // Not awaited: the caller may be inside a turn of that very thread.
-                tokio::spawn(async move { gw.deliver(m, t, &text).await });
+                tokio::spawn(async move {
+                    if let Err(e) = gw.deliver(m, t, &text, &source, &deliver).await {
+                        eprintln!("gateway: {e:#}");
+                    }
+                });
                 Value::Null
             }
             "turn_start" => {
