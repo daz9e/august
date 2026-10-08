@@ -367,7 +367,8 @@ impl Gateway {
     pub(super) async fn stop(&self, thread: &Thread) -> usize {
         self.waits.cancel(thread, "stop");
         // Extensions hear it first, so a loop of theirs doesn't start the next turn.
-        self.ext.emit("stop", json!({}), &Origin::thread(thread.clone())).await;
+        let turns: Vec<Value> = self.turns.list(Some(thread)).as_array().into_iter().flatten().map(|t| t["id"].clone()).collect();
+        self.ext.emit("stop", json!({"turns": turns}), &Origin::thread(thread.clone())).await;
         // Every turn of the thread: the reply, quiet ones, sub-agents.
         self.turns.cancel_thread(thread)
     }

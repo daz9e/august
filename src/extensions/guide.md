@@ -64,7 +64,8 @@ leave it unchanged.
   about to see. Return `{ messages }` to change it for that call only (inject recalled notes,
   drop noise); the stored history stays as is. Keep tool_use/tool_result pairs intact.
 - `llm_result` `{ step, text, toolCalls: [{ name, input }], usage }`: after every model call.
-- `stop` `{}`: the user sent /stop; stop any loop of yours in that thread.
+- `stop` `{ turns }`: the user sent /stop; `turns` are the ids of the turns it cancels. Stop
+  any loop of yours in that thread.
 - `session_start` `{ previous, session }`: the thread started a new conversation (`/new`).
 - `compaction` `{ before, after }`: older history was summarised (estimated tokens).
 

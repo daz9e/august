@@ -88,3 +88,25 @@ async fn tool_hooks_know_the_call_and_who_made_it() {
     chat.ask("/peek", "peek: hello").await;
     chat.wait_for("call read_file null by ext:watch").await;
 }
+
+const STOPPER: &str = r#"
+export default function (august) {
+  august.on("tool_call", async (_, ctx) => { await ctx.send(`turn ${ctx.turn.id} runs`); return { approve: true }; });
+  august.on("stop", async ({ turns }, ctx) => { await ctx.send(`stopping turns ${turns.join(",")}`); });
+}
+"#;
+
+#[tokio::test]
+async fn stop_tells_extensions_which_turns_it_cancels() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_tool("shell", serde_json::json!({"command": "sleep 30"})))).await;
+    let gw = august(&fake, Setup { home: &[("extensions/stopper/index.ts", STOPPER)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("start a long job").await;
+    let runs = chat.wait_for(" runs").await.text;
+    let id = runs.trim_start_matches("turn ").trim_end_matches(" runs");
+    chat.ask("/stop", "Stopping").await;
+    chat.wait_for(&format!("stopping turns {id}")).await;
+}

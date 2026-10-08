@@ -158,7 +158,7 @@ declare module "august" {
     /** August is about to stop this extension (reload, disable): clean up, within 2 s. */
     shutdown: {};
     /** The user sent /stop in the thread (observe only). */
-    stop: {};
+    stop: { turns: number[] };
     /** Before each model call of a turn; `step` counts from 0, `system` is the full prompt. */
     llm_call: { step: number; system: string };
     /** Before each model call, after `llm_call`: the conversation the model is about to see. */
