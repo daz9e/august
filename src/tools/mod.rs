@@ -1,7 +1,6 @@
 //! Tools the agent can call, run through the `tool_call` / `tool_result` hooks.
 
 mod bash;
-mod extensions;
 mod fs;
 mod memory;
 mod skills;
@@ -23,8 +22,6 @@ pub struct ToolCtx {
     pub db: Arc<Db>,
     /// The thread and turn this runs for.
     pub origin: crate::extensions::Origin,
-    /// Loaded extensions, for `save_extension`; `None` when they are off.
-    pub extensions: Option<Arc<Extensions>>,
     /// Messages the user sends while the turn runs.
     pub inbox: Option<Arc<crate::agent::Inbox>>,
     /// Who asks for tools: `model`, or `ext:<name>` for an extension's `callTool`.
@@ -64,7 +61,6 @@ impl ToolRegistry {
                 Arc::new(skills::LoadSkill),
                 Arc::new(skills::SaveSkill),
                 Arc::new(skills::EditSkill),
-                Arc::new(extensions::SaveExtension),
             ],
             ext: None,
             hidden: HashSet::new(),

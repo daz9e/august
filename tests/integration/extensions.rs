@@ -139,6 +139,9 @@ async fn agent_installs_an_extension_with_approval() {
     let saved = chat.wait_for("Result: saved").await;
     assert!(saved.text.contains("greeter — tools: greet"), "{}", saved.text);
     assert_eq!(std::fs::read_to_string(gw.home.join("extensions/greeter/index.ts")).unwrap(), GREETER);
+    // The core marks it as the agent's.
+    let unit = std::fs::read_to_string(gw.home.join("config/extensions/greeter.json")).unwrap();
+    assert!(unit.contains(r#""origin": "agent""#), "{unit}");
 
     // The new tool is usable on the next message, without a restart.
     chat.ask("greet Bob", "Result: Hello, Bob!").await;

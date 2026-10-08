@@ -23,7 +23,7 @@ const HOST_TS: &str = include_str!("host.ts");
 const TYPES: &str = include_str!("august.d.ts");
 const GUIDE: &str = include_str!("guide.md");
 /// The extensions that ship with August, as binaries `august-ext-<name>` next to `august`.
-const DEFAULTS: &[&str] = &["approvals", "browser", "clarify", "commands", "goal", "mcp", "messaging", "review", "scheduler", "subagents", "voice", "web"];
+const DEFAULTS: &[&str] = &["approvals", "browser", "clarify", "commands", "extend", "goal", "mcp", "messaging", "review", "scheduler", "subagents", "voice", "web"];
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message_in` may do real work on attachments (e.g. transcribe a voice note).
@@ -272,7 +272,7 @@ impl Extensions {
                     return (generation, State::Failed(format!("{} is missing; build it with `cargo build`", exe.display())));
                 }
                 let mut c = tokio::process::Command::new(exe);
-                c.current_dir(dir).env("AUGUST_EXTENSION_DIR", dir);
+                c.current_dir(dir).env("AUGUST_EXTENSION_DIR", dir).env("AUGUST_EXTENSIONS", &self.dir);
                 c
             }
         };

@@ -58,7 +58,7 @@ pub const OPS: &[Op] = &[
     op("usage", SESSIONS, "Token usage of {thread}'s conversation and of today"),
     op("memory", Some("memory"), "The facts August remembers: [{id, text}]"),
     op("extensions", Some("admin"), "Every extension with its state and what it registers"),
-    op("extension_enable", Some("admin"), "Start {name} and keep it enabled"),
+    op("extension_enable", Some("admin"), "(Re)start {name} and keep it enabled; returns its status line, fails with its error"),
     op("extension_disable", Some("admin"), "Stop {name} and keep it disabled"),
     op("extensions_reload", Some("admin"), "Restart every extension but the caller"),
     op("settings", None, "The calling extension's settings, schema defaults filled in"),
@@ -241,7 +241,13 @@ impl Gateway {
             "memory" => Value::Array(self.db.facts()?.into_iter().map(|f| json!({"id": f.id, "text": f.text})).collect()),
             "extensions" => self.ext.list(),
             "extension_enable" => {
-                let line = self.ext.load(arg("name")?).await?;
+                let name = arg("name")?;
+                // Whoever starts a new extension first installed it: the user, or the agent
+                // through an extension's tool. The core says so; the extension can't.
+                if self.ext.dir().join(name).is_dir() && crate::config::unit("extensions", name)?["origin"].is_null() {
+                    crate::config::set(&format!("extensions.{name}.origin"), json!(if caller == "user" { "user" } else { "agent" }))?;
+                }
+                let line = self.ext.load(name).await?;
                 self.publish_commands().await;
                 json!(line)
             }
@@ -424,7 +430,6 @@ impl Gateway {
             workspace: self.workspace.clone(),
             db: self.db.clone(),
             origin,
-            extensions: Some(self.ext.clone()),
             inbox: None,
             caller: caller.into(),
         };

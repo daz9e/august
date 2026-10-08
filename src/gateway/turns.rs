@@ -187,7 +187,6 @@ impl Gateway {
             workspace: self.workspace.clone(),
             db: self.db.clone(),
             origin,
-            extensions: Some(self.ext.clone()),
             inbox: None,
             caller: "model".into(),
         };

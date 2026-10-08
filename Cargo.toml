@@ -45,6 +45,10 @@ name = "august-ext-commands"
 path = "extensions/commands/main.rs"
 
 [[bin]]
+name = "august-ext-extend"
+path = "extensions/extend/main.rs"
+
+[[bin]]
 name = "august-ext-goal"
 path = "extensions/goal/main.rs"
 
