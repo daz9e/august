@@ -56,7 +56,7 @@ impl Fork {
             let mut results = Vec::new();
             for (id, name, input) in reply.tool_uses() {
                 let (output, is_error) = if allow.is_none_or(|a| a.iter().any(|n| n == name)) {
-                    self.tools.call(name, input, ctx).await
+                    self.tools.call(Some(id), name, input, ctx).await
                 } else {
                     (format!("`{name}` is not available here"), true)
                 };

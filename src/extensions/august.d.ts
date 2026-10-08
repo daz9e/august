@@ -130,10 +130,11 @@ declare module "august" {
     };
     /** A turn is about to start; `system` is the base system prompt. */
     before_turn: { text: string; system: string };
-    /** The model wants to run a tool. */
-    tool_call: { tool: string; input: any };
+    /** A tool is about to run. `id`: the model's call id (null outside a model call);
+     *  `caller`: `model`, or `ext:<name>` for an extension's callTool. */
+    tool_call: { tool: string; input: any; id: string | null; caller: string };
     /** A tool finished. */
-    tool_result: { tool: string; input: any; output: string; isError: boolean };
+    tool_result: { tool: string; input: any; id: string | null; caller: string; output: string; isError: boolean };
     /** Any turn finished (observe only; runs in the background). */
     turn_end: {
       text: string;

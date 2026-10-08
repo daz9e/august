@@ -44,6 +44,8 @@ pub struct ToolCtx {
     pub extensions: Option<Arc<Extensions>>,
     /// Messages the user sends while the turn runs.
     pub inbox: Option<Arc<crate::agent::Inbox>>,
+    /// Who asks for tools: `model`, or `ext:<name>` for an extension's `callTool`.
+    pub caller: String,
 }
 
 #[async_trait]
@@ -150,7 +152,8 @@ impl ToolRegistry {
 
     /// Runs a tool through the extension hooks; errors become `(message, true)` so the
     /// model can react to them.
-    pub async fn call(&self, name: &str, input: &Value, ctx: &ToolCtx) -> (String, bool) {
+    /// `id` is the model's id of the call (`None` for calls from elsewhere).
+    pub async fn call(&self, id: Option<&str>, name: &str, input: &Value, ctx: &ToolCtx) -> (String, bool) {
         if !self.offered(name) {
             return (format!("unknown tool: {name}"), true);
         }
@@ -160,7 +163,7 @@ impl ToolRegistry {
         let mut input = input.clone();
         let mut ctx = std::borrow::Cow::Borrowed(ctx);
         if ext.listens("tool_call") {
-            let data = ext.emit("tool_call", json!({"tool": name, "input": input}), &ctx.origin).await;
+            let data = ext.emit("tool_call", json!({"tool": name, "input": input, "id": id, "caller": ctx.caller}), &ctx.origin).await;
             match &data["block"] {
                 Value::String(reason) if !reason.is_empty() => {
                     return (format!("blocked by an extension: {reason}"), true);
@@ -181,7 +184,7 @@ impl ToolRegistry {
         }
         let (mut output, mut is_error) = self.run(name, &input, &ctx).await;
         if ext.listens("tool_result") {
-            let data = json!({"tool": name, "input": input, "output": output, "isError": is_error});
+            let data = json!({"tool": name, "input": input, "id": id, "caller": ctx.caller, "output": output, "isError": is_error});
             let data = ext.emit("tool_result", data, &ctx.origin).await;
             if let Some(o) = data["output"].as_str() {
                 output = o.to_string();

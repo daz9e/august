@@ -93,6 +93,7 @@ impl Gateway {
             files: Some(Arc::new(ChatFiles(tx.clone()))),
             extensions: Some(self.ext.clone()),
             inbox: Some(state.inbox.clone()),
+            caller: "model".into(),
         };
         let streamed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let streamed2 = streamed.clone();

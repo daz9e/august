@@ -351,7 +351,7 @@ impl Agent {
                 on_event(Event::ToolCall { name, input });
             }
             let outputs =
-                futures_util::future::join_all(calls.iter().map(|(_, name, input)| self.tools.call(name, input, ctx))).await;
+                futures_util::future::join_all(calls.iter().map(|(id, name, input)| self.tools.call(Some(id), name, input, ctx))).await;
             let mut results = Vec::new();
             for ((id, _, _), (output, is_error)) in calls.iter().zip(outputs) {
                 results.push(Block::ToolResult {

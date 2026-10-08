@@ -167,7 +167,7 @@ impl Gateway {
             "turns" => self.turns.list(thread(p).ok().as_ref()),
             "stop" => json!({"cancelled": self.stop(&thread(p)?).await}),
             "callTool" => {
-                let (output, is_error) = self.call_tool(&thread(p)?, arg("name")?, &p["input"]).await?;
+                let (output, is_error) = self.call_tool(&thread(p)?, arg("name")?, &p["input"], &caller).await?;
                 json!({"output": output, "isError": is_error})
             }
             "llm" => {
@@ -372,7 +372,7 @@ impl Gateway {
         self.turns.cancel_thread(thread)
     }
 
-    async fn call_tool(&self, thread: &Thread, name: &str, input: &Value) -> Result<(String, bool)> {
+    async fn call_tool(&self, thread: &Thread, name: &str, input: &Value, caller: &Caller<'_>) -> Result<(String, bool)> {
         let m = self.messenger(thread)?;
         let files = turn::ThreadFiles { messenger: m.clone(), thread: thread.id.clone() };
         let ctx = ToolCtx {
@@ -383,8 +383,12 @@ impl Gateway {
             files: Some(Arc::new(files)),
             extensions: Some(self.ext.clone()),
             inbox: None,
+            caller: match caller {
+                Caller::Extension(name) => format!("ext:{name}"),
+                Caller::User => "user".into(),
+            },
         };
-        Ok(self.tools().call(name, input, &ctx).await)
+        Ok(self.tools().call(None, name, input, &ctx).await)
     }
 
     /// Rebuilds the provider with another model of the active provider and persists it.

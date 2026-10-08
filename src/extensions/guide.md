@@ -45,10 +45,12 @@ leave it unchanged.
   `{ handled: true, reply? }` to swallow it.
 - `before_turn` `{ text, system }`: once per turn. Return `{ system }` to change the base
   system prompt for this turn, `{ text }` to change the user message.
-- `tool_call` `{ tool, input }`: before any tool runs (built-in or extension). Return
+- `tool_call` `{ tool, input, id, caller }`: before any tool runs (built-in or extension);
+  `id` is the model's call id (null outside a model call), `caller` is `model`, or
+  `ext:<name>` for an extension's `callTool`. Return
   `{ block: "reason" }` to stop it, `{ input }` to change its arguments, `{ approve: true }`
   to run it without the usual approval, `{ ask: "question" }` to ask the user first.
-- `tool_result` `{ tool, input, output, isError }`: return `{ output }` to change what the
+- `tool_result` `{ tool, input, id, caller, output, isError }`: return `{ output }` to change what the
   model sees.
 - `turn_end` `{ text, reply, status, toolCalls, unattended }`: after any turn; `status` is
   `ok`, `error` or `cancelled`, `toolCalls` how many tools it called, and `ctx.turn` its
