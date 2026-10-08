@@ -143,6 +143,10 @@ impl Ctx {
 
     async fn in_thread(&self, method: &str, mut params: Value) -> Result<Value> {
         params["thread"] = json!(self.thread()?);
+        // So the core knows which turn asks, and hooks of what it runs see that turn.
+        if let Some(turn) = &self.turn {
+            params["from_turn"] = json!(turn.id);
+        }
         self.link.call(method, params).await
     }
 

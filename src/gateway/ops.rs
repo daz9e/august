@@ -169,7 +169,7 @@ impl Gateway {
             "turns" => self.turns.list(thread(p).ok().as_ref()),
             "stop" => json!({"cancelled": self.stop(&thread(p)?).await}),
             "callTool" => {
-                let (output, is_error) = self.call_tool(&thread(p)?, arg("name")?, &p["input"], &caller).await?;
+                let (output, is_error) = self.call_tool(self.origin(p)?, arg("name")?, &p["input"], &caller).await?;
                 json!({"output": output, "isError": is_error})
             }
             "llm" => {
@@ -417,14 +417,21 @@ impl Gateway {
         self.turns.cancel_thread(thread)
     }
 
-    async fn call_tool(&self, thread: &Thread, name: &str, input: &Value, caller: &str) -> Result<(String, bool)> {
-        let m = self.messenger(thread)?;
+    /// The thread of a call, and the turn it is made from (`from_turn`, which the SDKs send).
+    fn origin(&self, p: &Value) -> Result<extensions::Origin> {
+        let turn = p["from_turn"].as_u64().and_then(|id| self.turns.tag(id));
+        Ok(extensions::Origin { thread: Some(thread(p)?), turn })
+    }
+
+    async fn call_tool(&self, origin: extensions::Origin, name: &str, input: &Value, caller: &str) -> Result<(String, bool)> {
+        let thread = origin.thread.clone().expect("a call's origin has its thread");
+        let m = self.messenger(&thread)?;
         let files = turn::ThreadFiles { messenger: m.clone(), thread: thread.id.clone() };
         let ctx = ToolCtx {
             workspace: self.workspace.clone(),
-            approver: Arc::new(self.approver(m, thread.clone(), None)),
+            approver: Arc::new(self.approver(m, thread, None)),
             db: self.db.clone(),
-            origin: extensions::Origin::thread(thread.clone()),
+            origin,
             files: Some(Arc::new(files)),
             extensions: Some(self.ext.clone()),
             inbox: None,

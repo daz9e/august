@@ -79,6 +79,11 @@ impl Turns {
         self.running.lock().unwrap().remove(&id);
     }
 
+    /// A running turn, by id.
+    pub fn tag(&self, id: u64) -> Option<TurnTag> {
+        self.running.lock().unwrap().get(&id).map(|r| r.tag.clone())
+    }
+
     /// Cancels every running turn of `thread`; returns how many there were.
     pub fn cancel_thread(&self, thread: &Thread) -> usize {
         let running = self.running.lock().unwrap();

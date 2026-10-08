@@ -109,7 +109,8 @@ function context(thread: Thread | null, turn: Turn | null = null) {
     if (!thread) throw new Error("this call has no thread");
     return thread;
   };
-  const inThread = (method: string, params: object) => (thread ? call(method, { thread, ...params }) : Promise.reject(new Error("this call has no thread")));
+  const inThread = (method: string, params: object) =>
+    thread ? call(method, { thread, from_turn: turn?.id, ...params }) : Promise.reject(new Error("this call has no thread"));
   return {
     thread,
     turn,
