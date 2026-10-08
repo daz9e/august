@@ -1,11 +1,10 @@
-//! Connects channels to agents: one agent session per chat, slash commands,
-//! streamed replies rendered as live-edited messages.
+//! Connects channels to agents: one agent session per chat, its turns, and the operations
+//! extensions call; drawing replies is an extension's job (`render`).
 
 mod commands;
 mod media;
 mod outbound;
 pub(crate) mod ops;
-mod render;
 mod subagents;
 mod turn;
 mod turns;
@@ -54,8 +53,9 @@ pub struct Gateway {
     ext: Arc<Extensions>,
     /// Numbers sub-agents.
     subagents: std::sync::atomic::AtomicU64,
-    /// The stream of each thread's reply in progress, so what else is sent there lands in order.
-    live: StdMutex<HashMap<Thread, tokio::sync::mpsc::UnboundedSender<render::Ui>>>,
+    /// The renderer and event stream of each thread's reply in progress, so what else is sent
+    /// there lands in order.
+    live: StdMutex<HashMap<Thread, (String, tokio::sync::mpsc::UnboundedSender<turn::Live>)>>,
 }
 
 /// The core's operations as extensions call them.
@@ -224,7 +224,7 @@ impl Gateway {
                 // Busy from here, so the next message joins this turn instead of racing it.
                 state.inbox.start();
                 drop(intake);
-                self.turn(channel, ev.thread, &chat, &text, images).await?
+                self.turn(channel, ev.thread, &chat, &text, images, None).await?;
             }
         }
         Ok(())

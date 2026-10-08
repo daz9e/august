@@ -63,6 +63,8 @@ pub struct Manifest {
     pub providers: Vec<ProviderInfo>,
     /// Extensions whose events it emits in their place (it took over their namespace).
     pub replaces: Vec<String>,
+    /// Jobs of the core it does instead (`render`): the core leaves them to it.
+    pub takes: Vec<String>,
 }
 
 /// A model provider an extension offers.
@@ -171,15 +173,17 @@ impl Host {
                     };
                     match msg["method"].as_str() {
                         // `ready` once started, `manifest` when it registers more later.
+                        // A `manifest` during setup only tells what it needs so far.
                         Some(m @ ("ready" | "manifest")) => {
                             *manifest.write().unwrap() = parse_manifest(&msg["params"]);
-                            if m == "manifest"
+                            if m == "ready"
+                                && let Some(tx) = ready_tx.take()
+                            {
+                                tx.send(()).ok();
+                            } else if ready_tx.is_none()
                                 && let Some(core) = &core
                             {
                                 core.changed();
-                            }
-                            if let Some(tx) = ready_tx.take() {
-                                tx.send(()).ok();
                             }
                         }
                         Some("stream") if msg.get("id").is_none() => {
@@ -405,6 +409,7 @@ fn parse_manifest(params: &Value) -> Manifest {
             })
             .collect(),
         replaces: list("replaces").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
+        takes: list("takes").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
         providers: list("providers")
             .iter()
             .filter_map(|p| {

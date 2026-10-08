@@ -42,6 +42,7 @@ const sections = new Map<string, string>();
 const needs = new Set<string>();
 const emits = new Map<string, { name: string; description: string; schema: unknown; observe: boolean }>();
 const replaces = new Set<string>();
+const takes = new Set<string>();
 let settingsSchema: unknown = null;
 let started = false;
 let manifestQueued = false;
@@ -62,6 +63,7 @@ function manifest() {
     settings: settingsSchema,
     emits: [...emits.values()],
     replaces: [...replaces],
+    takes: [...takes],
   };
 }
 
@@ -146,6 +148,10 @@ const api = {
     extensions.forEach((e) => replaces.add(e));
     changed();
   },
+  takes(...jobs: string[]) {
+    jobs.forEach((j) => takes.add(j));
+    changed();
+  },
   emit: (event: string, data: object = {}) => call("emit", { event, data }),
   registerTool(tool: any) {
     if (!tool?.name || !tool?.description || typeof tool?.execute !== "function") {
@@ -159,6 +165,8 @@ const api = {
   },
   needs(...permissions: string[]) {
     permissions.forEach((p) => needs.add(p));
+    // During setup, at once: calls the setup makes next are checked against it.
+    if (!started) write({ method: "manifest", params: manifest() });
     changed();
   },
   registerPromptSection(name: string, text: string) {

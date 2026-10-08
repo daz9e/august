@@ -40,9 +40,9 @@ impl Gateway {
         let chat = id.id.clone();
         match deliver {
             "nextTurn" => state.inbox.stash(&text),
-            "followUp" => self.turn(channel, id, &chat, &text, Vec::new()).await?,
+            "followUp" => drop(self.turn(channel, id, &chat, &text, Vec::new(), None).await?),
             _ if state.inbox.offer(&text) => {}
-            _ => self.turn(channel, id, &chat, &text, Vec::new()).await?,
+            _ => drop(self.turn(channel, id, &chat, &text, Vec::new(), None).await?),
         }
         Ok(())
     }

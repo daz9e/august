@@ -70,6 +70,10 @@ name = "august-ext-openai"
 path = "extensions/openai/main.rs"
 
 [[bin]]
+name = "august-ext-render"
+path = "extensions/render/main.rs"
+
+[[bin]]
 name = "august-ext-review"
 path = "extensions/review/main.rs"
 

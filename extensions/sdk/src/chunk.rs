@@ -1,12 +1,12 @@
 //! Messenger-independent splitting of long Markdown into message-sized pieces.
 
-pub(crate) fn fence_open(line: &str) -> Option<(&str, &str)> {
+pub fn fence_open(line: &str) -> Option<(&str, &str)> {
     let t = line.trim_start();
     let ticks = t.len() - t.trim_start_matches('`').len();
     (ticks >= 3).then(|| (&t[..ticks], t[ticks..].trim()))
 }
 
-pub(crate) fn is_fence_close(line: &str, open: &str) -> bool {
+pub fn is_fence_close(line: &str, open: &str) -> bool {
     let t = line.trim();
     t.len() >= open.len() && t.chars().all(|c| c == '`')
 }

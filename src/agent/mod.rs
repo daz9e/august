@@ -394,6 +394,8 @@ impl Agent {
         match &result {
             Ok(_) => {
                 self.persist();
+                // A turn cancelled before it ever ran must not cut this one back.
+                self.turn_start = self.history.len();
             }
             Err(_) => self.rollback_turn(),
         }

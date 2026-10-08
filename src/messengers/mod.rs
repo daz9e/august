@@ -5,11 +5,9 @@
 //! dialect.
 
 pub mod bus;
-pub mod chunk;
+pub use august_ext::chunk;
 pub mod terminal;
 pub mod telegram;
-
-pub use chunk::split_markdown;
 
 use bus::Bus;
 use anyhow::Result;

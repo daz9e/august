@@ -1,5 +1,5 @@
 //! `extend`: the agent writes extensions for August itself (`save_extension`); the core
-//! starts it and marks it as the agent's.
+//! starts it and marks it as the agent's. `extensions` lists them and turns them on and off.
 
 use anyhow::{anyhow, bail};
 use august_ext::{August, str_arg};
@@ -43,6 +43,36 @@ async fn main() {
                 std::fs::write(&file, code)?;
                 let status = august.call("extension_enable", json!({"name": name})).await.map_err(|e| anyhow!("saved, but it failed to start:\n{e:#}"))?;
                 Ok(format!("saved {} and started it.\n{}", file.display(), status.as_str().unwrap_or_default()))
+            }
+        },
+    );
+    let me = august.clone();
+    august.register_tool(
+        "extensions",
+        "List August's extensions with their state and what they register, or enable or \
+         disable one by name (disabled stays off across restarts).",
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "enable", "disable"]},
+                "name": {"type": "string", "description": "The extension, for enable and disable"}
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }),
+        move |input, _| {
+            let august = me.clone();
+            async move {
+                let (action, name) = (str_arg(&input, "action"), str_arg(&input, "name"));
+                match action {
+                    "list" => {}
+                    "enable" | "disable" if !name.is_empty() => {
+                        august.call(&format!("extension_{action}"), json!({"name": name})).await?;
+                    }
+                    "enable" | "disable" => bail!("`{action}` needs a `name`"),
+                    _ => bail!("unknown action `{action}`"),
+                }
+                Ok(serde_json::to_string(&august.call("extensions", json!({})).await?)?)
             }
         },
     );

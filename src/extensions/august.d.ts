@@ -32,7 +32,8 @@ declare module "august" {
   /** What a listener took: a button press or a text message; or why nothing came. */
   export type Reply = { press: string } | { text: string } | { timeout: true } | { cancelled: "stop" | "new" };
 
-  /** A run of the agent. `visible`: the user's conversation, streamed to the thread; `quiet`:
+  /** A run of the agent. `visible`: the thread's conversation, streamed to the thread as a
+   *  turn of the user's is (the model sees `[from <source>]` before the text); `quiet`:
    *  in the thread's conversation, nothing shown, the reply returned; `fork`: on a copy of the
    *  conversation (same prompt and tools, so the provider's cache holds), nothing kept;
    *  `fresh`: a new conversation (a sub-agent). */
@@ -45,8 +46,8 @@ declare module "august" {
   export type Turn = { id: number; mode: TurnMode; source?: string; parent?: number; meta?: unknown };
   export type TurnRequest = {
     text: string;
-    mode: "quiet" | "fork" | "fresh";
-    /** Who starts it; hooks see it as `ctx.turn.source`. */
+    mode: TurnMode;
+    /** Who starts it (default `ext:<your name>`); hooks see it as `ctx.turn.source`. */
     source?: string;
     /** The turn this one belongs to (e.g. `ctx.turn.id`). */
     parent?: number;
@@ -64,12 +65,12 @@ declare module "august" {
     status: "ok" | "error" | "cancelled" | "running";
     reply: string;
     error?: string | null;
-    /** fork: every tool call, `{ name, input, output, isError }`. */
+    /** fork: every tool call, `{ name, input, output, isError }` (empty for the others). */
     toolCalls: { name: string; input: any; output: string; isError: boolean }[];
   };
 
   /** What an extension declares it uses (`august.needs`); each operation needs at most one. */
-  export type Permission = "messaging" | "turns" | "tools" | "llm" | "models" | "sessions" | "config" | "admin";
+  export type Permission = "messaging" | "turns" | "tools" | "llm" | "models" | "sessions" | "config" | "admin" | "user";
 
   /** An operation of the core's table. */
   export type Op = { name: string; permission: Permission | null; about: string };
@@ -116,7 +117,7 @@ declare module "august" {
     /** Who installed it: shipped with August, the user, or the agent (`save_extension`). */
     origin: "default" | "user" | "agent";
     /** Only while running: what it registered, and the built-in tools it replaces. */
-    tools?: string[]; replaces?: string[]; commands?: string[]; hooks?: string[]; needs?: Permission[]; sections?: string[];
+    tools?: string[]; replaces?: string[]; commands?: string[]; hooks?: string[]; needs?: Permission[]; takes?: string[]; sections?: string[];
     /** Events it emits, as others hook them. */
     events?: { name: string; description: string; schema: object | null; observe: boolean }[];
   };
@@ -208,6 +209,19 @@ declare module "august" {
       | { kind: "step" }
       | { kind: "tool"; tool: string; input: any }
       | { kind: "compacted" };
+    /** Only for the extension that `takes("render")`: a visible turn to draw, one event at a
+     *  time (the next waits for the handler; text arriving meanwhile comes merged). `start`
+     *  carries the messenger's capabilities (`edit`, `edit_interval_ms`, `max_len`, ...);
+     *  `break`: a message was sent to the thread in the reply's place, so finish what is shown
+     *  and continue in a new message below; `end`: the outcome. */
+    render:
+      | { kind: "start"; capabilities: { edit: boolean; edit_interval_ms: number; max_len: number; [k: string]: any } }
+      | { kind: "text"; text: string }
+      | { kind: "step" }
+      | { kind: "tool"; tool: string; input: any }
+      | { kind: "compacted" }
+      | { kind: "break" }
+      | { kind: "end"; status: "ok" | "error" | "cancelled"; reply: string; error: string | null };
     /** Nothing runs in `ctx.thread` any more and nothing is about to: every turn ended, no
      *  message waits, and the `turn_end` handlers (which may start the next turn) are done.
      *  Once per quiet period. Observe only; background. */
@@ -265,6 +279,7 @@ declare module "august" {
     turn_end: void;
     turn_settled: void;
     turn_event: void;
+    render: void;
     extension_state: void;
     config_changed: void;
     stop: void;
@@ -336,16 +351,19 @@ declare module "august" {
      *  `compaction`): its events go out as `compaction:<event>`, and the original can't emit
      *  them any more. Emit them as `compaction:<event>`. */
     replaces(...extensions: string[]): void;
+    /** Does jobs of the core in its place; the first extension (in `hooks.order`) that takes
+     *  one gets it. `render`: draw the user's visible turns from `render` events (sending and
+     *  editing messages in `ctx.thread`); with nobody taking it, only each turn's outcome is sent. */
+    takes(...jobs: "render"[]): void;
     /** Runs a declared event through its handlers; resolves to the data they leave (an
      *  observed event: to `data`, at once). Inside a handler use `ctx.emit`, so loops are caught. */
     emit<T extends object = any>(event: string, data?: object): Promise<T>;
     /** May be called any time; tools added or removed after setup show up from the next model call. */
     registerTool<P = any>(tool: Tool<P>): void;
     unregisterTool(name: string): void;
-    /** Declares what this extension uses beyond its own thread (shown in /extensions):
-     *  `messaging` (messengers, sending to or listening in any thread, prompt), `turns`
-     *  (starting turns, sub-agents), `tools` (callTool), `llm`. Without it, those calls fail;
-     *  answering in the thread of the call in progress, and the store need nothing. */
+    /** Declares what this extension uses beyond its own thread (shown in /extensions; see
+     *  the guide for each permission). Without it, those calls fail; answering in the thread
+     *  of the call in progress, and the store need nothing. Calls made in setup after it work. */
     needs(...permissions: Permission[]): void;
     /** A section of the system prompt (Markdown, e.g. "## Reminders\n..."): how and when the
      *  model should use what this extension offers. Fixed for each conversation, so a change
@@ -384,7 +402,7 @@ declare module "august" {
     ask(thread: Thread, question: string, options: string[], opts?: { timeout?: number }): Promise<string | null>;
     /** Hands `thread` a message (see `PromptOpts`); passes `message_in`. */
     prompt(thread: Thread, text: string, opts?: PromptOpts): Promise<void>;
-    /** Turns: start a quiet, fork or fresh one and get its id; wait for its outcome (once;
+    /** Turns: start one of any mode and get its id; wait for its outcome (once;
      *  `{ status: "running" }` if the timeout passes first); cancel it; list running ones. */
     turns: {
       start(thread: Thread, turn: TurnRequest): Promise<number>;
@@ -458,7 +476,7 @@ declare module "august" {
       enable(name: string): Promise<string>;
       /** Stops it and keeps it disabled. */
       disable(name: string): Promise<void>;
-      /** Restarts every extension, this one too. */
+      /** Restarts every extension but this one. */
       reload(): Promise<ExtensionInfo[]>;
     };
   }

@@ -25,7 +25,7 @@ const HOST_TS: &str = include_str!("host.ts");
 const TYPES: &str = include_str!("august.d.ts");
 const GUIDE: &str = include_str!("guide.md");
 /// The extensions that ship with August, as binaries `august-ext-<name>` next to `august`.
-const DEFAULTS: &[&str] = &["approvals", "browser", "clarify", "commands", "extend", "goal", "mcp", "memory", "messaging", "openai", "review", "scheduler", "skills", "subagents", "voice", "web"];
+const DEFAULTS: &[&str] = &["approvals", "browser", "clarify", "commands", "extend", "goal", "mcp", "memory", "messaging", "openai", "render", "review", "scheduler", "skills", "subagents", "voice", "web"];
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message_in` may do real work on attachments (e.g. transcribe a voice note).
@@ -128,7 +128,7 @@ pub fn dir() -> PathBuf {
 
 /// The extension-writing guide with the API types, served as a built-in skill.
 pub fn guide() -> String {
-    format!("{GUIDE}\nExtensions live in {}.\n\n```ts\n{TYPES}```\n", dir().display())
+    format!("Extensions live in {}.\n\n{GUIDE}\n```ts\n{TYPES}```\n", dir().display())
 }
 
 pub fn valid_name(name: &str) -> bool {
@@ -500,10 +500,7 @@ impl Extensions {
             futures_util::future::join_all(hosts.iter().map(|(n, h)| hook(n, h, event, &data, chat, observe))).await;
             return data;
         }
-        // ponytail: reads august.json on every chained event; cache it if that ever shows up.
-        let order = crate::config::get("august.hooks.order").unwrap_or_default();
-        let order: Vec<&str> = order.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-        hosts.sort_by_key(|(n, _)| order.iter().position(|o| o == n).unwrap_or(usize::MAX));
+        in_user_order(&mut hosts);
         for (name, host) in hosts {
             if let (Some(Value::Object(changes)), Some(d)) = (hook(&name, &host, event, &data, chat, false).await, data.as_object_mut()) {
                 d.extend(changes);
@@ -513,6 +510,21 @@ impl Extensions {
             }
         }
         data
+    }
+
+    /// The extension that does the core's `job` in its place (`takes`); of several, the first
+    /// in the user's order.
+    pub fn taker(&self, job: &str) -> Option<String> {
+        let mut hosts: Vec<_> = self.running().into_iter().filter(|(_, h)| h.manifest().takes.iter().any(|t| t == job)).collect();
+        in_user_order(&mut hosts);
+        hosts.into_iter().next().map(|(n, _)| n)
+    }
+
+    /// Hands extension `name` the `event` of a job it took and waits for its handler; `None`
+    /// when it isn't running or failed.
+    pub async fn run_job(&self, name: &str, event: &str, data: &Value, chat: &Origin) -> Option<Value> {
+        let (_, host) = self.running().into_iter().find(|(n, _)| n == name)?;
+        hook(name, &host, event, data, chat, false).await
     }
 
     /// Whether `event`'s handlers only observe: one of the core's observers, or an extension
@@ -643,6 +655,7 @@ impl Extensions {
             v["commands"] = json!(m.commands.iter().map(|c| &c.0).collect::<Vec<_>>());
             v["hooks"] = json!(m.events);
             v["needs"] = json!(m.needs);
+            v["takes"] = json!(m.takes);
             v["sections"] = json!(m.sections.iter().map(|s| &s.0).collect::<Vec<_>>());
             let namespace = m.replaces.first().unwrap_or(&slot.name);
             v["events"] = Value::Array(
@@ -661,7 +674,7 @@ impl Extensions {
     }
 
     /// Every extension in name order: `{name, state: running|failed|disabled, error, tools,
-    /// replaces, commands, hooks, needs, sections, events}`.
+    /// replaces, commands, hooks, needs, takes, sections, events}`.
     pub fn list(&self) -> Value {
         let builtin = builtin_tools();
         Value::Array(self.slots.read().unwrap().iter().map(|s| self.entry(s, &builtin)).collect())
@@ -698,6 +711,7 @@ fn status_line(e: &Value) -> String {
                 ("hooks", "hooks", ""),
                 ("events", "emits", ""),
                 ("needs", "needs", ""),
+                ("takes", "takes", ""),
                 ("sections", "prompt", ""),
                 ("replaces", "replaces built-in", ""),
             ] {
@@ -712,6 +726,14 @@ fn status_line(e: &Value) -> String {
             format!("✅ {name} — {}", parts.join("; "))
         }
     }
+}
+
+/// Sorts extensions in the user's order (`hooks.order` in `august.json`), the rest after.
+// ponytail: reads august.json on every call; cache it if that ever shows up.
+fn in_user_order(hosts: &mut [(String, Arc<Host>)]) {
+    let order = crate::config::get("august.hooks.order").unwrap_or_default();
+    let order: Vec<&str> = order.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    hosts.sort_by_key(|(n, _)| order.iter().position(|o| o == n).unwrap_or(usize::MAX));
 }
 
 /// Tells extensions they are about to stop (the `shutdown` event), so they can clean up;

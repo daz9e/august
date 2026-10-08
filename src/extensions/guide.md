@@ -1,6 +1,20 @@
-Extensions add tools, slash commands and hooks to August itself. Use them when the user
-asks you to change how you behave in a lasting way ("always...", "never...", "add a
-/command that...", "when X happens, do Y"), or to add a capability that needs code.
+Extensions add tools, slash commands and hooks to August itself: write one when a task
+needs a capability you don't have (a tool, a hook, a /command, a background job), or when the
+user asks you to behave differently in a lasting way that takes code ("when X happens, do Y").
+A fact or a preference to remember is not an extension; a procedure is a skill.
+
+Build the capability, not the one task. Before writing, check `august.tools()` and
+`august.extensions.list()`: maybe it exists. Then write the general piece the task is one use
+of — a tool with parameters (the thread, the text, the schedule), not one with this task's
+values baked in — and use it for the task right after saving it. No one-off code that runs once
+in setup, no "done" flags in the store: an extension stays installed, so it must stay useful.
+For example, "make the agent in my terminal create a file and tell me" is a `hand_off` tool
+that runs a task in any thread and reports back (see Turns below), called once.
+
+To change what a default extension does (`render`, `approvals`, `memory`, ...), save one of
+your own under its name: it replaces the default.
+
+This guide and the types at the end are the whole API; you don't need August's source code.
 
 ## Shape
 
@@ -59,8 +73,8 @@ leave it unchanged.
   `approvals` extension does exactly this.
 - `tool_result` `{ tool, input, id, caller, output, isError }`: return `{ output }` to change what the
   model sees.
-- `turn_end` `{ text, reply, status, toolCalls, unattended }`: after any turn; `status` is
-  `ok`, `error` or `cancelled`, `toolCalls` how many tools it called, and `ctx.turn` its
+- `turn_end` `{ text, reply, status, error, toolCalls, unattended }`: after any turn; `status` is
+  `ok`, `error` (why: `error`) or `cancelled`, `toolCalls` how many tools it called, and `ctx.turn` its
   `{ id, mode, source, parent }` (`unattended`: not the user's visible conversation). Runs
   in the background; the result is ignored.
 - `llm_call` `{ step, system, model, tools }`: before every model call of a turn (`step`
@@ -121,6 +135,18 @@ schemas. An extension that stands in for another (your own `compaction`) calls
 `august.replaces("compaction")` and emits `compaction:<event>`, so existing hooks keep
 working.
 
+Jobs of the core: some things the core does only while no extension does them in its place.
+`august.takes("render")` makes this extension draw the user's visible turns: it gets `render`
+events one at a time, in order (the next waits for the handler; text arriving meanwhile
+comes merged) and sends or edits messages in `ctx.thread` itself. `start` carries the
+messenger's `capabilities` (`edit`, `edit_interval_ms`, `max_len`, ...); `text`, `step`,
+`tool`, `compacted` are as in `turn_event`; `break` means a message (a file, a question) was
+sent in the reply's place, so finish what is shown and continue in a new message below;
+`end` `{ status, reply, error }` is the outcome. The default `render` extension streams the
+reply by editing messages and shows a line per tool call; take `render` yourself to draw
+differently. With nobody taking it, only each turn's outcome is sent. Of several, the first
+in `hooks.order` gets it.
+
 `ctx.thread` is the thread the call belongs to: `{ messenger, id }`, e.g.
 `{ messenger: "telegram", id: "123" }` or a terminal window `{ messenger: "cli", id: "1" }`.
 
@@ -159,13 +185,22 @@ Calling into August:
   returns the text.
 - `await ctx.agent(task, { system, tools, exclude })` runs a sub-agent with a fresh
   conversation and returns its final reply (`tools` limits it, `exclude` hides some).
-- Turns: `const id = await august.turns.start(thread, { text, mode })` starts a `quiet` turn
-  (in the thread's conversation, nothing shown, e.g. a scheduled check), a `fork` (on a copy
-  of the conversation, nothing kept; `tools` limits what it may call; good for looking back
-  at a conversation) or a `fresh` one (a sub-agent); `await august.turns.wait(id)` gives
-  `{ status, reply, error, toolCalls }`. `august.turns.cancel(id)`, `august.turns.list()`.
-  /stop cancels every turn of its thread. `ctx.turn` tells which turn a call runs in
-  (`{ id, mode, source, parent }`).
+- Turns: `const id = await august.turns.start(thread, { text, mode })` starts a `visible`
+  turn (in the thread's conversation, shown there like one of the user's, after whatever runs
+  there now; the model sees `[from <source>]`; unlike `prompt`, it skips `message_in`), a `quiet` one (in the thread's conversation,
+  nothing shown, e.g. a scheduled check), a `fork` (on a copy of the conversation, nothing
+  kept; `tools` limits what it may call; good for looking back at a conversation) or a
+  `fresh` one (a sub-agent); `await august.turns.wait(id)` gives
+  `{ status, reply, error, toolCalls }`. `source` defaults to `ext:<your name>`, `parent`
+  links it to the turn that asked (`ctx.turn.id`). `august.turns.cancel(id)`,
+  `august.turns.list()`. /stop cancels every turn of its thread, queued ones too. `ctx.turn`
+  tells which turn a call runs in (`{ id, mode, source, parent }`). Work in another thread
+  that reports back:
+  ```ts
+  const id = await august.turns.start(target, { text: task, mode: "visible", parent: ctx.turn?.id });
+  august.turns.wait(id).then((out) => august.prompt(ctx.thread!, `#${id} ${out.status}: ${out.reply}`, { deliver: "followUp" }));
+  return `started #${id}`; // don't hold the tool call open while it runs
+  ```
 - `august.workspace` is the agent's workspace folder.
 
 State: `august.store` keeps JSON values by key in August's database, across restarts
@@ -265,10 +300,9 @@ shows what each one needs. Ask for no more than the extension uses.
   approvals of the agent's tool calls. Write only what the user asked for.
 - stdout is reserved for the protocol: log with `console.log`/`console.error` (goes to
   August's log).
-- npm packages: just import them; bun installs them on first run. Keep state in files under
-  `august.dir`.
-- Timeouts: hooks 10 s (`message_in` 2 min; `august.on(event, handler, { timeout })` sets
-  your own), commands 60 s, tools 10 min, setup 30 s. When August stops waiting for a call
+- npm packages: just import them; bun installs them on first run.
+- Timeouts: hooks that may change data 10 s (`message_in` 2 min; `august.on(event, handler,
+  { timeout })` sets your own), observe-only hooks 1 h, commands and tools 10 min, setup 30 s. When August stops waiting for a call
   (its turn was cancelled with /stop, or it timed out), `ctx.signal` is aborted: pass it to
   `fetch` and long work so it stops too.
 - Before a reload or `/extensions disable`, the `shutdown` event gives you 2 s to clean up. A failing or slow hook is skipped

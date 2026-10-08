@@ -578,6 +578,62 @@ async fn extensions_run_quiet_fork_and_fresh_turns() {
     chat.wait_for("spawned cancelled").await;
 }
 
+// What the agent writes when asked to have another window do something: a general tool, not
+// one for that task. It also calls into August during setup, right after `needs`.
+const HANDOFF: &str = r#"
+import type { August } from "august";
+
+export default async function (august: August) {
+  august.needs("turns", "messaging");
+  const known = (await august.messengers()).length;
+  august.registerTool({
+    name: "hand_off",
+    description: `Have August work on a task in another thread (${known} messengers); its outcome comes back here`,
+    parameters: { type: "object", properties: { messenger: { type: "string" }, thread: { type: "string" }, task: { type: "string" } } },
+    async execute({ messenger, thread, task }, ctx) {
+      const id = await august.turns.start({ messenger, id: thread }, { text: task, mode: "visible", parent: ctx.turn?.id });
+      august.turns.wait(id).then((out) => august.prompt(ctx.thread!, `hand-off #${id} ${out.status}: ${out.reply}`, { deliver: "followUp" }));
+      return `started #${id}`;
+    },
+  });
+}
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_extension_runs_a_visible_turn_in_another_thread_and_reports_back() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|req| {
+        let t = last_user_text(req);
+        if messages(req).last().unwrap()["role"] == "tool" {
+            return reply_text("handed off");
+        }
+        if t.contains("hand-off #") && t.contains("FILE-DONE") {
+            return reply_text("the other window says FILE-DONE");
+        }
+        if t.contains("create the file") {
+            return reply_text("FILE-DONE");
+        }
+        match t.split("other window ").nth(1) {
+            Some(thread) => reply_tool("hand_off", json!({"messenger": "cli", "thread": thread.trim(), "task": "create the file"})),
+            None => reply_text("ok"),
+        }
+    }))
+    .await;
+    let gw = august(&fake, Setup { home: &[("extensions/handoff/index.ts", HANDOFF)], ..Default::default() }).await;
+    let mut here = gw.chat().await;
+    let there = gw.chat().await;
+
+    here.ask(&format!("ask the other window {}", there.thread), "handed off").await;
+    // The turn runs and shows in the other window like one of the user's…
+    there.wait_for("FILE-DONE").await;
+    let asked = fake.llm_requests().into_iter().map(|r| last_user_text(&r)).find(|t| t.contains("create the file")).unwrap();
+    assert!(asked.contains("[from ext:handoff] create the file"), "{asked}");
+    // …and its outcome comes back to where it was asked for.
+    here.wait_for("the other window says FILE-DONE").await;
+}
+
 const CARD: &str = r#"export default function (august) {
   august.registerCommand("card", async (_, ctx) => {
     await ctx.send({
@@ -804,4 +860,30 @@ async fn a_monitor_reports_crashed_extensions_to_the_home_thread() {
     home_chat.wait_for("monitor: fragile is failed (crashed)").await;
     home_chat.wait_for("monitor: fragile is running").await;
     assert!(!other.texts().iter().any(|t| t.contains("monitor:")), "{:?}", other.texts());
+}
+
+#[tokio::test]
+async fn agent_turns_an_extension_off_with_approval() {
+    let pick: fn(&str) -> Value = |text| {
+        if text.contains("turn web off") {
+            reply_tool("extensions", json!({"action": "disable", "name": "web"}))
+        } else {
+            reply_tool("extensions", json!({"action": "list"}))
+        }
+    };
+    let fake = Fake::llm(llm(pick)).await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+    chat.say("turn web off").await;
+
+    // Turning one off waits for the owner's approval.
+    let ask = chat.question().await;
+    assert!(ask.text.contains("disable") && ask.text.contains("web"), "{}", ask.text);
+    chat.press(&ask.button("Allow")).await;
+    let done = chat.wait_for("Result:").await;
+    assert!(done.text.contains(r#""name":"web""#) && done.text.contains("disabled"), "{}", done.text);
+
+    // Listing needs no approval, and the user sees it off too.
+    chat.ask("what is installed?", r#""state":"disabled""#).await;
+    chat.ask("/extensions", "⏸ web — disabled").await;
 }

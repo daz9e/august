@@ -1,7 +1,7 @@
 //! Turns as one primitive. Every run of the agent is a turn with an id, a mode, the thread
 //! it belongs to, the turn that started it (if any) and who did (`source`). `/stop` cancels
-//! every turn of a thread, sub-agents included. Extensions start quiet, fork and fresh
-//! turns, wait for their outcome, list and cancel them.
+//! every turn of a thread, sub-agents included. Extensions start turns of any mode, wait
+//! for their outcome, list and cancel them.
 
 use super::Gateway;
 use crate::agent::{TurnMode, TurnTag};
@@ -39,7 +39,9 @@ impl Outcome {
     }
 
     pub fn json(&self) -> Value {
-        json!({"status": self.status, "reply": self.reply, "error": self.error, "toolCalls": self.tool_calls})
+        // Visible turns only count their calls (as nulls).
+        let calls: Vec<&Value> = self.tool_calls.iter().filter(|c| !c.is_null()).collect();
+        json!({"status": self.status, "reply": self.reply, "error": self.error, "toolCalls": calls})
     }
 }
 
@@ -123,7 +125,7 @@ pub struct TurnRequest {
     #[serde(skip)]
     pub thread: Option<Thread>,
     pub text: String,
-    /// `quiet`, `fork` or `fresh`.
+    /// `visible`, `quiet` (the default), `fork` or `fresh`.
     pub mode: Option<TurnMode>,
     /// Who starts it (shown to hooks as `ctx.turn.source`).
     pub source: Option<String>,
@@ -149,19 +151,24 @@ impl Gateway {
             bail!("messenger `{}` is not running", thread.messenger);
         }
         let mode = req.mode.unwrap_or(TurnMode::Quiet);
-        if mode == TurnMode::Visible {
-            bail!("an extension starts quiet, fork or fresh turns; to hand the thread a message, use prompt");
-        }
+        // Registered now, so /stop cancels it even while it waits for the thread.
         let (tag, cancel) = self.turns.begin(&thread, mode, req.source.clone(), req.parent, req.meta.clone());
-        self.journal_turn(&thread, &tag, "turn_start", json!({"mode": tag.mode, "parent": tag.parent, "text": req.text}));
+        if mode != TurnMode::Visible {
+            self.journal_turn(&thread, &tag, "turn_start", json!({"mode": tag.mode, "parent": tag.parent, "text": req.text}));
+        }
         let (tx, rx) = oneshot::channel();
         self.turns.outcomes.lock().unwrap().insert(tag.id, rx);
         let (me, id) = (self.clone(), tag.id);
         tokio::spawn(async move {
-            let text = req.text.clone();
-            let outcome = me.run_turn(thread.clone(), tag.clone(), cancel, req).await;
-            me.turns.end(id);
-            me.turn_ended(&thread, &tag, &text, &outcome);
+            let outcome = if mode == TurnMode::Visible {
+                me.visible_turn(thread, tag, cancel, req.text).await
+            } else {
+                let text = req.text.clone();
+                let outcome = me.run_turn(thread.clone(), tag.clone(), cancel, req).await;
+                me.turns.end(id);
+                me.turn_ended(&thread, &tag, &text, &outcome);
+                outcome
+            };
             tx.send(outcome).ok();
             // Nobody collected it: drop it after a while.
             tokio::time::sleep(OUTCOME_TTL).await;
@@ -179,6 +186,24 @@ impl Gateway {
             Ok(Err(_)) => bail!("turn #{id} was dropped"),
             Err(_) => Ok(json!({"status": "running"})),
         }
+    }
+
+    /// A visible turn an extension started: like one of the user's, after whatever runs in
+    /// the thread now, streamed there; the model sees who it is from.
+    async fn visible_turn(self: &Arc<Self>, thread: Thread, tag: TurnTag, cancel: Arc<Notify>, text: String) -> Outcome {
+        let text = match tag.source.as_deref() {
+            Some(s) if s != "user" => format!("[from {s}] {text}"),
+            _ => text,
+        };
+        let id = tag.id;
+        let run = async {
+            let channel = self.messenger(&thread)?;
+            self.turn(channel, thread.clone(), &thread.id, &text, Vec::new(), Some((tag, cancel))).await
+        };
+        run.await.unwrap_or_else(|e| {
+            self.turns.end(id);
+            Outcome::of(Some(Err(e)), Vec::new())
+        })
     }
 
     async fn run_turn(self: &Arc<Self>, thread: Thread, tag: TurnTag, cancel: Arc<Notify>, req: TurnRequest) -> Outcome {
@@ -232,7 +257,7 @@ impl Gateway {
                 };
                 Outcome::of(r, Vec::new())
             }
-            TurnMode::Visible => Outcome::of(Some(Err(anyhow::anyhow!("not here"))), Vec::new()),
+            TurnMode::Visible => unreachable!("visible turns run in visible_turn"),
         };
         outcome
     }

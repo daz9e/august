@@ -4,7 +4,10 @@
 //! from August runs as its own task, so a handler can call back into August (`ctx.llm`,
 //! `ctx.ask`, ...) while others are served. stdout is the protocol; log with `eprintln!`.
 
+pub mod chunk;
 pub mod llm;
+
+pub use chunk::split_markdown;
 
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Map, Value, json};
@@ -281,6 +284,7 @@ struct Inner {
     /// Events it declared (`define_event`), as the manifest lists them.
     emits: RwLock<Vec<Value>>,
     replaces: RwLock<Vec<String>>,
+    takes: RwLock<Vec<String>>,
     providers: RwLock<Vec<Provider>>,
     /// Calls from August still running, by request id, so a cancel can stop them.
     running: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
@@ -310,6 +314,7 @@ impl August {
             commands: RwLock::default(),
             emits: RwLock::default(),
             replaces: RwLock::default(),
+            takes: RwLock::default(),
             providers: RwLock::default(),
             hooks: RwLock::default(),
             sections: RwLock::default(),
@@ -389,8 +394,8 @@ impl August {
         self.0.link.ask(thread, question, options, timeout).await
     }
 
-    /// Starts a turn in `thread` (`{text, mode: quiet|fork|fresh, source, parent, system,
-    /// tools, exclude, meta}`); returns its id.
+    /// Starts a turn in `thread` (`{text, mode: visible|quiet|fork|fresh, source, parent,
+    /// system, tools, exclude, meta}`); returns its id.
     pub async fn start_turn(&self, thread: &Thread, turn: Value) -> Result<u64> {
         let v = self.0.link.call("turn_start", json!({"thread": thread, "turn": turn})).await?;
         v.as_u64().ok_or_else(|| anyhow!("bad turn id"))
@@ -536,6 +541,13 @@ impl August {
         self.changed();
     }
 
+    /// Does jobs of the core in its place (`render`: draw visible turns from `render` events);
+    /// the core leaves them to the first extension that takes them.
+    pub fn takes(&self, jobs: &[&str]) {
+        self.0.takes.write().unwrap().extend(jobs.iter().map(|j| j.to_string()));
+        self.changed();
+    }
+
     /// Runs a declared event outside any thread (inside a handler use `Ctx::emit`).
     pub async fn emit(&self, event: &str, data: Value) -> Result<Value> {
         self.0.link.call("emit", json!({"event": event, "data": data})).await
@@ -579,6 +591,7 @@ impl August {
             "settings": *self.0.settings.read().unwrap(),
             "emits": *self.0.emits.read().unwrap(),
             "replaces": *self.0.replaces.read().unwrap(),
+            "takes": *self.0.takes.read().unwrap(),
             "providers": self.0.providers.read().unwrap().iter().map(|p| json!({"id": p.id, "label": p.label, "default_model": p.default_model})).collect::<Vec<_>>(),
         })
     }

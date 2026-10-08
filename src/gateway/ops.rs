@@ -40,7 +40,7 @@ pub const OPS: &[Op] = &[
     op("listen", MESSAGING, "Listen in {thread} for {buttons, text}; returns a listener id"),
     op("next", MESSAGING, "What {listener} took"),
     op("prompt", MESSAGING, "Hand {thread} a message as if the user sent it"),
-    op("turn_start", TURNS, "Start a turn {thread, turn}; returns its id"),
+    op("turn_start", TURNS, "Start a turn {thread, turn: {text, mode: visible|quiet|fork|fresh, source, parent, ...}}; returns its id"),
     op("turn_wait", TURNS, "A turn's outcome {id, timeout_ms}"),
     op("turn_cancel", TURNS, "Cancel turn {id}"),
     op("turns", TURNS, "Running turns, of {thread} or all"),
@@ -133,7 +133,7 @@ impl Gateway {
                 let t = thread(p)?;
                 let m = self.messenger(&t)?;
                 match name {
-                    "send" => json!(self.send_in_order(&t, message(p)?).await?),
+                    "send" => json!(self.send_in_order(&t, message(p)?, ext).await?),
                     "edit" => m.edit(&t.id, arg("id")?, &message(p)?).await.map(|_| Value::Null)?,
                     "delete" => m.delete(&t.id, arg("id")?).await.map(|_| Value::Null)?,
                     _ => m.react(&t.id, arg("id")?, p["emoji"].as_str().unwrap_or("")).await.map(|_| Value::Null)?,
@@ -162,6 +162,7 @@ impl Gateway {
             "turn_start" => {
                 let mut req: super::turns::TurnRequest = serde_json::from_value(p["turn"].clone())?;
                 req.thread = Some(thread(p)?);
+                req.source.get_or_insert(caller.clone());
                 json!(self.start_turn(req)?)
             }
             "turn_wait" => self.wait_turn(p["id"].as_u64().ok_or_else(|| anyhow!("missing `id`"))?, ms("timeout_ms", 3_600_000)).await?,
