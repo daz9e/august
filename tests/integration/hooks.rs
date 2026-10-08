@@ -110,3 +110,42 @@ async fn stop_tells_extensions_which_turns_it_cancels() {
     chat.ask("/stop", "Stopping").await;
     chat.wait_for(&format!("stopping turns {id}")).await;
 }
+
+const ROUTER: &str = r#"
+export default function (august) {
+  august.on("llm_call", async ({ step, model, tools }, ctx) => {
+    await ctx.send(`step ${step} on ${model} with ${tools.includes("read_file") && tools.includes("shell")}`);
+    return step === 0 ? { model: "cheap-model", tools: ["read_file"] } : undefined;
+  });
+}
+"#;
+
+#[tokio::test]
+async fn llm_call_picks_the_model_and_tools_of_one_call() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|req| {
+        let last = req["messages"].as_array().unwrap().last().unwrap();
+        match last["role"].as_str() {
+            Some("tool") => reply_text("done"),
+            _ => reply_tool("read_file", serde_json::json!({"path": "note.txt"})),
+        }
+    }))
+    .await;
+    let seed: &[(&str, &[u8])] = &[("note.txt", b"hello")];
+    let gw = august(&fake, Setup { home: &[("extensions/router/index.ts", ROUTER)], seed, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("read the note", "done").await;
+    chat.wait_for("step 0 on fake-model with true").await;
+
+    // The first call went to the cheaper model with one tool; the next one is back to normal.
+    let reqs = fake.llm_requests();
+    let names = |r: &Value| -> Vec<String> {
+        r["tools"].as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str().map(String::from)).collect()
+    };
+    assert_eq!(reqs[0]["model"], "cheap-model");
+    assert_eq!(names(&reqs[0]), ["read_file"]);
+    assert_eq!(reqs[1]["model"], "fake-model");
+    assert!(names(&reqs[1]).len() > 1);
+}

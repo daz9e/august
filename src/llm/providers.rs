@@ -265,6 +265,20 @@ pub async fn build(sel: Selection) -> Result<Arc<dyn LlmProvider>> {
     Ok(Arc::new(llm::resilient::Resilient::new(primary, fallback)))
 }
 
+/// Builds a provider for `spec`: a model of the active provider, or `provider:model`.
+pub async fn build_spec(spec: &str) -> Result<Arc<dyn LlmProvider>> {
+    let mut sel = selection()?;
+    match spec.split_once(':').and_then(|(id, m)| Some((info(id).ok()?, m))) {
+        Some((def, model)) => {
+            let model = Some(model.to_string()).filter(|m| !m.is_empty()).or(def.default_model().map(String::from));
+            sel = Selection { provider: Provider { id: def.id(), def }, model, effort: sel.effort };
+        }
+        // Model names may hold a colon themselves (`llama3:8b`).
+        None => sel.model = Some(spec.to_string()),
+    }
+    build(sel).await
+}
+
 fn fallback_selection(active: &Selection) -> Result<Option<Selection>> {
     let cfg: Config = config::app()?;
     let Some(spec) = env("AUGUST_FALLBACK").or(cfg.fallback) else {

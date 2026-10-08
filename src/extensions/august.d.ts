@@ -160,7 +160,7 @@ declare module "august" {
     /** The user sent /stop in the thread (observe only). */
     stop: { turns: number[] };
     /** Before each model call of a turn; `step` counts from 0, `system` is the full prompt. */
-    llm_call: { step: number; system: string };
+    llm_call: { step: number; system: string; model: string; tools: string[] };
     /** Before each model call, after `llm_call`: the conversation the model is about to see. */
     context: { step: number; messages: Message[] };
     /** After each model call (observe only; background). */
@@ -186,7 +186,7 @@ declare module "august" {
     reaction: void;
     shutdown: void;
     /** `system` replaces the system prompt for this one call (breaks the prompt cache). */
-    llm_call: { system?: string };
+    llm_call: { system?: string; model?: string; tools?: string[] };
     /** Returned `messages` replace what the model sees for this one call; the stored
      *  history is unchanged (keep tool_use / tool_result pairs intact). */
     context: { messages?: Message[] };

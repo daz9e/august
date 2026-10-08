@@ -56,8 +56,10 @@ leave it unchanged.
   `ok`, `error` or `cancelled`, `toolCalls` how many tools it called, and `ctx.turn` its
   `{ id, mode, source, parent }` (`unattended`: not the user's visible conversation). Runs
   in the background; the result is ignored.
-- `llm_call` `{ step, system }`: before every model call of a turn (`step` from 0). Return
-  `{ system }` to use another system prompt for that call only. The prompt is otherwise
+- `llm_call` `{ step, system, model, tools }`: before every model call of a turn (`step`
+  from 0; `tools` are names). For that call only, return `{ system }` to use another system
+  prompt, `{ tools }` to offer only some of the tools, `{ model }` to use another model of
+  the active provider or `provider:model`. The prompt is otherwise
   byte-stable so the provider can cache it; changing it costs that cache, so prefer
   `before_turn`.
 - `context` `{ step, messages }`: before every model call, the conversation the model is

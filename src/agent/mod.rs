@@ -175,10 +175,22 @@ impl Agent {
         on_event: &mut (dyn FnMut(Event) + Send),
     ) -> Result<Completion> {
         let mut system = self.system_now();
+        let mut provider = self.provider.clone();
+        let mut specs = std::borrow::Cow::Borrowed(specs);
         if let Some(ext) = self.tools.extensions().filter(|e| e.listens("llm_call")) {
-            let data = ext.emit("llm_call", json!({"step": step, "system": system}), &ctx.origin).await;
+            let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+            let model = provider.name().to_string();
+            let data = json!({"step": step, "system": system, "model": model, "tools": names});
+            let data = ext.emit("llm_call", data, &ctx.origin).await;
             if let Some(s) = data["system"].as_str() {
                 system = s.to_string();
+            }
+            if let Some(keep) = data["tools"].as_array() {
+                specs.to_mut().retain(|s| keep.iter().any(|k| k == s.name.as_str()));
+            }
+            if let Some(m) = data["model"].as_str().filter(|m| *m != model) {
+                // ponytail: builds the provider on every such call; cache by spec if it costs.
+                provider = crate::llm::providers::build_spec(m).await?;
             }
         }
         // A `context` hook may change what the model sees for this one call (not the history).
@@ -198,7 +210,7 @@ impl Agent {
         let messages = rewritten.as_deref().unwrap_or(&self.history);
         let completion = {
             let mut on_text = |t: &str| on_event(Event::Text(t));
-            self.provider.complete_stream(&self.session, &system, messages, specs, &mut on_text).await?
+            provider.complete_stream(&self.session, &system, messages, &specs, &mut on_text).await?
         };
         self.last_input_tokens = completion.usage.context_tokens() as usize;
         self.record_usage(&completion.usage);
