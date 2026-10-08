@@ -5,7 +5,6 @@ use crate::llm::{self, LlmProvider};
 use crate::config::{self, ApiCredential, Config};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use serde_json::Value;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,9 +40,7 @@ pub trait ProviderDef: Send + Sync {
 
 /// All providers, in menu order.
 pub fn registry() -> &'static [&'static dyn ProviderDef] {
-    static REGISTRY: [&dyn ProviderDef; 5] = [
-        &OpenCode { go: true },
-        &OpenCode { go: false },
+    static REGISTRY: [&dyn ProviderDef; 3] = [
         &ClaudeCliDef,
         &ChatGptDef,
         &CodexDef,
@@ -108,16 +105,6 @@ pub fn credential(p: &dyn ProviderDef) -> Result<Option<ApiCredential>> {
     let stored = config::credentials()?.remove(p.id());
     let key = env(p.key_env()).or_else(|| stored.as_ref().map(|c| c.key.clone()));
     Ok(key.map(|key| ApiCredential { key, base_url: None }))
-}
-
-fn require(p: &dyn ProviderDef, cred: Option<ApiCredential>) -> Result<ApiCredential> {
-    cred.with_context(|| {
-        format!(
-            "no credentials for {}: run `cargo run -- login` or set {}",
-            p.id(),
-            p.key_env()
-        )
-    })
 }
 
 /// Handle to a registered provider; `id` is exposed as a field for convenience.
@@ -224,53 +211,6 @@ fn need_model(p: &dyn ProviderDef, sel: &Selection) -> Result<String> {
         .with_context(|| format!("no model selected for {}: run `cargo run -- model`", p.id()))
 }
 
-
-struct OpenCode {
-    go: bool,
-}
-
-impl OpenCode {
-    fn plan(&self) -> llm::opencode::Plan {
-        if self.go {
-            llm::opencode::Plan::Go
-        } else {
-            llm::opencode::Plan::Zen
-        }
-    }
-}
-
-#[async_trait]
-impl ProviderDef for OpenCode {
-    fn id(&self) -> &'static str {
-        if self.go { "opencode-go" } else { "opencode" }
-    }
-    fn label(&self) -> &'static str {
-        if self.go {
-            "OpenCode Go (subscription)"
-        } else {
-            "OpenCode Zen (pay as you go)"
-        }
-    }
-    fn auth(&self) -> Auth {
-        Auth::ApiKey
-    }
-    fn key_env(&self) -> &'static str {
-        "OPENCODE_API_KEY"
-    }
-    async fn build(&self, sel: &Selection) -> Result<Arc<dyn LlmProvider>> {
-        llm::opencode::provider(
-            self.plan(),
-            require(self, credential(self)?)?.key,
-            need_model(self, sel)?,
-            sel.effort.clone(),
-            env("AUGUST_API_FORMAT").map(|v| v.parse()).transpose()?,
-        )
-        .await
-    }
-    async fn list_models(&self, _cred: Option<&ApiCredential>) -> Result<Vec<String>> {
-        llm::opencode::list_models(self.plan()).await
-    }
-}
 
 struct ClaudeCliDef;
 

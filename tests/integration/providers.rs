@@ -34,3 +34,18 @@ async fn anthropic_answers_with_the_key_an_older_home_saved() {
     let moved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(gw.home.join("config/extensions/anthropic.json")).unwrap()).unwrap();
     assert_eq!(moved["settings"]["key"], "sk-old");
 }
+
+#[tokio::test]
+async fn opencode_go_answers_with_the_key_an_older_home_saved() {
+    let fake = Fake::llm(Box::new(|_| reply_text("hello from opencode"))).await;
+    let old = json!({"key": "oc-old"}).to_string();
+    let settings = json!({"settings": {"base_url": format!("{}/v1", fake.url), "format": "chat"}}).to_string();
+    let env = [("AUGUST_PROVIDER", "opencode-go"), ("AUGUST_MODEL", "kimi-k2")];
+    let home = [("config/providers/opencode-go.json", old.as_str()), ("config/extensions/opencode.json", settings.as_str())];
+    let gw = august(&fake, Setup { home: &home, env: &env, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("hi", "hello from opencode").await;
+    let call = fake.requests().into_iter().find(|r| r.path == "/v1/chat/completions").unwrap();
+    assert_eq!(call.key, "oc-old");
+    assert_eq!(call.json()["model"], "kimi-k2");
+}

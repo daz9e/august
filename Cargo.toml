@@ -74,6 +74,10 @@ name = "august-ext-openai"
 path = "extensions/openai/main.rs"
 
 [[bin]]
+name = "august-ext-opencode"
+path = "extensions/opencode/main.rs"
+
+[[bin]]
 name = "august-ext-compaction"
 path = "extensions/compaction/main.rs"
 

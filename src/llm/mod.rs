@@ -3,13 +3,12 @@
 
 pub mod chatgpt;
 pub mod claude_cli;
-pub mod opencode;
 pub mod providers;
 pub mod remote;
 pub mod resilient;
 
 pub use august_ext::llm::*;
-pub use august_llm::{anthropic, openai, responses};
+pub use august_llm::responses;
 
 use anyhow::Result;
 use async_trait::async_trait;

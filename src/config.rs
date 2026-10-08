@@ -355,7 +355,7 @@ fn migrate() -> Result<()> {
 }
 
 /// Moves `config/providers/<id>.json` of providers that became extensions into those
-/// extensions' settings (`anthropic`: key, base_url; a provider of the user's own with a
+/// extensions' settings (`anthropic`: key, base_url; `opencode`, `opencode-go`: key; a provider of the user's own with a
 /// `format` becomes an endpoint of the extension speaking it). The old file goes to
 /// `config/.migrated/providers/`.
 fn migrate_providers() -> Result<()> {
@@ -366,6 +366,7 @@ fn migrate_providers() -> Result<()> {
         let v = read_json(&e.path())?;
         let (ext, patch) = match (id, v["format"].as_str()) {
             ("anthropic", _) => ("anthropic", serde_json::json!({"key": v["key"], "base_url": v["base_url"]})),
+            ("opencode" | "opencode-go", _) => ("opencode", serde_json::json!({"key": v["key"]})),
             (_, Some(f @ ("openai" | "anthropic"))) => (f, serde_json::json!({"endpoints": {id: v}})),
             _ => continue,
         };
