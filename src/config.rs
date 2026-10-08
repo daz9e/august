@@ -3,7 +3,6 @@
 //!
 //! ```text
 //! config/august.json               provider, model, effort, fallback, home thread
-//! config/messengers/<id>.json      e.g. telegram: token, allowed
 //! config/extensions/<name>.json    enabled, origin, settings
 //! secrets/<name>.json              an extension's secrets: API keys of accounts, tokens
 //! ```
@@ -58,7 +57,7 @@ pub struct Config {
 // ---- units -------------------------------------------------------------------
 
 /// Kinds of units with a file each under `config/<kind>/`.
-pub const KINDS: [&str; 2] = ["messengers", "extensions"];
+pub const KINDS: [&str; 1] = ["extensions"];
 
 /// Fields whose values are secrets wherever they appear: shown as `••••`.
 const SECRET_FIELDS: [&str; 5] = ["key", "token", "api_key", "password", "secret"];
@@ -67,7 +66,7 @@ pub const MASK: &str = "••••";
 fn config_dir() -> PathBuf {
     static MIGRATED: std::sync::Once = std::sync::Once::new();
     MIGRATED.call_once(|| {
-        if let Err(e) = migrate().and_then(|_| migrate_providers()) {
+        if let Err(e) = migrate().and_then(|_| migrate_providers()).and_then(|_| migrate_messengers()) {
             eprintln!("could not move old settings into {}: {e:#}", home().join("config").display());
         }
     });
@@ -158,8 +157,7 @@ pub fn set_secret(ext: &str, key: &str, value: Option<&str>) -> Result<()> {
     write_json(&path, &all)
 }
 
-/// A dotted path into the settings: `august.model`,
-/// `messengers.telegram.allowed`, `extensions.browser.settings.headless`.
+/// A dotted path into the settings: `august.model`, `extensions.browser.settings.headless`.
 /// Returns `(kind, id, path inside the unit's file)`.
 pub fn split_path(path: &str) -> Result<(String, String, Vec<String>)> {
     let mut parts = path.split('.').filter(|p| !p.is_empty()).map(String::from);
@@ -298,6 +296,30 @@ fn migrate() -> Result<()> {
             std::fs::rename(old(name), keep.join(name))?;
         }
     }
+    Ok(())
+}
+
+/// Moves `config/messengers/telegram.json` into the `telegram` extension: the token becomes
+/// its secret, `allowed` its setting. The old file goes to `config/.migrated/messengers/`.
+fn migrate_messengers() -> Result<()> {
+    let dir = home().join("config");
+    let old = dir.join("messengers/telegram.json");
+    if !old.exists() {
+        return Ok(());
+    }
+    let v = read_json(&old)?;
+    if let Some(token) = v["token"].as_str() {
+        set_secret("telegram", "token", Some(token))?;
+    }
+    let path = dir.join("extensions/telegram.json");
+    let mut unit = read_json(&path)?;
+    if v["allowed"].is_array() {
+        unit["settings"]["allowed"] = v["allowed"].clone();
+    }
+    write_json(&path, &unit)?;
+    let keep = dir.join(".migrated/messengers");
+    std::fs::create_dir_all(&keep)?;
+    std::fs::rename(&old, keep.join("telegram.json"))?;
     Ok(())
 }
 

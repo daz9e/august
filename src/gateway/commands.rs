@@ -11,8 +11,8 @@ impl Gateway {
     /// Every command extensions registered, with its owner.
     pub(super) fn command_list(&self) -> Vec<(CommandSpec, String)> {
         let list = self.ext.commands().into_iter().map(|(owner, name, description)| {
-            let description = if description.is_empty() { format!("/{name}").into() } else { description.into() };
-            (CommandSpec { name: name.into(), description }, owner)
+            let description = if description.is_empty() { format!("/{name}") } else { description };
+            (CommandSpec { name, description }, owner)
         });
         list.collect()
     }
@@ -20,7 +20,7 @@ impl Gateway {
     /// Tells every messenger the current command list (after extensions changed).
     pub(super) async fn publish_commands(&self) {
         let list: Vec<CommandSpec> = self.command_list().into_iter().map(|(c, _)| c).collect();
-        for ch in self.channels.values() {
+        for ch in self.all_channels() {
             if !ch.describe().capabilities.commands {
                 continue;
             }

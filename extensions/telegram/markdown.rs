@@ -1,7 +1,7 @@
 //! Markdown -> Telegram HTML (the `parse_mode: HTML` subset), plus a splitter that
 //! cuts long Markdown into message-sized pieces without breaking code fences.
 
-use crate::messengers::chunk::{fence_open, is_fence_close};
+use august_ext::chunk::{fence_open, is_fence_close};
 
 pub fn escape(s: &str) -> String {
     let mut o = String::with_capacity(s.len());

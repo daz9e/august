@@ -67,6 +67,8 @@ pub struct Manifest {
     pub replaces: Vec<String>,
     /// Jobs of the core it does instead (`render`): the core leaves them to it.
     pub takes: Vec<String>,
+    /// Messengers it offers.
+    pub messengers: Vec<crate::messengers::Description>,
 }
 
 /// An account an extension signs in to.
@@ -445,6 +447,7 @@ fn parse_manifest(params: &Value) -> Manifest {
             .collect(),
         replaces: list("replaces").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
         takes: list("takes").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
+        messengers: list("messengers").into_iter().filter_map(|m| serde_json::from_value(m).ok()).collect(),
         providers: list("providers")
             .iter()
             .filter_map(|p| {

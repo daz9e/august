@@ -129,7 +129,7 @@ async fn command(august: &August, name: &str, args: &str, ctx: &Ctx) -> Result<S
             let (path, value) = args.split_once(char::is_whitespace).map_or((args, ""), |(p, v)| (p, v.trim()));
             if path.is_empty() {
                 return Ok("Usage: /config <path> [value], e.g. /config august.model, /config extensions.web.settings.\n\
-                           Units: august, messengers.<id>, extensions.<name>; `null` deletes."
+                           Units: august, extensions.<name>; `null` deletes."
                     .into());
             }
             if !value.is_empty() {

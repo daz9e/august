@@ -52,7 +52,7 @@ impl Api {
         let host = host.trim_end_matches('/');
         Self {
             http: reqwest::Client::builder()
-                .user_agent(crate::util::USER_AGENT)
+                .user_agent(august_llm::USER_AGENT)
                 .timeout(Duration::from_secs(60))
                 .build()
                 .expect("http client"),

@@ -151,7 +151,7 @@ impl Gateway {
         if thread.is_session() {
             anyhow::ensure!(mode != TurnMode::Visible, "a stored conversation has no chat to show a visible turn in");
             self.db.current_session(&thread.key())?;
-        } else if !self.channels.contains_key(&thread.messenger) {
+        } else if self.channel(&thread.messenger).is_none() {
             bail!("messenger `{}` is not running", thread.messenger);
         }
         // Registered now, so /stop cancels it even while it waits for the thread.

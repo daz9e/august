@@ -1,23 +1,28 @@
-//! Telegram vendor: long-polling Bot API channel with Markdown → HTML rendering,
-//! inline-button actions, an owner allowlist and a guided `connect` flow.
+//! `telegram`: August in Telegram, as a bot. Long polling, Markdown → HTML, inline buttons
+//! in rows, edits for streaming, uploads as photos or documents, reactions both ways, an
+//! allowlist of user ids (others are turned away) and groups only when addressed.
+//!
+//! Connecting is the account `telegram` (`/login telegram`, `august connect telegram`): the
+//! bot token from @BotFather, then the owner pairs by messaging the bot. The token is a
+//! secret, the allowed user ids a setting (`allowed`); `TELEGRAM_BOT_TOKEN` and
+//! `TELEGRAM_ALLOWED_USERS` (comma-separated) stand in for them. `TELEGRAM_API_BASE` points
+//! at a self-hosted Bot API server (or a test double).
 
 mod api;
 mod markdown;
 
-use super::{
-    Attachment, Button, Capabilities, CommandSpec, Description, FileKind, Inbound, InboundKind, Messenger,
-    MessengerDef, OutMessage, Thread, User, parse_command,
-};
-use crate::messengers::bus::Bus;
-use crate::config;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use api::Api;
 use async_trait::async_trait;
-use dialoguer::{Confirm, Password, theme::ColorfulTheme};
-use serde::{Deserialize, Serialize};
+use august_ext::messenger::{
+    Attachment, Button, Capabilities, CommandSpec, Description, FileKind, InboundKind, Messenger, OutMessage, User,
+    parse_command,
+};
+use august_ext::{August, Login, Signed, Thread};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 const ID: &str = "telegram";
 /// Telegram allows 4096 chars after HTML conversion; Markdown source is kept well below.
@@ -28,41 +33,11 @@ const MAX_DOWNLOAD: u64 = 20 * 1024 * 1024;
 const MAX_UPLOAD: u64 = 50 * 1024 * 1024;
 const MAX_PHOTO: u64 = 10 * 1024 * 1024;
 const MAX_CAPTION: usize = 1024;
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Config {
-    pub token: String,
-    /// Telegram user ids allowed to talk to the bot. Empty = nobody.
-    #[serde(default)]
-    pub allowed: Vec<i64>,
-}
+/// How long pairing waits for the owner's message.
+const PAIR_WAIT: Duration = Duration::from_secs(180);
 
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
-}
-
-/// Saved config with `TELEGRAM_BOT_TOKEN` / `TELEGRAM_ALLOWED_USERS` overrides.
-pub fn load_config() -> Result<Option<Config>> {
-    let saved = config::unit("messengers", ID)?;
-    let mut cfg: Option<Config> = match saved.get("token") {
-        Some(_) => Some(serde_json::from_value(saved).context("parse config/messengers/telegram.json")?),
-        None => None,
-    };
-    if let Some(token) = env("TELEGRAM_BOT_TOKEN") {
-        cfg.get_or_insert_with(Config::default).token = token;
-    }
-    if let (Some(list), Some(c)) = (env("TELEGRAM_ALLOWED_USERS"), cfg.as_mut()) {
-        c.allowed = list.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-    }
-    Ok(cfg.filter(|c| !c.token.is_empty()))
-}
-
-fn save_config(cfg: &Config) -> Result<()> {
-    let mut v = config::unit("messengers", ID)?;
-    for (k, val) in serde_json::to_value(cfg)?.as_object().into_iter().flatten() {
-        v[k] = val.clone();
-    }
-    config::save_unit("messengers", ID, &v)
 }
 
 // ---------------------------------------------------------------- inbound parsing
@@ -72,14 +47,22 @@ struct Bot {
     username: String,
 }
 
+/// What came in to chat `chat` from `user`.
+#[derive(Debug)]
+struct Event {
+    chat: i64,
+    user: User,
+    kind: InboundKind,
+}
+
 #[derive(Debug)]
 enum Parsed {
     Ignore,
-    /// Sender is not on the allowlist: `(chat id, user id)`.
-    Deny(i64, i64),
-    Event(Inbound),
+    /// Sender is not on the allowlist: `(chat id, user id, their name)`.
+    Deny(i64, i64, String),
+    Event(Event),
     /// A button press, with the callback id to confirm it.
-    Press(Inbound, String),
+    Press(Event, String),
 }
 
 fn display_name(from: &Value) -> String {
@@ -92,11 +75,6 @@ fn display_name(from: &Value) -> String {
 }
 
 fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
-    let chat_of = |id: i64| Thread {
-        messenger: ID.into(),
-        id: id.to_string(),
-    };
-
     if let Some(cb) = u.get("callback_query") {
         let (Some(user), Some(chat), Some(id)) = (
             cb["from"]["id"].as_i64(),
@@ -106,10 +84,10 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
             return Parsed::Ignore;
         };
         if !allowed.contains(&user) {
-            return Parsed::Deny(chat, user);
+            return Parsed::Deny(chat, user, display_name(&cb["from"]));
         }
-        let press = Inbound {
-            thread: chat_of(chat),
+        let press = Event {
+            chat,
             user: User {
                 id: user.to_string(),
                 name: display_name(&cb["from"]),
@@ -126,8 +104,8 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
             return Parsed::Ignore;
         }
         let emoji = r["new_reaction"].as_array().into_iter().flatten().find_map(|e| e["emoji"].as_str()).unwrap_or("");
-        return Parsed::Event(Inbound {
-            thread: chat_of(chat),
+        return Parsed::Event(Event {
+            chat,
             user: User { id: user.to_string(), name: display_name(&r["user"]) },
             kind: InboundKind::Reaction { message: message.to_string(), emoji: emoji.to_string() },
         });
@@ -156,7 +134,7 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
         return Parsed::Ignore;
     }
     if !allowed.contains(&user) {
-        return Parsed::Deny(chat, user);
+        return Parsed::Deny(chat, user, display_name(&m["from"]));
     }
 
     let kind = match command {
@@ -172,8 +150,8 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
             InboundKind::Message { id: m["message_id"].to_string(), text: cleaned.trim().to_string(), files }
         }
     };
-    Parsed::Event(Inbound {
-        thread: chat_of(chat),
+    Parsed::Event(Event {
+        chat,
         user: User {
             id: user.to_string(),
             name: display_name(&m["from"]),
@@ -223,28 +201,29 @@ fn attachments(m: &Value) -> Vec<Attachment> {
     out
 }
 
-// ---------------------------------------------------------------- channel
+// ---------------------------------------------------------------- messenger
 
-pub struct Telegram {
-    api: Api,
-    allowed: Vec<i64>,
+/// The bot as connected now: its API and who may talk to it.
+#[derive(Default)]
+struct Telegram {
+    api: RwLock<Option<Api>>,
+    allowed: RwLock<Vec<i64>>,
     /// "typing…" kept up in these chats while August works.
-    typing: std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>,
+    typing: Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>,
+    /// The long-polling loop.
+    poller: Mutex<Option<tokio::task::AbortHandle>>,
+    /// While pairing: where a private message from someone not yet allowed goes.
+    pairing: Mutex<Option<mpsc::UnboundedSender<(i64, String)>>>,
 }
 
 impl Telegram {
-    pub fn new(cfg: &Config) -> Self {
-        Self::with_api(Api::new(&cfg.token), cfg.allowed.clone())
+    fn api(&self) -> Result<Api> {
+        self.api.read().unwrap().clone().ok_or_else(|| anyhow!("Telegram is not connected: /login telegram"))
     }
 
-    fn with_api(api: Api, allowed: Vec<i64>) -> Self {
-        Self { api, allowed, typing: Default::default() }
-    }
-}
-
-impl Telegram {
     /// Uploads one file (a photo where it can be), with an optional caption; its message id.
     async fn upload_file(&self, chat: &str, path: &std::path::Path, caption: &str) -> Result<String> {
+        let api = self.api()?;
         let bytes = tokio::fs::read(path).await.with_context(|| format!("read {}", path.display()))?;
         let size = bytes.len() as u64;
         if size > MAX_UPLOAD {
@@ -255,15 +234,16 @@ impl Telegram {
         if !caption.is_empty() {
             params["caption"] = caption.chars().take(MAX_CAPTION).collect::<String>().into();
         }
-        let photo = matches!(crate::util::mime_for(&name), "image/jpeg" | "image/png" | "image/webp");
+        let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+        let photo = matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp");
         if photo && size <= MAX_PHOTO {
-            match self.api.upload("sendPhoto", params.clone(), "photo", &name, &bytes).await {
+            match api.upload("sendPhoto", params.clone(), "photo", &name, &bytes).await {
                 Ok(sent) => return Ok(sent["message_id"].to_string()),
                 // e.g. unusual dimensions: still deliver it, as a file
-                Err(e) => eprintln!("telegram: sendPhoto failed, sending as a document: {e:#}"),
+                Err(e) => eprintln!("sendPhoto failed, sending as a document: {e:#}"),
             }
         }
-        let sent = self.api.upload("sendDocument", params, "document", &name, &bytes).await?;
+        let sent = api.upload("sendDocument", params, "document", &name, &bytes).await?;
         Ok(sent["message_id"].to_string())
     }
 
@@ -305,100 +285,48 @@ fn plain(md: &str) -> String {
     md.chars().take(4096).collect()
 }
 
+fn description() -> Description {
+    Description {
+        id: ID.into(),
+        name: "Telegram".into(),
+        capabilities: Capabilities {
+            markdown: true,
+            max_len: MAX_LEN,
+            buttons: 8,
+            edit: true,
+            // Telegram allows about one edit per second per chat.
+            edit_interval_ms: 1100,
+            files_in: true,
+            files_out: true,
+            images: true,
+            audio_in: true,
+            commands: true,
+            presence: true,
+            delete: true,
+            reactions: true,
+            reply: true,
+            threads: true,
+        },
+        extra: json!({
+            "groups": "the bot answers in groups only when mentioned, replied to or given a command",
+            "max_download_mb": MAX_DOWNLOAD / 1024 / 1024,
+            "max_upload_mb": MAX_UPLOAD / 1024 / 1024,
+        }),
+    }
+}
+
 #[async_trait]
 impl Messenger for Telegram {
-    fn id(&self) -> &str {
-        ID
-    }
-
     async fn threads(&self) -> Vec<String> {
         // A private chat with a user has the user's id.
-        self.allowed.iter().map(|u| u.to_string()).collect()
-    }
-
-    fn describe(&self) -> Description {
-        Description {
-            id: ID.into(),
-            name: "Telegram".into(),
-            capabilities: Capabilities {
-                markdown: true,
-                max_len: MAX_LEN,
-                buttons: 8,
-                edit: true,
-                // Telegram allows about one edit per second per chat.
-                edit_interval_ms: 1100,
-                files_in: true,
-                files_out: true,
-                images: true,
-                audio_in: true,
-                commands: true,
-                presence: true,
-                delete: true,
-                reactions: true,
-                reply: true,
-                threads: true,
-            },
-            extra: json!({
-                "groups": "the bot answers in groups only when mentioned, replied to or given a command",
-                "max_download_mb": MAX_DOWNLOAD / 1024 / 1024,
-                "max_upload_mb": MAX_UPLOAD / 1024 / 1024,
-            }),
-        }
-    }
-
-    async fn run(&self, bus: Bus<Inbound>) -> Result<()> {
-        let me = self.api.get_me().await.context("bad Telegram token?")?;
-        let bot = Bot {
-            id: me["id"].as_i64().unwrap_or(0),
-            username: me["username"].as_str().unwrap_or("").to_string(),
-        };
-        // Long polling and webhooks are mutually exclusive.
-        self.api.call("deleteWebhook", json!({})).await.ok();
-        eprintln!("telegram: connected as @{}", bot.username);
-
-        let mut offset = 0;
-        loop {
-            let updates = match self.api.get_updates(offset, 30).await {
-                Ok(u) => u,
-                Err(e) => {
-                    eprintln!("telegram: {e:#}; retrying in 3s");
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                    continue;
-                }
-            };
-            for u in updates {
-                offset = offset.max(u["update_id"].as_i64().unwrap_or(0) + 1);
-                match parse_update(&u, &bot, &self.allowed) {
-                    Parsed::Ignore => {}
-                    Parsed::Event(e) => {
-                        eprintln!("telegram · {} ({}): {:?}", e.user.name, e.user.id, e.kind);
-                        bus.publish(e)
-                    }
-                    Parsed::Press(e, callback) => {
-                        // Stops the button's spinner.
-                        self.api.call("answerCallbackQuery", json!({"callback_query_id": callback})).await.ok();
-                        bus.publish(e)
-                    }
-                    Parsed::Deny(chat, user) => {
-                        eprintln!("telegram: rejected user {user}");
-                        let text = format!(
-                            "⛔ You are not authorized to use this bot.\nYour Telegram user id: {user}\n\
-                             The owner can add you with `august connect telegram`."
-                        );
-                        self.api
-                            .call("sendMessage", json!({"chat_id": chat, "text": text}))
-                            .await
-                            .ok();
-                    }
-                }
-            }
-        }
+        self.allowed.read().unwrap().iter().map(|u| u.to_string()).collect()
     }
 
     async fn send(&self, chat: &str, message: &OutMessage) -> Result<String> {
         if !message.files.is_empty() {
             return self.send_files(chat, message).await;
         }
+        let api = self.api()?;
         let (markdown, buttons) = (message.text.as_str(), &message.buttons);
         let mut params = json!({
             "chat_id": chat_id(chat),
@@ -414,15 +342,15 @@ impl Messenger for Telegram {
         }
         let html_too_long = params["text"].as_str().is_some_and(|t| t.chars().count() > 4096);
         let res = if html_too_long {
-            Err(anyhow::anyhow!("can't parse entities: too long"))
+            Err(anyhow!("can't parse entities: too long"))
         } else {
-            self.api.call("sendMessage", params.clone()).await
+            api.call("sendMessage", params.clone()).await
         };
         let sent = match res {
             Err(e) if api::is_parse_error(&e) => {
                 params["text"] = plain(markdown).into();
                 params.as_object_mut().unwrap().remove("parse_mode");
-                self.api.call("sendMessage", params).await?
+                api.call("sendMessage", params).await?
             }
             other => other?,
         };
@@ -430,6 +358,7 @@ impl Messenger for Telegram {
     }
 
     async fn edit(&self, chat: &str, id: &str, message: &OutMessage) -> Result<()> {
+        let api = self.api()?;
         let (markdown, buttons) = (message.text.as_str(), &message.buttons);
         let mut params = json!({
             "chat_id": chat_id(chat),
@@ -442,15 +371,15 @@ impl Messenger for Telegram {
         });
         let html_too_long = params["text"].as_str().is_some_and(|t| t.chars().count() > 4096);
         let res = if html_too_long {
-            Err(anyhow::anyhow!("can't parse entities: too long"))
+            Err(anyhow!("can't parse entities: too long"))
         } else {
-            self.api.call("editMessageText", params.clone()).await
+            api.call("editMessageText", params.clone()).await
         };
         match res {
             Err(e) if api::is_parse_error(&e) => {
                 params["text"] = plain(markdown).into();
                 params.as_object_mut().unwrap().remove("parse_mode");
-                match self.api.call("editMessageText", params).await {
+                match api.call("editMessageText", params).await {
                     Err(e) if api::is_not_modified(&e) => Ok(()),
                     other => other.map(|_| ()),
                 }
@@ -465,9 +394,10 @@ impl Messenger for Telegram {
         if let Some(old) = typing.remove(chat) {
             old.abort();
         }
+        let Ok(api) = self.api() else { return };
         if busy {
             // Telegram shows "typing…" for about five seconds per call.
-            let (api, id) = (self.api.clone(), chat_id(chat));
+            let id = chat_id(chat);
             let task = tokio::spawn(async move {
                 loop {
                     api.call("sendChatAction", json!({"chat_id": id, "action": "typing"})).await.ok();
@@ -480,149 +410,217 @@ impl Messenger for Telegram {
 
     async fn delete(&self, chat: &str, id: &str) -> Result<()> {
         let message = id.parse::<i64>().context("bad message id")?;
-        self.api.call("deleteMessage", json!({"chat_id": chat_id(chat), "message_id": message})).await.map(drop)
+        self.api()?.call("deleteMessage", json!({"chat_id": chat_id(chat), "message_id": message})).await.map(drop)
     }
 
     async fn react(&self, chat: &str, id: &str, emoji: &str) -> Result<()> {
         let message = id.parse::<i64>().context("bad message id")?;
         let reaction = if emoji.is_empty() { json!([]) } else { json!([{"type": "emoji", "emoji": emoji}]) };
         let params = json!({"chat_id": chat_id(chat), "message_id": message, "reaction": reaction});
-        self.api.call("setMessageReaction", params).await.map(drop)
+        self.api()?.call("setMessageReaction", params).await.map(drop)
     }
 
     async fn set_commands(&self, commands: &[CommandSpec]) -> Result<()> {
-        let list: Vec<Value> = commands
-            .iter()
-            .map(|c| json!({"command": c.name, "description": c.description}))
-            .collect();
-        self.api
-            .call("setMyCommands", json!({"commands": list}))
-            .await
-            .map(|_| ())
+        let list: Vec<Value> = commands.iter().map(|c| json!({"command": c.name, "description": c.description})).collect();
+        self.api()?.call("setMyCommands", json!({"commands": list})).await.map(drop)
     }
 
     async fn download(&self, file: &Attachment) -> Result<Vec<u8>> {
         if file.size.is_some_and(|s| s > MAX_DOWNLOAD) {
             bail!("file is larger than the 20 MB Telegram lets bots download");
         }
-        self.api.download(&file.id).await
-    }
-
-}
-
-// ---------------------------------------------------------------- vendor / setup
-
-pub struct TelegramDef;
-
-fn theme() -> ColorfulTheme {
-    ColorfulTheme::default()
-}
-
-#[async_trait]
-impl MessengerDef for TelegramDef {
-    fn id(&self) -> &'static str {
-        ID
-    }
-
-    fn label(&self) -> &'static str {
-        "Telegram (bot)"
-    }
-
-    fn is_configured(&self) -> Result<bool> {
-        Ok(load_config()?.is_some())
-    }
-
-    fn build(&self) -> Result<Option<Arc<dyn Messenger>>> {
-        let Some(cfg) = load_config()? else {
-            return Ok(None);
-        };
-        if cfg.allowed.is_empty() {
-            eprintln!("telegram: no allowed users, nobody can talk to the bot (run `august connect telegram`)");
-        }
-        Ok(Some(Arc::new(Telegram::new(&cfg))))
-    }
-
-    async fn setup(&self) -> Result<()> {
-        let existing = load_config()?;
-        let mut cfg = existing.clone().unwrap_or_default();
-
-        let reuse = match &existing {
-            Some(_) => Confirm::with_theme(&theme())
-                .with_prompt("A bot token is already saved. Reuse it?")
-                .default(true)
-                .interact()?,
-            None => false,
-        };
-        if !reuse {
-            println!(
-                "\n1. Open @BotFather in Telegram and send /newbot\n\
-                 2. Pick a name and a username, then copy the token it gives you\n"
-            );
-            cfg.token = Password::with_theme(&theme())
-                .with_prompt("Bot token")
-                .interact()?
-                .trim()
-                .to_string();
-        }
-
-        let api = Api::new(&cfg.token);
-        let me = api.get_me().await.context("Telegram rejected the token")?;
-        let username = me["username"].as_str().unwrap_or("?").to_string();
-        println!("bot: @{username}");
-
-        let user = pair(&api, &username).await?;
-        if !cfg.allowed.contains(&user.0) {
-            cfg.allowed.push(user.0);
-        }
-        save_config(&cfg)?;
-        api.call(
-            "sendMessage",
-            json!({"chat_id": user.0, "text": "✅ August is connected. Run `august serve` on your machine, then message me here."}),
-        )
-        .await
-        .ok();
-        println!(
-            "saved to {}\nallowed users: {:?}\nstart the bot with: august serve",
-            config::home().join("config/messengers/telegram.json").display(),
-            cfg.allowed
-        );
-        Ok(())
+        self.api()?.download(&file.id).await
     }
 }
 
-/// Waits for a private message to the bot and returns its sender after confirmation.
-async fn pair(api: &Api, username: &str) -> Result<(i64, String)> {
-    // Skip anything sent before setup started.
-    let mut offset = api
-        .get_updates(-1, 0)
-        .await?
-        .last()
-        .and_then(|u| u["update_id"].as_i64())
-        .map_or(0, |id| id + 1);
+// ---------------------------------------------------------------- connection
 
-    println!("\nNow open https://t.me/{username} and send it any message (waiting up to 3 min)…");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
-    while tokio::time::Instant::now() < deadline {
-        for u in api.get_updates(offset, 20).await? {
-            offset = offset.max(u["update_id"].as_i64().unwrap_or(0) + 1);
-            let m = &u["message"];
-            if m["chat"]["type"] != "private" || m["from"]["is_bot"].as_bool() == Some(true) {
+/// The saved token (or `TELEGRAM_BOT_TOKEN`).
+async fn token(august: &August) -> Result<Option<String>> {
+    Ok(match env("TELEGRAM_BOT_TOKEN") {
+        Some(t) => Some(t),
+        None => august.secret("token").await?,
+    })
+}
+
+/// The allowed user ids: `TELEGRAM_ALLOWED_USERS`, else the setting.
+async fn allowed(august: &August) -> Result<Vec<i64>> {
+    if let Some(list) = env("TELEGRAM_ALLOWED_USERS") {
+        return Ok(list.split(',').filter_map(|s| s.trim().parse().ok()).collect());
+    }
+    Ok(serde_json::from_value(august.settings().await?["allowed"].clone()).unwrap_or_default())
+}
+
+/// Connects with `token`: checks it, offers the messenger and starts long polling (in place
+/// of a previous connection). Returns the bot's username.
+async fn connect(august: &August, tg: &Arc<Telegram>, token: &str) -> Result<String> {
+    let api = Api::new(token);
+    let me = api.get_me().await.context("Telegram rejected the bot token")?;
+    let bot = Bot { id: me["id"].as_i64().unwrap_or(0), username: me["username"].as_str().unwrap_or("").to_string() };
+    // Long polling and webhooks are mutually exclusive.
+    api.call("deleteWebhook", json!({})).await.ok();
+    *tg.allowed.write().unwrap() = allowed(august).await?;
+    if tg.allowed.read().unwrap().is_empty() {
+        eprintln!("no allowed users, nobody can talk to the bot (/login telegram pairs one)");
+    }
+    *tg.api.write().unwrap() = Some(api.clone());
+    let username = bot.username.clone();
+    let task = tokio::spawn(poll(august.clone(), tg.clone(), api, bot));
+    if let Some(old) = tg.poller.lock().unwrap().replace(task.abort_handle()) {
+        old.abort();
+    }
+    august.register_messenger(description(), tg.clone());
+    eprintln!("connected as @{username}");
+    Ok(username)
+}
+
+async fn poll(august: August, tg: Arc<Telegram>, api: Api, bot: Bot) {
+    let mut offset = 0;
+    loop {
+        let updates = match api.get_updates(offset, 30).await {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("{e:#}; retrying in 3s");
+                tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
             }
-            let Some(id) = m["from"]["id"].as_i64() else { continue };
-            let name = display_name(&m["from"]);
-            let ok = Confirm::with_theme(&theme())
-                .with_prompt(format!("Allow {name} (id {id}) to control August?"))
-                .default(true)
-                .interact()?;
-            api.get_updates(offset, 0).await.ok(); // acknowledge
-            if ok {
-                return Ok((id, name));
+        };
+        for u in updates {
+            offset = offset.max(u["update_id"].as_i64().unwrap_or(0) + 1);
+            let allowed = tg.allowed.read().unwrap().clone();
+            let (event, callback) = match parse_update(&u, &bot, &allowed) {
+                Parsed::Ignore => continue,
+                Parsed::Event(e) => (e, None),
+                Parsed::Press(e, callback) => (e, Some(callback)),
+                Parsed::Deny(chat, user, name) => {
+                    // Someone pairing messages the bot privately.
+                    let pairing = tg.pairing.lock().unwrap().clone();
+                    if let Some(tx) = pairing.filter(|_| u["message"]["chat"]["type"] == "private") {
+                        tx.send((user, name)).ok();
+                        continue;
+                    }
+                    eprintln!("rejected user {user}");
+                    let text = format!(
+                        "⛔ You are not authorized to use this bot.\nYour Telegram user id: {user}\n\
+                         The owner can add you with /login telegram."
+                    );
+                    api.call("sendMessage", json!({"chat_id": chat, "text": text})).await.ok();
+                    continue;
+                }
+            };
+            if let Some(callback) = callback {
+                // Stops the button's spinner.
+                api.call("answerCallbackQuery", json!({"callback_query_id": callback})).await.ok();
             }
-            println!("skipped, waiting for another message…");
+            eprintln!("{} ({}): {:?}", event.user.name, event.user.id, event.kind);
+            let thread = Thread { messenger: ID.into(), id: event.chat.to_string() };
+            if let Err(e) = august.inbound(&thread, &event.user, &event.kind).await {
+                eprintln!("could not hand in a message: {e:#}");
+            }
         }
     }
-    bail!("no message received; run `august connect telegram` again")
+}
+
+/// `/login telegram`: the bot token (kept, or a new one), then pairing: the person to allow
+/// messages the bot and is confirmed.
+async fn login(august: &August, tg: &Arc<Telegram>, steps: Login) -> Result<Signed> {
+    let saved = token(august).await?;
+    let keep = match &saved {
+        Some(_) => steps.choose("A bot token is already saved. Keep it?", &["Keep", "New token"]).await? == "Keep",
+        None => false,
+    };
+    let token = match saved.filter(|_| keep) {
+        Some(t) => t,
+        None => {
+            steps.progress("1. Open @BotFather in Telegram and send /newbot\n2. Pick a name and a username, then copy the token it gives you").await?;
+            steps.ask("Bot token", true).await?.trim().to_string()
+        }
+    };
+    let username = connect(august, tg, &token).await?;
+    august.set_secret("token", Some(&token)).await?;
+    let mut allowed = tg.allowed.read().unwrap().clone();
+    if keep && !allowed.is_empty() && steps.choose("Allow one more person to talk to August?", &["Yes", "No"]).await? != "Yes" {
+        return Ok(Signed { who: format!("@{username}"), expires_at: None });
+    }
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *tg.pairing.lock().unwrap() = Some(tx);
+    steps.progress(&format!("Now open https://t.me/{username} and send it any message (waiting up to 3 min)…")).await?;
+    let paired = tokio::time::timeout(PAIR_WAIT, async {
+        while let Some((id, name)) = rx.recv().await {
+            if steps.choose(&format!("Allow {name} (id {id}) to control August?"), &["Allow", "Skip"]).await? == "Allow" {
+                return Ok(Some(id));
+            }
+            steps.progress("Skipped, waiting for another message…").await?;
+        }
+        Ok::<_, anyhow::Error>(None)
+    })
+    .await;
+    tg.pairing.lock().unwrap().take();
+    let user = paired.ok().transpose()?.flatten().ok_or_else(|| anyhow!("no message came; run /login telegram again"))?;
+    if !allowed.contains(&user) {
+        allowed.push(user);
+    }
+    august.call("config_set", json!({"path": "extensions.telegram.settings.allowed", "value": allowed})).await?;
+    *tg.allowed.write().unwrap() = allowed;
+    tg.api()?.call("sendMessage", json!({"chat_id": user, "text": "✅ August is connected. Message me here."})).await.ok();
+    Ok(Signed { who: format!("@{username}"), expires_at: None })
+}
+
+/// `/logout telegram`: forgets the token and stops the bot (allowed users stay).
+async fn logout(august: &August, tg: &Telegram) -> Result<()> {
+    august.set_secret("token", None).await?;
+    if let Some(task) = tg.poller.lock().unwrap().take() {
+        task.abort();
+    }
+    tg.api.write().unwrap().take();
+    august.unregister_messenger(ID);
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() {
+    let august = August::new();
+    august.needs(&["config"]);
+    august.settings_schema(json!({"properties": {
+        "allowed": {"type": "array", "items": {"type": "integer"}, "default": [], "description": "Telegram user ids allowed to talk to the bot (/login telegram pairs one)"},
+    }}));
+    let tg = Arc::new(Telegram::default());
+    let (a, t) = (august.clone(), tg.clone());
+    let (b, u) = (august.clone(), tg.clone());
+    august.register_login_account(
+        ID,
+        "Telegram (bot)",
+        &[],
+        move |_, steps| {
+            let (a, t) = (a.clone(), t.clone());
+            async move { login(&a, &t, steps).await }
+        },
+        move |_| {
+            let (a, t) = (b.clone(), u.clone());
+            async move { logout(&a, &t).await }
+        },
+    );
+    let (a, t) = (august.clone(), tg.clone());
+    tokio::spawn(async move {
+        match token(&a).await {
+            Ok(Some(token)) => match connect(&a, &t, &token).await {
+                // August may not list this extension yet: tell it once it does.
+                Ok(username) => {
+                    for _ in 0..30 {
+                        if a.account_update(ID, "connected", Some(&format!("@{username}"))).await.is_ok() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+                Err(e) => eprintln!("{e:#}"),
+            },
+            Ok(None) => eprintln!("not connected: /login telegram"),
+            Err(e) => eprintln!("{e:#}"),
+        }
+    });
+    august.run().await;
 }
 
 #[cfg(test)]
@@ -650,7 +648,7 @@ mod tests {
 
     #[test]
     fn allowlist_is_enforced() {
-        assert!(matches!(parse_update(&msg("private", "hi", 8), &bot(), &[7]), Parsed::Deny(5, 8)));
+        assert!(matches!(parse_update(&msg("private", "hi", 8), &bot(), &[7]), Parsed::Deny(5, 8, _)));
         assert!(matches!(parse_update(&msg("private", "hi", 8), &bot(), &[]), Parsed::Deny(..)));
     }
 
@@ -669,7 +667,7 @@ mod tests {
         let Parsed::Press(e, callback) = parse_update(&u, &bot(), &[7]) else { panic!() };
         assert!(matches!(e.kind, InboundKind::Press { ref button } if button == "k1.0"));
         assert_eq!(callback, "cb1");
-        assert!(matches!(parse_update(&u, &bot(), &[1]), Parsed::Deny(5, 7)));
+        assert!(matches!(parse_update(&u, &bot(), &[1]), Parsed::Deny(5, 7, _)));
     }
 
     /// End to end against a fake Bot API server.
@@ -695,7 +693,7 @@ mod tests {
                 s.write_all(resp.as_bytes()).await.unwrap();
             }
         });
-        let ch = Telegram::with_api(Api::with_host(&format!("http://{addr}"), "T"), vec![]);
+        let ch = Telegram { api: RwLock::new(Some(Api::with_host(&format!("http://{addr}"), "T"))), ..Default::default() };
         let id = ch.send("5", &OutMessage::text("**hi**")).await.unwrap();
         assert_eq!(id, "42");
         let seen = seen.lock().unwrap();

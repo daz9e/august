@@ -6,6 +6,7 @@
 
 pub mod chunk;
 pub mod llm;
+pub mod messenger;
 
 pub use chunk::split_markdown;
 
@@ -171,12 +172,7 @@ impl Thread {
     }
 }
 
-/// A button under a message; a press comes back with its `id`.
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct Button {
-    pub id: String,
-    pub label: String,
-}
+pub use messenger::Button;
 
 /// What a listener took (`August::next`), or why nothing came.
 #[derive(Clone, Debug, PartialEq)]
@@ -374,6 +370,7 @@ struct Inner {
     replaces: RwLock<Vec<String>>,
     takes: RwLock<Vec<String>>,
     providers: RwLock<Vec<Provider>>,
+    messengers: RwLock<Vec<(messenger::Description, Arc<dyn messenger::Messenger>)>>,
     /// Calls from August still running, by request id, so a cancel can stop them.
     running: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
     /// Set once `ready` was sent; later changes send a new manifest.
@@ -405,6 +402,7 @@ impl August {
             replaces: RwLock::default(),
             takes: RwLock::default(),
             providers: RwLock::default(),
+            messengers: RwLock::default(),
             hooks: RwLock::default(),
             sections: RwLock::default(),
             settings: RwLock::new(Value::Null),
@@ -682,6 +680,31 @@ impl August {
         self.changed();
     }
 
+    /// A messenger: August sends through `messenger` what goes to its threads; what comes
+    /// in goes to `inbound`. Its `description.id` names it (`{messenger: id}` in threads);
+    /// registering an id again replaces it.
+    pub fn register_messenger(&self, description: messenger::Description, messenger: Arc<dyn messenger::Messenger>) {
+        let mut all = self.0.messengers.write().unwrap();
+        all.retain(|(d, _)| d.id != description.id);
+        all.push((description, messenger));
+        drop(all);
+        self.changed();
+    }
+
+    pub fn unregister_messenger(&self, id: &str) {
+        self.0.messengers.write().unwrap().retain(|(d, _)| d.id != id);
+        self.changed();
+    }
+
+    /// Hands August what came in to `thread` (of a messenger this extension registered) from
+    /// `user`.
+    pub async fn inbound(&self, thread: &Thread, user: &messenger::User, kind: &messenger::InboundKind) -> Result<()> {
+        let mut params = serde_json::to_value(kind)?;
+        params["thread"] = json!(thread);
+        params["user"] = serde_json::to_value(user)?;
+        self.0.link.call("inbound", params).await.map(drop)
+    }
+
     /// Takes over the event namespace of extensions this one stands in for.
     pub fn replaces(&self, extensions: &[&str]) {
         self.0.replaces.write().unwrap().extend(extensions.iter().map(|e| e.to_string()));
@@ -741,6 +764,7 @@ impl August {
             "replaces": *self.0.replaces.read().unwrap(),
             "takes": *self.0.takes.read().unwrap(),
             "providers": self.0.providers.read().unwrap().iter().map(|p| json!({"id": p.id, "label": p.label, "default_model": p.default_model})).collect::<Vec<_>>(),
+            "messengers": self.0.messengers.read().unwrap().iter().map(|(d, _)| d).collect::<Vec<_>>(),
         })
     }
 
@@ -807,8 +831,37 @@ impl August {
                 let models = run(id.to_string()).await?;
                 Ok(Value::Array(models.iter().map(llm::ModelInfo::to_json).collect()))
             }
+            m if m.starts_with("messenger_") => self.serve_messenger(m, params).await,
             other => Err(anyhow!("unknown method {other}")),
         }
+    }
+
+    /// A call of August to one of this extension's messengers (`messenger_send`, ...).
+    async fn serve_messenger(&self, method: &str, p: &Value) -> Result<Value> {
+        let id = p["messenger"].as_str().unwrap_or_default();
+        let found = self.0.messengers.read().unwrap().iter().find(|(d, _)| d.id == id).map(|(_, m)| m.clone());
+        let m = found.ok_or_else(|| anyhow!("no messenger named {id}"))?;
+        let thread = p["thread"].as_str().unwrap_or_default();
+        let msg_id = p["id"].as_str().unwrap_or_default();
+        let message = || serde_json::from_value::<messenger::OutMessage>(p["message"].clone());
+        Ok(match method {
+            "messenger_send" => json!(m.send(thread, &message()?).await?),
+            "messenger_edit" => m.edit(thread, msg_id, &message()?).await.map(|_| Value::Null)?,
+            "messenger_delete" => m.delete(thread, msg_id).await.map(|_| Value::Null)?,
+            "messenger_react" => m.react(thread, msg_id, p["emoji"].as_str().unwrap_or_default()).await.map(|_| Value::Null)?,
+            "messenger_presence" => {
+                m.presence(thread, p["busy"] == true).await;
+                Value::Null
+            }
+            "messenger_commands" => m.set_commands(&serde_json::from_value::<Vec<messenger::CommandSpec>>(p["commands"].clone())?).await.map(|_| Value::Null)?,
+            "messenger_threads" => json!(m.threads().await),
+            "messenger_download" => {
+                use base64::Engine;
+                let bytes = m.download(&serde_json::from_value(p["file"].clone())?).await?;
+                json!(base64::engine::general_purpose::STANDARD.encode(bytes))
+            }
+            other => bail!("unknown method {other}"),
+        })
     }
 
     /// Announces what is registered and serves August until it closes stdin.

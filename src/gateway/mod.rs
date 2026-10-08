@@ -89,10 +89,7 @@ impl Gateway {
         ext: Arc<Extensions>,
     ) -> Arc<Self> {
         let gw = Arc::new(Self {
-            channels: channels
-                .into_iter()
-                .map(|inner| (inner.id().to_string(), Arc::new(outbound::Hooked { inner, ext: ext.clone() }) as Arc<dyn Messenger>))
-                .collect(),
+            channels: channels.into_iter().map(|inner| (inner.id().to_string(), Arc::new(outbound::Hooked { inner, ext: ext.clone() }) as Arc<dyn Messenger>)).collect(),
             chats: Mutex::new(HashMap::new()),
             waits: Arc::default(),
             turns: Default::default(),
@@ -151,6 +148,27 @@ impl Gateway {
         Ok(())
     }
 
+    /// Messenger `id`: a built-in one, or one an extension offers.
+    fn channel(&self, id: &str) -> Option<Arc<dyn Messenger>> {
+        if let Some(m) = self.channels.get(id) {
+            return Some(m.clone());
+        }
+        let (_, d) = self.ext.messengers().into_iter().find(|(_, d)| d.id == id)?;
+        let inner = Arc::new(crate::messengers::remote::Remote::new(d, self.ext.clone()));
+        Some(Arc::new(outbound::Hooked { inner, ext: self.ext.clone() }))
+    }
+
+    /// Every messenger running now.
+    fn all_channels(&self) -> Vec<Arc<dyn Messenger>> {
+        let mut all: Vec<Arc<dyn Messenger>> = self.channels.values().cloned().collect();
+        for (_, d) in self.ext.messengers() {
+            if !all.iter().any(|m| m.id() == d.id) {
+                all.extend(self.channel(&d.id));
+            }
+        }
+        all
+    }
+
     fn tools(&self) -> ToolRegistry {
         ToolRegistry::with_defaults().with_extensions(self.ext.clone())
     }
@@ -163,7 +181,7 @@ impl Gateway {
         let agent = Agent::new(
             self.provider.read().unwrap().clone(),
             self.tools(),
-            agent::system_prompt(&self.workspace, &self.channels.get(&id.messenger).map(|m| crate::messengers::surface(&m.describe())).unwrap_or_default()),
+            agent::system_prompt(&self.workspace, &self.channel(&id.messenger).map(|m| crate::messengers::surface(&m.describe())).unwrap_or_default()),
             self.db.clone(),
             &format!("{}:{}", id.messenger, id.id),
         )?;
@@ -191,7 +209,7 @@ impl Gateway {
     }
 
     async fn handle(self: Arc<Self>, ev: Inbound) -> Result<()> {
-        let Some(channel) = self.channels.get(&ev.thread.messenger).cloned() else {
+        let Some(channel) = self.channel(&ev.thread.messenger) else {
             return Ok(());
         };
         let chat = ev.thread.id.clone();
@@ -241,9 +259,9 @@ impl Gateway {
 
 }
 
-/// Runs the agent behind every configured messenger (foreground).
+/// Runs the agent behind the built-in messengers and those of extensions (foreground).
 pub async fn serve() -> Result<()> {
-    start(crate::messengers::build_configured()?).await
+    start(crate::messengers::builtin()).await
 }
 
 /// Runs the agent behind `chans` until they all stop.
@@ -254,7 +272,7 @@ pub async fn start(chans: Vec<Arc<dyn Messenger>>) -> Result<()> {
     let label = if model.0.is_empty() { "no model provider yet (/login)".to_string() } else { format!("{} · {}", model.0, model.1) };
     let provider = providers::build(selection)?;
     println!(
-        "august serving {} · {label} · workspace {}",
+        "august serving {} (and the extensions' messengers) · {label} · workspace {}",
         chans.iter().map(|c| c.id().to_string()).collect::<Vec<_>>().join(", "),
         workspace.display()
     );

@@ -1,7 +1,5 @@
 //! Small helpers shared across layers.
 
-pub const USER_AGENT: &str = concat!("august/", env!("CARGO_PKG_VERSION"));
-
 /// Random UUID v4, e.g. for session and host ids.
 pub fn new_uuid() -> String {
     let mut b = [0u8; 16];

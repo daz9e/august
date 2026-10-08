@@ -444,7 +444,7 @@ declare module "august" {
       set(path: string, value: unknown): Promise<void>;
     };
     /** Any unit's settings: `august.model`, `providers.openai.base_url`,
-     *  `messengers.telegram.allowed`, `extensions.web.settings`. Secrets come back masked;
+     *  `extensions.telegram.settings.allowed`, `extensions.web.settings`. Secrets come back masked;
      *  turning extensions on and off is the user's. Needs `config`. */
     config: {
       get(path: string): Promise<any>;

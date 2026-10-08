@@ -38,6 +38,7 @@ pub const OPS: &[Op] = &[
     op("edit", MESSAGING, "Replace a sent message {thread, id, message}"),
     op("delete", MESSAGING, "Delete a sent message {thread, id}"),
     op("react", MESSAGING, "React to a message {thread, id, emoji}"),
+    op("inbound", None, "Hand in what came to {thread} of a messenger you offer from {user: {id, name}}: {kind: message|command|press|reaction, ...}"),
     op("listen", MESSAGING, "Listen in {thread} for {buttons, text}; returns a listener id. With {secret} a text taken is deleted from the chat"),
     op("next", MESSAGING, "What {listener} took"),
     op("prompt", MESSAGING, "Hand {thread} a message as if the user sent it"),
@@ -155,6 +156,18 @@ impl Gateway {
                     "delete" => m.delete(&t.id, arg("id")?).await.map(|_| Value::Null)?,
                     _ => m.react(&t.id, arg("id")?, p["emoji"].as_str().unwrap_or("")).await.map(|_| Value::Null)?,
                 }
+            }
+            "inbound" => {
+                let t = thread(p)?;
+                anyhow::ensure!(self.ext.messenger_owner(&t.messenger).await.as_deref() == Some(ext), "`{}` is not a messenger you offer", t.messenger);
+                let ev = crate::messengers::Inbound { thread: t, user: serde_json::from_value(p["user"].clone())?, kind: serde_json::from_value(p.clone())? };
+                let gw = self.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = gw.handle(ev).await {
+                        eprintln!("gateway: {e:#}");
+                    }
+                });
+                Value::Null
             }
             "listen" => {
                 let buttons: Vec<String> = serde_json::from_value(p["buttons"].clone()).unwrap_or_default();
@@ -425,7 +438,7 @@ impl Gateway {
     }
 
     pub(super) fn messenger(&self, thread: &Thread) -> Result<Arc<dyn Messenger>> {
-        self.channels.get(&thread.messenger).cloned().ok_or_else(|| anyhow!("messenger `{}` is not running", thread.messenger))
+        self.channel(&thread.messenger).ok_or_else(|| anyhow!("messenger `{}` is not running", thread.messenger))
     }
 
     /// Every agent tool, with the extension that offers it (`august` for built-in ones).
@@ -447,7 +460,7 @@ impl Gateway {
     async fn messengers(&self) -> Value {
         let seen = self.activity.lock().unwrap().clone();
         let active = seen.iter().max_by_key(|(_, at)| **at).map(|(t, _)| t.clone());
-        let mut all: Vec<&Arc<dyn Messenger>> = self.channels.values().collect();
+        let mut all = self.all_channels();
         all.sort_by_key(|m| m.id().to_string());
         let mut out = Vec::new();
         for m in all {

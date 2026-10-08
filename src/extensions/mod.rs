@@ -470,6 +470,31 @@ impl Extensions {
         self.running().iter().flat_map(|(name, h)| h.manifest().providers.iter().map(|p| (name.clone(), p.clone())).collect::<Vec<_>>()).collect()
     }
 
+    /// Messengers the running extensions offer, with the extension offering each.
+    pub fn messengers(&self) -> Vec<(String, crate::messengers::Description)> {
+        self.running().iter().flat_map(|(name, h)| h.manifest().messengers.iter().map(|m| (name.clone(), m.clone())).collect::<Vec<_>>()).collect()
+    }
+
+    /// The extension offering messenger `id`, waiting a little for one still starting (it may
+    /// hand in messages before August lists it as running).
+    pub async fn messenger_owner(&self, id: &str) -> Option<String> {
+        for _ in 0..300 {
+            if let Some((ext, _)) = self.messengers().into_iter().find(|(_, d)| d.id == id) {
+                return Some(ext);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        None
+    }
+
+    /// Calls `method` (`messenger_send`, ...) on the extension that offers messenger `id`.
+    pub async fn call_messenger(&self, id: &str, method: &str, mut params: Value, timeout: Duration) -> Result<Value> {
+        let host = self.running().into_iter().find(|(_, h)| h.manifest().messengers.iter().any(|m| m.id == id)).map(|(_, h)| h);
+        let host = host.ok_or_else(|| anyhow::anyhow!("messenger `{id}` is not running"))?;
+        params["messenger"] = json!(id);
+        host.request(method, params, timeout).await.map_err(|e| anyhow::anyhow!("{id}: {e}"))
+    }
+
     /// Accounts the running extensions sign in to, with the extension of each.
     pub fn accounts(&self) -> Vec<(String, AccountInfo)> {
         self.running().iter().flat_map(|(name, h)| h.manifest().accounts.iter().map(|a| (name.clone(), a.clone())).collect::<Vec<_>>()).collect()

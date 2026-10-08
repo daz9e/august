@@ -103,3 +103,27 @@ async fn the_bot_token_never_reaches_the_model() {
     assert!(req.contains("could not be received"), "{req}");
     assert!(!req.contains(&format!("bot{TOKEN}")), "{req}");
 }
+
+#[tokio::test]
+async fn login_connects_the_bot_and_pairs_the_owner() {
+    let fake = Fake::llm(Box::new(|_| reply_text("hello from August"))).await;
+    let env = [("TELEGRAM_API_BASE", fake.url.as_str())];
+    let gw = august(&fake, Setup { env: &env, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+
+    // The token, then the owner messages the bot and is confirmed.
+    chat.ask("/login telegram", "Bot token").await;
+    chat.ask(TOKEN, "https://t.me/AugustBot").await;
+    fake.push_updates(vec![message(1, json!({"text": "hi"}))]);
+    let q = chat.question().await;
+    assert!(q.text.contains("Owner (id 7)"), "{}", q.text);
+    chat.press(&q.button("Allow")).await;
+    chat.wait_until("signed in", |c| c.texts().iter().any(|t| t.contains("Signed in to Telegram (bot) as @AugustBot"))).await;
+    let saved = std::fs::read_to_string(gw.home.join("config/extensions/telegram.json")).unwrap();
+    assert!(saved.contains("\"allowed\"") && saved.contains('7'), "{saved}");
+    assert!(std::fs::read_to_string(gw.home.join("secrets/telegram.json")).unwrap().contains(TOKEN));
+
+    // Now the owner talks to August in Telegram.
+    fake.push_updates(vec![message(2, json!({"text": "hello"}))]);
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("hello from August"))).await;
+}
