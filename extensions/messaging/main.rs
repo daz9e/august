@@ -1,6 +1,6 @@
 //! The agent's own use of the messenger primitives: see which messengers and threads there
-//! are (`messengers`) and write to any of them (`send_message`), e.g. from the terminal to
-//! the user's Telegram.
+//! are (`messengers`), write to any of them (`send_message`), e.g. from the terminal to
+//! the user's Telegram, and hand the user a file from the workspace (`send_file`).
 
 use anyhow::bail;
 use august_ext::{August, Thread, str_arg};
@@ -74,6 +74,37 @@ async fn main() {
                 }
                 august.send(&thread, text, &[]).await?;
                 Ok(format!("sent to {}", thread.key()))
+            }
+        },
+    );
+    let me = august.clone();
+    august.register_tool(
+        "send_file",
+        "Send a file from the workspace to the user in the chat (images are shown inline). \
+         Use it to deliver files you created or downloaded, not to show text you can write in the reply.",
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path relative to the workspace"},
+                "caption": {"type": "string", "description": "Optional short caption"}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        move |input, ctx| {
+            let workspace = me.workspace().clone();
+            async move {
+                let rel = str_arg(&input, "path");
+                let path = workspace.join(rel).canonicalize().map_err(|_| anyhow::anyhow!("no such file: {rel}"))?;
+                if !path.starts_with(workspace.canonicalize()?) || !path.is_file() {
+                    bail!("not a file in the workspace: {rel}");
+                }
+                if ctx.thread.is_none() {
+                    bail!("there is no chat to send files to; tell the user the path instead: {rel}");
+                }
+                let message = json!({"text": str_arg(&input, "caption"), "files": [path]});
+                ctx.call("send", json!({"message": message})).await?;
+                Ok(format!("sent {rel} to the chat"))
             }
         },
     );

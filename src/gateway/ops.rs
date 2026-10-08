@@ -2,7 +2,7 @@
 //! permission it needs. Extensions call them over their protocol, slash commands are thin
 //! wrappers around them; whoever calls, the same code runs.
 
-use super::{Gateway, turn, waits};
+use super::{Gateway, waits};
 use crate::extensions::{self, Origin};
 use crate::llm::{Message, providers};
 use crate::messengers::{Button, Messenger, OutMessage, Thread};
@@ -419,13 +419,11 @@ impl Gateway {
 
     async fn call_tool(&self, origin: extensions::Origin, name: &str, input: &Value, caller: &str) -> Result<(String, bool)> {
         let thread = origin.thread.clone().expect("a call's origin has its thread");
-        let m = self.messenger(&thread)?;
-        let files = turn::ThreadFiles { messenger: m.clone(), thread: thread.id.clone() };
+        self.messenger(&thread)?;
         let ctx = ToolCtx {
             workspace: self.workspace.clone(),
             db: self.db.clone(),
             origin,
-            files: Some(Arc::new(files)),
             extensions: Some(self.ext.clone()),
             inbox: None,
             caller: caller.into(),

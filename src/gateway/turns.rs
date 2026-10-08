@@ -4,7 +4,6 @@
 //! turns, wait for their outcome, list and cancel them.
 
 use super::Gateway;
-use super::turn::ThreadFiles;
 use crate::agent::{TurnMode, TurnTag};
 use crate::extensions::{AgentOpts, Origin};
 use crate::messengers::Thread;
@@ -146,9 +145,9 @@ impl Gateway {
     /// Starts a turn for an extension and returns its id; its outcome waits for `wait_turn`.
     pub(super) fn start_turn(self: &Arc<Self>, req: TurnRequest) -> Result<u64> {
         let thread = req.thread.clone().ok_or_else(|| anyhow::anyhow!("a turn needs a thread"))?;
-        let Some(messenger) = self.channels.get(&thread.messenger).cloned() else {
+        if !self.channels.contains_key(&thread.messenger) {
             bail!("messenger `{}` is not running", thread.messenger);
-        };
+        }
         let mode = req.mode.unwrap_or(TurnMode::Quiet);
         if mode == TurnMode::Visible {
             bail!("an extension starts quiet, fork or fresh turns; to hand the thread a message, use prompt");
@@ -160,7 +159,7 @@ impl Gateway {
         let (me, id) = (self.clone(), tag.id);
         tokio::spawn(async move {
             let text = req.text.clone();
-            let outcome = me.run_turn(messenger, thread.clone(), tag.clone(), cancel, req).await;
+            let outcome = me.run_turn(thread.clone(), tag.clone(), cancel, req).await;
             me.turns.end(id);
             me.turn_ended(&thread, &tag, &text, &outcome);
             tx.send(outcome).ok();
@@ -182,13 +181,12 @@ impl Gateway {
         }
     }
 
-    async fn run_turn(self: &Arc<Self>, messenger: Arc<dyn crate::messengers::Messenger>, thread: Thread, tag: TurnTag, cancel: Arc<Notify>, req: TurnRequest) -> Outcome {
+    async fn run_turn(self: &Arc<Self>, thread: Thread, tag: TurnTag, cancel: Arc<Notify>, req: TurnRequest) -> Outcome {
         let origin = Origin { thread: Some(thread.clone()), turn: Some(tag.clone()) };
         let ctx = ToolCtx {
             workspace: self.workspace.clone(),
             db: self.db.clone(),
             origin,
-            files: Some(Arc::new(ThreadFiles { messenger: messenger.clone(), thread: thread.id.clone() })),
             extensions: Some(self.ext.clone()),
             inbox: None,
             caller: "model".into(),

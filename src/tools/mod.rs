@@ -3,7 +3,6 @@
 mod bash;
 mod extensions;
 mod fs;
-mod media;
 mod memory;
 mod skills;
 
@@ -18,20 +17,12 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Delivers a file from the workspace to the chat the turn runs in.
-#[async_trait]
-pub trait FileSink: Send + Sync {
-    async fn send_file(&self, path: &std::path::Path, caption: &str) -> Result<()>;
-}
-
 #[derive(Clone)]
 pub struct ToolCtx {
     pub workspace: PathBuf,
     pub db: Arc<Db>,
     /// The thread and turn this runs for.
     pub origin: crate::extensions::Origin,
-    /// Where `send_file` delivers files; `None` when there is no thread to send to.
-    pub files: Option<Arc<dyn FileSink>>,
     /// Loaded extensions, for `save_extension`; `None` when they are off.
     pub extensions: Option<Arc<Extensions>>,
     /// Messages the user sends while the turn runs.
@@ -67,7 +58,6 @@ impl ToolRegistry {
                 Arc::new(fs::ReadFile),
                 Arc::new(fs::WriteFile),
                 Arc::new(fs::EditFile),
-                Arc::new(media::SendFile),
                 Arc::new(memory::Remember),
                 Arc::new(memory::Forget),
                 Arc::new(memory::SearchHistory),

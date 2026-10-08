@@ -5,39 +5,11 @@ use super::render::{Ui, render, tool_line};
 use crate::agent::Event;
 use crate::messengers::{Messenger, Thread};
 use crate::llm::Block;
-use crate::tools::{FileSink, ToolCtx};
+use crate::tools::ToolCtx;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
-
-/// `send_file` from a chat turn: goes through the renderer so the file lands
-/// after the text streamed so far.
-struct ChatFiles(mpsc::UnboundedSender<Ui>);
-
-#[async_trait::async_trait]
-impl FileSink for ChatFiles {
-    async fn send_file(&self, path: &std::path::Path, caption: &str) -> Result<()> {
-        let (done, result) = oneshot::channel();
-        let message = crate::messengers::OutMessage { text: caption.into(), files: vec![path.to_path_buf()], ..Default::default() };
-        self.0.send(Ui::Send { message, done }).map_err(|_| anyhow::anyhow!("the chat is gone"))?;
-        result.await.map_err(|_| anyhow::anyhow!("the chat is gone"))?.map(drop)
-    }
-}
-
-/// `send_file` outside a turn (a tool an extension runs): straight to the thread.
-pub(super) struct ThreadFiles {
-    pub(super) messenger: Arc<dyn Messenger>,
-    pub(super) thread: String,
-}
-
-#[async_trait::async_trait]
-impl FileSink for ThreadFiles {
-    async fn send_file(&self, path: &std::path::Path, caption: &str) -> Result<()> {
-        let file = crate::messengers::OutMessage { text: caption.into(), files: vec![path.to_path_buf()], ..Default::default() };
-        self.messenger.send(&self.thread, &file).await.map(drop)
-    }
-}
+use tokio::sync::mpsc;
 
 impl Gateway {
     /// Sends `message` to `thread`; while a reply streams there, in its place in the stream.
@@ -106,7 +78,6 @@ impl Gateway {
             workspace: self.workspace.clone(),
             db: self.db.clone(),
             origin,
-            files: Some(Arc::new(ChatFiles(tx.clone()))),
             extensions: Some(self.ext.clone()),
             inbox: Some(state.inbox.clone()),
             caller: "model".into(),
