@@ -242,6 +242,11 @@ helpers for the common ones:
   `.messages(thread)` is the live conversation (what the model sees next, with `tokens` and
   `window`); `.setMessages(thread, messages)` replaces it (outside the thread's running turn;
   inside one, return `history` from `context`).
+- A conversation needs no chat: `august.sessions.new(null, { name, settings })` starts one
+  of its own and returns its id; the thread `{ messenger: "session", id }` addresses it, so
+  `august.turns.start` runs quiet, fork and fresh turns in it (a background agent that keeps
+  its context, a conversation between agents) and `august.sessions.messages` reads it.
+  Nothing can be sent there; report back to a real thread.
 - Conversations are stored and addressable: `august.sessions.list(thread?)`,
   `.switch(thread, id)` continues one in a thread, `.update(id, { name, settings })`. A
   conversation's journal — turns, messages, model replies, every tool call (also the ones

@@ -147,10 +147,13 @@ impl Gateway {
     /// Starts a turn for an extension and returns its id; its outcome waits for `wait_turn`.
     pub(super) fn start_turn(self: &Arc<Self>, req: TurnRequest) -> Result<u64> {
         let thread = req.thread.clone().ok_or_else(|| anyhow::anyhow!("a turn needs a thread"))?;
-        if !self.channels.contains_key(&thread.messenger) {
+        let mode = req.mode.unwrap_or(TurnMode::Quiet);
+        if thread.is_session() {
+            anyhow::ensure!(mode != TurnMode::Visible, "a stored conversation has no chat to show a visible turn in");
+            self.db.current_session(&thread.key())?;
+        } else if !self.channels.contains_key(&thread.messenger) {
             bail!("messenger `{}` is not running", thread.messenger);
         }
-        let mode = req.mode.unwrap_or(TurnMode::Quiet);
         // Registered now, so /stop cancels it even while it waits for the thread.
         let (tag, cancel) = self.turns.begin(&thread, mode, req.source.clone(), req.parent, req.meta.clone());
         if mode != TurnMode::Visible {

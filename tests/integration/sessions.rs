@@ -197,3 +197,45 @@ async fn an_extension_can_cancel_or_write_the_summary() {
     // The summariser model was never asked.
     assert!(fake.llm_requests().iter().all(|r| !r.to_string().contains("Transcript to summarise")));
 }
+
+// A conversation of no chat: the extension keeps talking to it across turns, by its id.
+const NOTEBOOK: &str = r#"
+export default function (august) {
+  august.needs("sessions", "turns");
+  let book = null;
+  august.registerCommand("note", async (args) => {
+    book ??= await august.sessions.new(null, { name: "notebook" });
+    const thread = { messenger: "session", id: book };
+    const id = await august.turns.start(thread, { text: args, mode: "quiet" });
+    const out = await august.turns.wait(id);
+    const { messages } = await august.sessions.messages(thread);
+    return `${out.status}: ${out.reply} (${messages.length} messages)`;
+  });
+}
+"#;
+
+#[tokio::test]
+async fn an_extension_talks_to_a_conversation_of_no_chat() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|req| {
+        let all = req["messages"].to_string();
+        let last = req["messages"].as_array().unwrap().last().unwrap().to_string();
+        if last.contains("which number") && all.contains("keep 42") {
+            reply_text("it was 42")
+        } else {
+            reply_text("kept")
+        }
+    }))
+    .await;
+    let gw = august(&fake, Setup { home: &[("extensions/notebook/index.ts", NOTEBOOK)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("/note keep 42", "ok: kept (2 messages)").await;
+    chat.ask("/note which number?", "ok: it was 42 (4 messages)").await;
+
+    // The chat's own conversation never saw it.
+    chat.ask("which number?", "kept").await;
+    let mine = fake.llm_requests().into_iter().last().unwrap();
+    assert!(!mine.to_string().contains("keep 42"), "{mine}");
+}

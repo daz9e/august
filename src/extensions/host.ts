@@ -232,7 +232,7 @@ const api = {
   model: { set: (model: string) => call("model_set", { model }) },
   sessions: {
     list: (thread?: Thread) => call("sessions", { thread }),
-    new: (thread: Thread, opts: { name?: string; settings?: object } = {}) => call("session_new", { thread, ...opts }),
+    new: (thread: Thread | null, opts: { name?: string; settings?: object } = {}) => call("session_new", { ...(thread ? { thread } : {}), ...opts }),
     update: (session: string, change: { name?: string; settings?: object }) => call("session_update", { session, ...change }),
     switch: (thread: Thread, session: string) => call("session_switch", { thread, session }),
     history: (where: { session?: string; thread?: Thread }, opts: { kinds?: string[]; since?: number; limit?: number } = {}) =>

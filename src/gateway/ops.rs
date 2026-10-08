@@ -50,7 +50,7 @@ pub const OPS: &[Op] = &[
     op("llm", Some("llm"), "One completion without tools: {prompt} or {messages}, {system}; in {thread}'s conversation's model, counted in its usage"),
     op("model_set", Some("models"), "Switch to {model} of the current provider"),
     op("sessions", SESSIONS, "Stored conversations, newest first, of {thread} or all: {id, chat, name, settings, messages, bound}"),
-    op("session_new", SESSIONS, "Start a new conversation in {thread}, optionally with {name, settings}; returns its id"),
+    op("session_new", SESSIONS, "Start a new conversation in {thread} (none: of no chat, addressed as thread {messenger: \"session\", id}), optionally with {name, settings}; returns its id"),
     op("session_update", SESSIONS, "Rename {session} ({name}) or change its {settings}: {model, system, tools}, null deletes"),
     op("session_switch", SESSIONS, "Continue stored {session} in {thread}"),
     op("history", SESSIONS, "The journal of {session} (or {thread}'s, or all): entries after {since} of {kinds}, at most {limit} (default 100)"),
@@ -206,6 +206,12 @@ impl Gateway {
                 json!({"provider": provider, "model": model})
             }
             "sessions" => json!(self.db.sessions(thread(p).ok().map(|t| t.key()).as_deref())?),
+            // A conversation of no chat, addressed as thread `{messenger: "session", id}`.
+            "session_new" if thread(p).is_err() => {
+                let id = self.db.new_detached_session()?;
+                self.db.update_session(&id, p["name"].as_str(), &p["settings"])?;
+                json!(id)
+            }
             "session_new" | "session_switch" => {
                 let t = thread(p)?;
                 let event = if name == "session_new" { "session_before_new" } else { "session_before_switch" };

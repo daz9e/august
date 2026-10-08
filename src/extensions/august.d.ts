@@ -4,7 +4,9 @@
 declare module "august" {
   /** A conversation in a messenger: a Telegram chat (`{ messenger: "telegram", id: "123" }`),
    *  a terminal window (`{ messenger: "cli", id: "1" }`), ... Where a call takes a thread,
-   *  `"home"` is the user's home thread (set with /home; else the one they wrote in last). */
+   *  `"home"` is the user's home thread (set with /home; else the one they wrote in last).
+   *  `{ messenger: "session", id }` is a stored conversation itself, in no chat: quiet, fork
+   *  and fresh turns run in it, `sessions.messages` reads it; nothing can be sent there. */
   export type Thread = { messenger: string; id: string } | "home";
 
   /** A button under a message; a press comes back with its `id`. */
@@ -461,8 +463,9 @@ declare module "august" {
       /** Stored conversations, newest first: of the chat that started them, or all. `bound`:
        *  the chats whose current conversation it is. */
       list(thread?: Thread): Promise<SessionInfo[]>;
-      /** Starts a new conversation, as /new does; returns its id. */
-      new(thread: Thread, opts?: { name?: string; settings?: SessionSettings }): Promise<string>;
+      /** Starts a new conversation in `thread`, as /new does (`null`: one of no chat, addressed
+       *  as `{ messenger: "session", id }`); returns its id. */
+      new(thread: Thread | null, opts?: { name?: string; settings?: SessionSettings }): Promise<string>;
       /** Renames a conversation or changes its settings (a null field deletes it); takes
        *  effect from its next turn. */
       update(session: string, change: { name?: string; settings?: Partial<Record<keyof SessionSettings, any>> }): Promise<void>;

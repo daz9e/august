@@ -174,12 +174,17 @@ impl Db {
         Ok(msgs)
     }
 
-    /// The chat's current session: the one bound to it, else its newest.
+    /// The chat's current session: the one bound to it, else its newest. `session:<id>`
+    /// addresses a stored session itself.
     fn latest_session(&self, chat_key: &str) -> Result<Option<String>> {
         let conn = self.conn();
         let bound = conn.query_row("SELECT session_id FROM bindings WHERE chat_key = ?1", [chat_key], |r| r.get(0)).optional()?;
         if bound.is_some() {
             return Ok(bound);
+        }
+        if let Some(id) = chat_key.strip_prefix("session:") {
+            let found = conn.query_row("SELECT id FROM sessions WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+            return found.ok_or_else(|| anyhow::anyhow!("no session `{id}`")).map(Some);
         }
         Ok(conn
             .query_row(
@@ -198,6 +203,13 @@ impl Db {
             params![id, chat_key, now()],
         )?;
         self.bind(chat_key, &id)?;
+        Ok(id)
+    }
+
+    /// A new session of no chat, addressed as `session:<id>`.
+    pub fn new_detached_session(&self) -> Result<String> {
+        let id = crate::util::new_uuid();
+        self.conn().execute("INSERT INTO sessions (id, chat_key, created_at) VALUES (?1, ?2, ?3)", params![id, format!("session:{id}"), now()])?;
         Ok(id)
     }
 

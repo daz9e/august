@@ -30,6 +30,10 @@ impl Thread {
     pub fn key(&self) -> String {
         format!("{}:{}", self.messenger, self.id)
     }
+    /// A stored conversation addressed directly (`session:<id>`), not a chat in a messenger.
+    pub fn is_session(&self) -> bool {
+        self.messenger == "session"
+    }
 }
 
 #[derive(Debug, Clone)]
