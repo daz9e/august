@@ -39,6 +39,9 @@ pub struct Manifest {
     pub timeouts: HashMap<String, u64>,
     /// The protocol version it speaks.
     pub protocol: u64,
+    /// JSON Schema of its settings (`config/extensions/<name>.json` → `settings`); properties
+    /// with `"secret": true` are shown masked.
+    pub settings: Value,
 }
 
 /// Threads of August's calls into the extension that are still running.
@@ -302,6 +305,7 @@ fn parse_manifest(params: &Value) -> Manifest {
         needs: list("needs").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
         timeouts: params["timeouts"].as_object().into_iter().flatten().filter_map(|(k, v)| Some((k.clone(), v.as_u64()?))).collect(),
         protocol: params["protocol"].as_u64().unwrap_or(1),
+        settings: params["settings"].clone(),
         sections: list("sections")
             .iter()
             .filter_map(|c| Some((c["name"].as_str()?.to_string(), c["text"].as_str().unwrap_or_default().to_string())))

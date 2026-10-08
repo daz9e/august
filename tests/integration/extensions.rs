@@ -229,11 +229,12 @@ async fn extensions_hook_model_calls_call_into_august_and_can_be_disabled() {
     assert!(ask["tools"].as_array().is_none_or(|t| t.is_empty()));
 
     // Disabled: listed as paused, not running, remembered on disk; enabling restores it.
+    let settings = || std::fs::read_to_string(gw.home.join("config/extensions/probe.json")).unwrap_or_default();
     chat.ask("/extensions disable probe", "⏸ probe").await;
-    assert!(gw.home.join("extensions/probe/disabled").exists());
+    assert!(settings().contains(r#""enabled": false"#), "{}", settings());
     chat.ask("/peek two", "Unknown command /peek").await;
     chat.ask("/extensions enable probe", "✅ probe").await;
-    assert!(!gw.home.join("extensions/probe/disabled").exists());
+    assert!(!settings().contains("enabled"), "{}", settings());
     chat.ask("/peek three", "peek three: note body").await;
 }
 
@@ -690,3 +691,81 @@ async fn extensions_drive_the_core_through_its_operations() {
     chat.ask("/extensions", "⏸ meek").await;
 }
 
+const WEATHER: &str = r#"export default function (august) {
+  august.settings.schema({
+    type: "object",
+    properties: { city: { type: "string", default: "Berlin" }, api_key: { type: "string", secret: true } },
+  });
+  august.registerCommand("weather", async () => {
+    const { city, api_key } = await august.settings.get();
+    return `weather for ${city} with ${api_key ?? "no key"}`;
+  });
+  august.on("config_changed", async ({ path }) => {
+    if (path.startsWith("extensions.weather")) await august.send("home", `noticed ${path}`);
+  });
+  august.needs("messaging");
+}"#;
+
+const SNOOP: &str = r#"export default function (august) {
+  august.needs("config");
+  august.registerCommand("snoop", async () => JSON.stringify(await august.config.get("extensions.weather.settings")));
+  august.registerCommand("silence", async () => { await august.config.set("extensions.weather.enabled", false); return "done"; });
+}"#;
+
+#[tokio::test]
+async fn extensions_have_settings_the_user_sets_and_secrets_stay_hidden() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("ok"))).await;
+    let home = [("extensions/weather/index.ts", WEATHER), ("extensions/snoop/index.ts", SNOOP), ("extensions/meek/index.ts", MEEK)];
+    let gw = august(&fake, Setup { home: &home, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+
+    // Defaults from the schema until the user sets something.
+    chat.ask("/weather", "weather for Berlin with no key").await;
+    chat.ask("/home", "home thread").await;
+
+    // The user sets a secret; it's shown masked, and the extension hears of the change.
+    let shown = chat.ask("/config extensions.weather.settings.api_key abc123", "api_key").await;
+    assert!(shown.contains("••••") && !shown.contains("abc123"), "{shown}");
+    chat.wait_for("noticed extensions.weather.settings.api_key").await;
+    chat.ask("/config extensions.weather.settings.city Paris", "Paris").await;
+    chat.ask("/weather", "weather for Paris with abc123").await;
+    let file = std::fs::read_to_string(gw.home.join("config/extensions/weather.json")).unwrap();
+    assert!(file.contains("abc123") && file.contains("Paris"), "{file}");
+
+    // Another extension with `config` reads settings with secrets masked, and can't turn
+    // extensions off; one without `config` can't read them at all.
+    let seen = chat.ask("/snoop", "Paris").await;
+    assert!(seen.contains("••••") && !seen.contains("abc123"), "{seen}");
+    chat.ask("/silence", "only the user turns extensions on and off").await;
+    chat.ask("/weather", "weather for Paris").await;
+}
+
+const MONITOR: &str = r#"export default function (august) {
+  august.needs("messaging");
+  august.on("extension_state", async ({ name, state, error }) => {
+    if (name === "fragile") await august.send("home", `monitor: ${name} is ${state}${error ? " (" + error.split(":")[0] + ")" : ""}`);
+  });
+}"#;
+
+#[tokio::test]
+async fn a_monitor_reports_crashed_extensions_to_the_home_thread() {
+    if !have_bun() {
+        return;
+    }
+    let pick: fn(&str) -> Value = |text| reply_tool(if text.contains("crash") { "crash" } else { "alive" }, json!({}));
+    let fake = Fake::llm(llm(pick)).await;
+    let home = [("extensions/fragile/index.ts", FRAGILE), ("extensions/monitor/index.ts", MONITOR)];
+    let gw = august(&fake, Setup { home: &home, ..Default::default() }).await;
+    let mut home_chat = gw.chat().await;
+    home_chat.ask("/home", "home thread").await;
+
+    // The crash happens in another thread; the report goes home, then the restart.
+    let mut other = gw.chat().await;
+    other.ask("crash please", "Result: bye").await;
+    home_chat.wait_for("monitor: fragile is failed (crashed)").await;
+    home_chat.wait_for("monitor: fragile is running").await;
+    assert!(!other.texts().iter().any(|t| t.contains("monitor:")), "{:?}", other.texts());
+}

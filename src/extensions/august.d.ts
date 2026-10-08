@@ -3,8 +3,9 @@
 
 declare module "august" {
   /** A conversation in a messenger: a Telegram chat (`{ messenger: "telegram", id: "123" }`),
-   *  a terminal window (`{ messenger: "cli", id: "1" }`), ... */
-  export type Thread = { messenger: string; id: string };
+   *  a terminal window (`{ messenger: "cli", id: "1" }`), ... Where a call takes a thread,
+   *  `"home"` is the user's home thread (set with /home; else the one they wrote in last). */
+  export type Thread = { messenger: string; id: string } | "home";
 
   /** A button under a message; a press comes back with its `id`. */
   export type Button = { id: string; label: string };
@@ -62,7 +63,7 @@ declare module "august" {
   };
 
   /** What an extension declares it uses (`august.needs`); each operation needs at most one. */
-  export type Permission = "messaging" | "turns" | "tools" | "llm" | "models" | "sessions" | "memory" | "admin";
+  export type Permission = "messaging" | "turns" | "tools" | "llm" | "models" | "sessions" | "memory" | "config" | "admin";
 
   /** An operation of the core's table. */
   export type Op = { name: string; permission: Permission | null; about: string };
@@ -73,6 +74,8 @@ declare module "august" {
     name: string;
     state: "running" | "failed" | "disabled";
     error: string | null;
+    /** Who installed it: shipped with August, the user, or the agent (`save_extension`). */
+    origin: "default" | "user" | "agent";
     /** Only while running: what it registered, and the built-in tools it replaces. */
     tools?: string[]; replaces?: string[]; commands?: string[]; hooks?: string[]; needs?: Permission[]; sections?: string[];
   };
@@ -145,6 +148,12 @@ declare module "august" {
     };
     /** The user reacted to `message` with `emoji` (empty: took it back). Observe only. */
     reaction: { message: string; emoji: string };
+    /** An extension started, failed, crashed or was turned off (observe only; background).
+     *  `error` says why it failed or crashed (the last lines it wrote to stderr). */
+    extension_state: { name: string; state: "running" | "failed" | "disabled"; error: string | null };
+    /** A setting changed (`/config`, `august.config.set`, `august.settings.set`); `path` is
+     *  like `extensions.web.settings.timeout`. Observe only; background. */
+    config_changed: { path: string };
     /** August is about to stop this extension (reload, disable): clean up, within 2 s. */
     shutdown: {};
     /** The user sent /stop in the thread (observe only). */
@@ -170,6 +179,8 @@ declare module "august" {
     tool_call: { input?: any; block?: string; approve?: boolean; ask?: string };
     tool_result: { output?: string; isError?: boolean };
     turn_end: void;
+    extension_state: void;
+    config_changed: void;
     stop: void;
     reaction: void;
     shutdown: void;
@@ -266,6 +277,24 @@ declare module "august" {
       wait(id: number, opts?: { timeout?: number }): Promise<TurnOutcome>;
       cancel(id: number): Promise<boolean>;
       list(thread?: Thread): Promise<(Turn & { thread: Thread })[]>;
+    };
+    /** This extension's settings, kept in `config/extensions/<name>.json` and set by the user
+     *  with `/config extensions.<name>.settings.<field> <value>` or `august config ...`. */
+    settings: {
+      /** Declares them: a JSON Schema whose `properties` may have a `default`; mark secrets
+       *  with `secret: true` (shown as ••••). Call it in setup. */
+      schema(schema: object): void;
+      /** The current settings, defaults filled in. */
+      get<T = Record<string, any>>(): Promise<T>;
+      /** Changes one (`path` inside the settings, e.g. "timeout"); null deletes it. */
+      set(path: string, value: unknown): Promise<void>;
+    };
+    /** Any unit's settings: `august.model`, `providers.openai.base_url`,
+     *  `messengers.telegram.allowed`, `extensions.web.settings`. Secrets come back masked;
+     *  turning extensions on and off is the user's. Needs `config`. */
+    config: {
+      get(path: string): Promise<any>;
+      set(path: string, value: unknown): Promise<void>;
     };
     /** Any operation of the core's table by name, e.g. `august.call("model_set", { model })`.
      *  The helpers below are the same calls, typed. */

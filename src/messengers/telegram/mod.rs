@@ -16,7 +16,6 @@ use async_trait::async_trait;
 use dialoguer::{Confirm, Password, theme::ColorfulTheme};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,20 +37,17 @@ pub struct Config {
     pub allowed: Vec<i64>,
 }
 
-type Channels = BTreeMap<String, Value>;
-
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
 /// Saved config with `TELEGRAM_BOT_TOKEN` / `TELEGRAM_ALLOWED_USERS` overrides.
 pub fn load_config() -> Result<Option<Config>> {
-    let mut all: Channels = config::load(config::CHANNELS)?;
-    let mut cfg: Option<Config> = all
-        .remove(ID)
-        .map(serde_json::from_value)
-        .transpose()
-        .context("parse telegram section of channels.json")?;
+    let saved = config::unit("messengers", ID)?;
+    let mut cfg: Option<Config> = match saved.get("token") {
+        Some(_) => Some(serde_json::from_value(saved).context("parse config/messengers/telegram.json")?),
+        None => None,
+    };
     if let Some(token) = env("TELEGRAM_BOT_TOKEN") {
         cfg.get_or_insert_with(Config::default).token = token;
     }
@@ -62,9 +58,11 @@ pub fn load_config() -> Result<Option<Config>> {
 }
 
 fn save_config(cfg: &Config) -> Result<()> {
-    let mut all: Channels = config::load(config::CHANNELS)?;
-    all.insert(ID.into(), serde_json::to_value(cfg)?);
-    config::save(config::CHANNELS, &all)
+    let mut v = config::unit("messengers", ID)?;
+    for (k, val) in serde_json::to_value(cfg)?.as_object().into_iter().flatten() {
+        v[k] = val.clone();
+    }
+    config::save_unit("messengers", ID, &v)
 }
 
 // ---------------------------------------------------------------- inbound parsing
@@ -585,7 +583,7 @@ impl MessengerDef for TelegramDef {
         .ok();
         println!(
             "saved to {}\nallowed users: {:?}\nstart the bot with: august serve",
-            config::home().join(config::CHANNELS).display(),
+            config::home().join("config/messengers/telegram.json").display(),
             cfg.allowed
         );
         Ok(())

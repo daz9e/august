@@ -19,6 +19,8 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("model", "Show or change the model"),
     CommandSpec::new("status", "Show provider, model and workspace"),
     CommandSpec::new("extensions", "List extensions; enable or disable one"),
+    CommandSpec::new("config", "Show or change a setting: /config [path [value]]"),
+    CommandSpec::new("home", "Make this thread the home thread (where extensions report)"),
     CommandSpec::new("reload", "Restart all extensions"),
     CommandSpec::new("help", "List commands"),
 ];
@@ -146,6 +148,24 @@ impl Gateway {
                     Ok(()) => status,
                     Err(e) => format!("{e:#}\n\n{status}"),
                 }
+            }
+            "config" => {
+                let (path, value) = args.split_once(char::is_whitespace).map_or((args, ""), |(p, v)| (p, v.trim()));
+                if path.is_empty() {
+                    return Ok("Usage: /config <path> [value], e.g. /config august.model, /config extensions.web.settings.\n\
+                               Units: august, providers.<id>, messengers.<id>, extensions.<name>; `null` deletes."
+                        .into());
+                }
+                if !value.is_empty() {
+                    let value = serde_json::from_str(value).unwrap_or_else(|_| json!(value));
+                    op("config_set", json!({"path": path, "value": value})).await?;
+                }
+                let shown = op("config_get", json!({"path": path})).await?;
+                format!("`{path}` = ```\n{}\n```", serde_json::to_string_pretty(&shown)?)
+            }
+            "home" => {
+                op("config_set", json!({"path": "august.home", "value": id.key()})).await?;
+                "🏠 This is the home thread now: extensions report here.".into()
             }
             "reload" => format!("Extensions reloaded.\n{}", extensions::status(&op("extensions_reload", json!({})).await?)),
             _ => unreachable!("not a built-in command: {name}"),

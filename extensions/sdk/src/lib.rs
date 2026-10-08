@@ -214,6 +214,7 @@ struct Inner {
     commands: RwLock<Vec<(String, String, CommandFn)>>,
     hooks: RwLock<Vec<(String, HookFn)>>,
     sections: RwLock<Vec<(String, String)>>,
+    settings: RwLock<Value>,
     needs: RwLock<Vec<String>>,
     timeouts: RwLock<HashMap<String, u64>>,
     /// Calls from August still running, by request id, so a cancel can stop them.
@@ -244,6 +245,7 @@ impl August {
             commands: RwLock::default(),
             hooks: RwLock::default(),
             sections: RwLock::default(),
+            settings: RwLock::new(Value::Null),
             needs: RwLock::default(),
             timeouts: RwLock::default(),
             running: Mutex::default(),
@@ -348,6 +350,18 @@ impl August {
         self.0.link.call(op, params).await
     }
 
+    /// Declares this extension's settings: a JSON Schema (`properties` with `default`s;
+    /// `"secret": true` marks secrets). The user sets them with `/config` or `august config`.
+    pub fn settings_schema(&self, schema: Value) {
+        *self.0.settings.write().unwrap() = schema;
+        self.changed();
+    }
+
+    /// This extension's settings, defaults filled in.
+    pub async fn settings(&self) -> Result<Value> {
+        self.0.link.call("settings", json!({})).await
+    }
+
     /// Hands `thread` a message as if the user sent it.
     pub async fn prompt(&self, thread: &Thread, text: &str) -> Result<()> {
         self.0.link.call("prompt", json!({"thread": thread, "text": text})).await.map(drop)
@@ -391,7 +405,7 @@ impl August {
     }
 
     /// Declares what this extension uses beyond its own thread: `messaging`, `turns`,
-    /// `tools`, `llm`, `models`, `sessions`, `memory`, `admin` (see the guide); other such
+    /// `tools`, `llm`, `models`, `sessions`, `memory`, `config`, `admin` (see the guide); other such
     /// calls are refused.
     pub fn needs(&self, permissions: &[&str]) {
         self.0.needs.write().unwrap().extend(permissions.iter().map(|p| p.to_string()));
@@ -443,6 +457,7 @@ impl August {
             "timeouts": *self.0.timeouts.read().unwrap(),
             "protocol": 2,
             "sections": self.0.sections.read().unwrap().iter().map(|(n, t)| json!({"name": n, "text": t})).collect::<Vec<_>>(),
+            "settings": *self.0.settings.read().unwrap(),
         })
     }
 

@@ -36,8 +36,6 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Restarts after a crash before an extension stays down until `/reload`.
 const MAX_RESTARTS: u32 = 3;
 const ENTRIES: [&str; 3] = ["index.ts", "index.js", "index.mjs"];
-/// Marker file in an extension folder that keeps it from starting.
-const DISABLED: &str = "disabled";
 
 /// What extensions can ask of August: the operations of the core's table.
 #[async_trait]
@@ -84,7 +82,7 @@ enum State {
 enum Launch {
     /// A TypeScript or JavaScript entry file, run by bun through `host.ts`.
     Script(PathBuf),
-    /// A default extension's binary; `dir` is its folder (state, the `disabled` marker).
+    /// A default extension's binary; `dir` is its folder (state files).
     Binary { exe: PathBuf, dir: PathBuf },
 }
 
@@ -145,6 +143,27 @@ fn entry_of(folder: &Path) -> Option<PathBuf> {
     ENTRIES.iter().map(|e| folder.join(e)).find(|p| p.is_file())
 }
 
+/// Names of the properties a settings schema marks `"secret": true`.
+pub fn secret_fields(schema: &Value) -> Vec<String> {
+    schema["properties"].as_object().into_iter().flatten().filter(|(_, p)| p["secret"] == true).map(|(k, _)| k.clone()).collect()
+}
+
+/// `settings` with the schema's defaults filled in where unset.
+pub fn with_defaults(schema: &Value, settings: &Value) -> Value {
+    let mut out = if settings.is_object() { settings.clone() } else { json!({}) };
+    for (k, p) in schema["properties"].as_object().into_iter().flatten() {
+        if out.get(k).is_none_or(Value::is_null) && let Some(d) = p.get("default") {
+            out[k] = d.clone();
+        }
+    }
+    out
+}
+
+/// An extension starts unless the user turned it off (`enabled: false` in its settings).
+fn enabled(name: &str) -> bool {
+    crate::config::unit("extensions", name).map_or(true, |v| v["enabled"] != false)
+}
+
 /// `august-ext-<name>` next to the running binary.
 fn default_binary(name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
@@ -180,7 +199,7 @@ impl Extensions {
         &self.dir
     }
 
-    /// Where the default extensions are written (a `disabled` marker there survives rewrites).
+    /// The default extensions' folders.
     fn defaults_dir(&self) -> PathBuf {
         self.dir.join(".runtime/defaults")
     }
@@ -278,6 +297,7 @@ impl Extensions {
             slot.state = State::Failed(format!("crashed: {tail}"));
             slot.restarts
         };
+        self.announce(name);
         if restarts >= MAX_RESTARTS {
             eprintln!("extension {name}: crashed {restarts} times, not restarting until /reload");
             return;
@@ -288,10 +308,14 @@ impl Extensions {
             let Some(me) = me.upgrade() else { return };
             let Some(launch) = me.slot_launch(&name, generation) else { return };
             let (new_gen, state) = me.spawn(&name, &launch).await;
-            let mut slots = me.slots.write().unwrap();
-            if let Some(slot) = slots.iter_mut().find(|s| s.name == name && s.generation == generation) {
+            let replaced = {
+                let mut slots = me.slots.write().unwrap();
+                let slot = slots.iter_mut().find(|s| s.name == name && s.generation == generation);
+                slot.map(|slot| *slot = Slot { name: name.clone(), launch, state, generation: new_gen, restarts: restarts + 1 }).is_some()
+            };
+            if replaced {
                 eprintln!("extension {name}: restarted");
-                *slot = Slot { name, launch, state, generation: new_gen, restarts: restarts + 1 };
+                me.announce(&name);
             }
         });
     }
@@ -310,9 +334,9 @@ impl Extensions {
         }
         let found = self.discover();
         let started = futures_util::future::join_all(found.iter().map(|(name, launch)| async move {
-            match launch.dir().join(DISABLED).exists() {
-                true => (0, State::Disabled),
-                false => self.spawn(name, launch).await,
+            match enabled(name) {
+                false => (0, State::Disabled),
+                true => self.spawn(name, launch).await,
             }
         }))
         .await;
@@ -322,13 +346,16 @@ impl Extensions {
             .map(|((name, launch), (generation, state))| Slot { name, launch, state, generation, restarts: 0 })
             .collect();
         *self.slots.write().unwrap() = slots; // old processes are killed as they drop
+        for name in self.slots.read().unwrap().iter().map(|s| s.name.clone()) {
+            self.announce(&name);
+        }
         self.status()
     }
 
     /// (Re)starts one extension after it was saved, enabling it. Returns its status line.
     pub async fn load(&self, name: &str) -> Result<String> {
         let launch = self.launch(name)?;
-        std::fs::remove_file(launch.dir().join(DISABLED)).ok();
+        crate::config::set(&format!("extensions.{name}.enabled"), Value::Null)?;
         shut_down(self.running().into_iter().filter(|(n, _)| n == name).map(|(_, h)| h).collect()).await;
         let (generation, state) = self.spawn(name, &launch).await;
         let ok = matches!(state, State::Running(_));
@@ -340,6 +367,7 @@ impl Extensions {
             slots.sort_by(|a, b| a.name.cmp(&b.name));
         }
         let line = self.line(name);
+        self.announce(name);
         if let Some(core) = self.core.read().unwrap().clone() {
             core.changed();
         }
@@ -358,12 +386,34 @@ impl Extensions {
     pub async fn disable(&self, name: &str) -> Result<()> {
         let launch = self.launch(name)?;
         shut_down(self.running().into_iter().filter(|(n, _)| n == name).map(|(_, h)| h).collect()).await;
-        std::fs::write(launch.dir().join(DISABLED), "")?;
-        let mut slots = self.slots.write().unwrap();
-        slots.retain(|s| s.name != name); // the process is killed as it drops
-        slots.push(Slot { name: name.to_string(), launch, state: State::Disabled, generation: 0, restarts: 0 });
-        slots.sort_by(|a, b| a.name.cmp(&b.name));
+        crate::config::set(&format!("extensions.{name}.enabled"), json!(false))?;
+        {
+            let mut slots = self.slots.write().unwrap();
+            slots.retain(|s| s.name != name); // the process is killed as it drops
+            slots.push(Slot { name: name.to_string(), launch, state: State::Disabled, generation: 0, restarts: 0 });
+            slots.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        self.announce(name);
         Ok(())
+    }
+
+    /// Tells extensions (the `extension_state` event) what state `name` is in now.
+    fn announce(&self, name: &str) {
+        let data = {
+            let slots = self.slots.read().unwrap();
+            let Some(slot) = slots.iter().find(|s| s.name == name) else { return };
+            let e = self.entry(slot, &HashSet::new());
+            json!({"name": name, "state": e["state"], "error": e["error"]})
+        };
+        if !self.listens("extension_state") {
+            return;
+        }
+        let me = self.me.clone();
+        tokio::spawn(async move {
+            if let Some(me) = me.upgrade() {
+                me.emit("extension_state", data, &Origin::default()).await;
+            }
+        });
     }
 
     fn running(&self) -> Vec<(String, Arc<Host>)> {
@@ -395,7 +445,9 @@ impl Extensions {
             let default = match event {
                 "message_in" => MESSAGE_TIMEOUT,
                 // Nobody waits for these: let them finish what they started (a fork, a judge).
-                "turn_end" | "llm_result" | "session_start" | "compaction" | "reaction" => OBSERVER_TIMEOUT,
+                "turn_end" | "llm_result" | "session_start" | "compaction" | "reaction" | "extension_state" | "config_changed" => {
+                    OBSERVER_TIMEOUT
+                }
                 _ => EVENT_TIMEOUT,
             };
             let own = host.manifest().timeouts.get(event).copied().map(Duration::from_millis);
@@ -420,6 +472,11 @@ impl Extensions {
             .flat_map(|(_, h)| h.manifest().tools.clone())
             .filter(|t| seen.insert(t.name.clone()))
             .collect()
+    }
+
+    /// The schema of a running extension's settings (null if none or not running).
+    pub fn settings_schema(&self, name: &str) -> Value {
+        self.running().into_iter().find(|(n, _)| n == name).map(|(_, h)| h.manifest().settings.clone()).unwrap_or(Value::Null)
     }
 
     /// The extension behind each extension tool (the first one, as in `tool_specs`).
@@ -475,7 +532,12 @@ impl Extensions {
             State::Failed(e) => ("failed", Some(e.trim().to_string())),
             State::Disabled => ("disabled", None),
         };
-        let mut v = json!({"name": slot.name, "state": state, "error": error});
+        let origin = crate::config::unit("extensions", &slot.name).ok().and_then(|v| v["origin"].as_str().map(String::from));
+        let origin = origin.unwrap_or_else(|| match slot.launch {
+            Launch::Binary { .. } => "default".into(),
+            Launch::Script(_) => "user".into(),
+        });
+        let mut v = json!({"name": slot.name, "state": state, "error": error, "origin": origin});
         if let State::Running(h) = &slot.state {
             let m = h.manifest();
             let tools: Vec<&str> = m.tools.iter().map(|t| t.name.as_str()).collect();

@@ -1,4 +1,4 @@
-//! Account commands: `login`, `logout`, `model`, `models`, `status`.
+//! Account commands: `login`, `logout`, `model`, `models`, `status`, `config`.
 
 pub mod service;
 
@@ -26,7 +26,8 @@ pub async fn run(cmd: &str, arg: Option<&str>) -> Result<()> {
         }
         "status" => status(),
         "connect" => connect(arg).await,
-        other => bail!("unknown command: {other} (login | logout | model | models | status | connect | serve | stop | logs | gateway)"),
+        "config" => config_command(arg, std::env::args().nth(3).as_deref()),
+        other => bail!("unknown command: {other} (login | logout | model | models | status | connect | config | serve | stop | logs | gateway)"),
     }
 }
 
@@ -43,7 +44,7 @@ fn is_connected(p: &dyn ProviderDef, creds: &Credentials) -> Result<bool> {
 }
 
 async fn login() -> Result<()> {
-    let creds: Credentials = config::load(config::CREDENTIALS)?;
+    let creds: Credentials = config::credentials()?;
     let labels = registry()
         .iter()
         .map(|p| {
@@ -87,15 +88,13 @@ async fn login() -> Result<()> {
                 if p.id() == "anthropic" {
                     providers::list_models(p, Some(&cred)).await?;
                 }
-                let mut creds = creds;
-                creds.insert(p.id().to_string(), cred);
-                config::save(config::CREDENTIALS, &creds)?;
-                println!("saved to {}", config::home().join(config::CREDENTIALS).display());
+                config::save_credential(p.id(), Some(&cred))?;
+                println!("saved to {}", config::home().join(format!("config/providers/{}.json", p.id())).display());
             }
         }
     }
 
-    let cfg: Config = config::load(config::CONFIG)?;
+    let cfg: Config = config::app()?;
     let current = (cfg.provider.as_deref() == Some(p.id()))
         .then_some(cfg.model.as_deref())
         .flatten();
@@ -160,10 +159,10 @@ async fn choose_model(p: &dyn ProviderDef, current: Option<&str>) -> Result<()> 
         }
     };
 
-    let mut cfg: Config = config::load(config::CONFIG)?;
+    let mut cfg: Config = config::app()?;
     cfg.provider = Some(p.id().to_string());
     cfg.model = Some(model.clone());
-    config::save(config::CONFIG, &cfg)?;
+    config::save_app(&cfg)?;
     println!("using {} · {model}", p.id());
     Ok(())
 }
@@ -178,7 +177,7 @@ fn type_model(current: Option<&str>) -> Result<String> {
 }
 
 async fn logout() -> Result<()> {
-    let mut creds: Credentials = config::load(config::CREDENTIALS)?;
+    let creds: Credentials = config::credentials()?;
     let connected: Vec<&dyn ProviderDef> = registry()
         .iter()
         .filter(|p| is_connected(**p, &creds).unwrap_or(false))
@@ -201,21 +200,20 @@ async fn logout() -> Result<()> {
     } else if p.auth() == Auth::CodexOAuth {
         codex::logout()?;
     } else {
-        creds.remove(p.id());
-        config::save(config::CREDENTIALS, &creds)?;
+        config::save_credential(p.id(), None)?;
     }
-    let mut cfg: Config = config::load(config::CONFIG)?;
+    let mut cfg: Config = config::app()?;
     if cfg.provider.as_deref() == Some(p.id()) {
         cfg.provider = None;
         cfg.model = None;
-        config::save(config::CONFIG, &cfg)?;
+        config::save_app(&cfg)?;
     }
     println!("logged out of {}", p.id());
     Ok(())
 }
 
 fn status() -> Result<()> {
-    let creds: Credentials = config::load(config::CREDENTIALS)?;
+    let creds: Credentials = config::credentials()?;
     match providers::selection() {
         Ok(sel) => println!(
             "active: {} · {} · effort {}",
@@ -262,4 +260,21 @@ async fn connect(which: Option<&str>) -> Result<()> {
         }
     };
     def.setup().await
+}
+
+/// `august config <path> [value]`: shows (secrets included: it's the owner's terminal) or
+/// changes a setting; `null` deletes it. Takes effect when August next reads it (a running
+/// gateway: on restart, or right away for what it reads on each use).
+fn config_command(path: Option<&str>, value: Option<&str>) -> Result<()> {
+    let Some(path) = path else {
+        println!("usage: august config <path> [value]");
+        println!("paths: august.<field>, providers.<id>.<field>, messengers.<id>.<field>, extensions.<name>.settings.<field>");
+        println!("files: {}", config::home().join("config").display());
+        return Ok(());
+    };
+    if let Some(v) = value {
+        config::set(path, serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.into())))?;
+    }
+    println!("{}", serde_json::to_string_pretty(&config::get(path)?)?);
+    Ok(())
 }

@@ -56,6 +56,10 @@ pub const OPS: &[Op] = &[
     op("extension_enable", Some("admin"), "Start {name} and keep it enabled"),
     op("extension_disable", Some("admin"), "Stop {name} and keep it disabled"),
     op("extensions_reload", Some("admin"), "Restart every extension"),
+    op("settings", None, "The calling extension's settings, schema defaults filled in"),
+    op("settings_set", None, "Set {path, value} in the calling extension's settings (null deletes)"),
+    op("config_get", Some("config"), "A setting of any unit at {path} (`august.model`, `extensions.web.settings`); secrets masked"),
+    op("config_set", Some("config"), "Change the setting at {path} to {value} (null deletes); `enabled` and `origin` are the user's"),
     op("approve", None, "Ask the user in {thread} whether {action} may run"),
     op("store_get", None, "The caller's stored value at {key}"),
     op("store_set", None, "Store {key, value} (null deletes)"),
@@ -104,12 +108,22 @@ fn message(params: &Value) -> Result<OutMessage> {
 impl Gateway {
     /// Runs operation `name` for `caller`.
     pub(crate) async fn op(self: &Arc<Self>, caller: Caller<'_>, name: &str, p: &Value) -> Result<Value> {
+        // `"thread": "home"` is the user's home thread.
+        let home;
+        let p = if p["thread"] == "home" {
+            let t = self.home()?;
+            home = Value::Object(p.as_object().cloned().unwrap_or_default().into_iter().chain([("thread".into(), json!({"messenger": t.messenger, "id": t.id}))]).collect());
+            &home
+        } else {
+            p
+        };
         let arg = |k: &str| p[k].as_str().ok_or_else(|| anyhow!("missing string `{k}`"));
         let ms = |k: &str, default: u64| Duration::from_millis(p[k].as_u64().unwrap_or(default));
-        let store_scope = || match caller {
+        let own = || match caller {
             Caller::Extension(name) => Ok(name),
-            Caller::User => Err(anyhow!("the store belongs to extensions")),
+            Caller::User => Err(anyhow!("`{name}` is for extensions")),
         };
+        let store_scope = own;
         Ok(match name {
             "ops" => Value::Array(OPS.iter().map(|o| json!({"name": o.name, "permission": o.permission, "about": o.about})).collect()),
             "tools" => json!(self.tool_list()),
@@ -195,6 +209,35 @@ impl Gateway {
                 self.publish_commands().await;
                 self.ext.list()
             }
+            "settings" => {
+                let ext = own()?;
+                extensions::with_defaults(&self.ext.settings_schema(ext), &crate::config::unit("extensions", ext)?["settings"])
+            }
+            "settings_set" => {
+                let path = format!("extensions.{}.settings.{}", own()?, arg("path")?);
+                self.set_config(&path, p["value"].clone()).await?;
+                Value::Null
+            }
+            "config_get" => {
+                let (path, value) = (arg("path")?, crate::config::get(arg("path")?)?);
+                let secret = self.secret_fields(path);
+                match crate::config::is_secret_path(path, &secret) && !value.is_null() {
+                    true => json!(crate::config::MASK),
+                    false => crate::config::masked(&value, &secret),
+                }
+            }
+            "config_set" => {
+                let path = arg("path")?;
+                if let Caller::Extension(_) = caller {
+                    let (kind, _, inner) = crate::config::split_path(path)?;
+                    let field = inner.first().map(String::as_str);
+                    if kind == "extensions" && matches!(field, None | Some("enabled" | "origin")) {
+                        bail!("only the user turns extensions on and off");
+                    }
+                }
+                self.set_config(path, p["value"].clone()).await?;
+                Value::Null
+            }
             "approve" => {
                 let t = thread(p)?;
                 let approver = self.approver(self.messenger(&t)?, t, None);
@@ -214,6 +257,35 @@ impl Gateway {
             }
             other => bail!("unknown operation `{other}`"),
         })
+    }
+
+    /// The home thread: the one set with `/home`, else the one the user wrote in last.
+    fn home(&self) -> Result<Thread> {
+        if let Some((m, id)) = crate::config::app()?.home.as_deref().and_then(|h| h.split_once(':')) {
+            return Ok(Thread::new(m, id));
+        }
+        let seen = self.activity.lock().unwrap();
+        let last = seen.iter().max_by_key(|(_, at)| **at).map(|(t, _)| t.clone());
+        last.ok_or_else(|| anyhow!("there is no home thread yet: send /home in the thread that should be it"))
+    }
+
+    /// Secret field names under `path`: those an extension's schema marks.
+    fn secret_fields(&self, path: &str) -> Vec<String> {
+        match crate::config::split_path(path) {
+            Ok((kind, id, _)) if kind == "extensions" => extensions::secret_fields(&self.ext.settings_schema(&id)),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Changes a setting and tells extensions (`config_changed {path}`).
+    pub(super) async fn set_config(&self, path: &str, value: Value) -> Result<()> {
+        crate::config::set(path, value)?;
+        if self.ext.listens("config_changed") {
+            let ext = self.ext.clone();
+            let data = json!({"path": path});
+            tokio::spawn(async move { ext.emit("config_changed", data, &Origin::default()).await });
+        }
+        Ok(())
     }
 
     fn messenger(&self, thread: &Thread) -> Result<Arc<dyn Messenger>> {
@@ -323,9 +395,10 @@ impl Gateway {
         let provider = providers::build(sel).await?;
         *self.provider.write().unwrap() = provider;
         *self.model.write().unwrap() = (provider_id.clone(), model.to_string());
-        let mut cfg: crate::config::Config = crate::config::load(crate::config::CONFIG)?;
+        let mut cfg = crate::config::app()?;
+        cfg.provider = Some(provider_id.clone());
         cfg.model = Some(model.to_string());
-        crate::config::save(crate::config::CONFIG, &cfg)?;
+        crate::config::save_app(&cfg)?;
         Ok((provider_id, model.to_string()))
     }
 }

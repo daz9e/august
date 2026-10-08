@@ -25,3 +25,4 @@ mod mcp;
 mod browser;
 mod web;
 mod clarify;
+mod config;

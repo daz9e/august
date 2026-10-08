@@ -53,6 +53,8 @@ impl Tool for SaveExtension {
         }
         std::fs::create_dir_all(&folder)?;
         std::fs::write(folder.join("index.ts"), code)?;
+        // Written by the agent: the core says so, the extension can't.
+        crate::config::set(&format!("extensions.{name}.origin"), json!("agent"))?;
         let status = ext.load(name).await.map_err(|e| anyhow::anyhow!("saved, but it failed to start:\n{e:#}"))?;
         Ok(format!("saved {} and started it.\n{status}", folder.join("index.ts").display()))
     }

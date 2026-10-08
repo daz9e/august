@@ -2,7 +2,7 @@
 //! how to list their models and how to build them. Env vars override `~/.august`.
 
 use crate::llm::{self, LlmProvider};
-use crate::config::{self, ApiCredential, Config, Credentials};
+use crate::config::{self, ApiCredential, Config};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -53,7 +53,7 @@ pub fn registry() -> &'static [&'static dyn ProviderDef] {
     &REGISTRY
 }
 
-/// Built-in providers, then the user's own from `providers.json`.
+/// Built-in providers, then the user's own (`config/providers/<id>.json` with a `format`).
 pub fn all() -> impl Iterator<Item = &'static dyn ProviderDef> {
     registry().iter().copied().chain(custom().iter().copied())
 }
@@ -65,11 +65,11 @@ pub fn info(id: &str) -> Result<&'static dyn ProviderDef> {
     })
 }
 
-/// A provider of the user's own, from `~/.august/providers.json`: one of the wire formats
-/// August speaks (`openai`, `anthropic`) at another address, e.g.
-/// `{"openrouter": {"format": "openai", "base_url": "https://openrouter.ai/api/v1",
-/// "key_env": "OPENROUTER_API_KEY", "model": "anthropic/claude-sonnet-4.5", "context_window": 200000}}`.
-/// The key comes from `key_env`, else `credentials.json`, else none (local servers).
+/// A provider of the user's own, `config/providers/<id>.json`: one of the wire formats
+/// August speaks (`openai`, `anthropic`) at another address, e.g. `openrouter.json`:
+/// `{"format": "openai", "base_url": "https://openrouter.ai/api/v1",
+/// "key_env": "OPENROUTER_API_KEY", "model": "anthropic/claude-sonnet-4.5", "context_window": 200000}`.
+/// The key comes from `key_env`, else `key` in the same file, else none (local servers).
 #[derive(serde::Deserialize)]
 struct CustomConfig {
     label: Option<String>,
@@ -91,10 +91,22 @@ struct CustomDef {
 fn custom() -> &'static [&'static dyn ProviderDef] {
     static CUSTOM: std::sync::OnceLock<Vec<&'static dyn ProviderDef>> = std::sync::OnceLock::new();
     CUSTOM.get_or_init(|| {
-        let all: std::collections::BTreeMap<String, CustomConfig> = config::load("providers.json").unwrap_or_else(|e| {
-            eprintln!("providers.json: {e:#}");
-            Default::default()
-        });
+        let all: std::collections::BTreeMap<String, CustomConfig> = config::units("providers")
+            .unwrap_or_else(|e| {
+                eprintln!("provider settings: {e:#}");
+                Default::default()
+            })
+            .into_iter()
+            // A file with a `format` is a provider of the user's own; others hold a key.
+            .filter(|(_, v)| v.get("format").is_some())
+            .filter_map(|(id, v)| match serde_json::from_value(v) {
+                Ok(cfg) => Some((id, cfg)),
+                Err(e) => {
+                    eprintln!("config/providers/{id}.json: {e}");
+                    None
+                }
+            })
+            .collect();
         let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
         all.into_iter()
             .filter(|(id, _)| !registry().iter().any(|p| p.id() == id))
@@ -156,12 +168,12 @@ fn env(key: &str) -> Option<String> {
 
 pub const OPENAI_DEFAULT_URL: &str = "https://api.openai.com/v1";
 
-/// Credential for an API-key provider: env first, then `credentials.json`.
+/// Credential for an API-key provider: env first, then its settings file.
 pub fn credential(p: &dyn ProviderDef) -> Result<Option<ApiCredential>> {
     if matches!(p.auth(), Auth::OAuth | Auth::Cli) {
         return Ok(None);
     }
-    let stored = config::load::<Credentials>(config::CREDENTIALS)?.remove(p.id());
+    let stored = config::credentials()?.remove(p.id());
     let key = env(p.key_env()).or_else(|| stored.as_ref().map(|c| c.key.clone()));
     let base_url = (p.auth() == Auth::KeyAndUrl).then(|| {
         env("OPENAI_BASE_URL")
@@ -205,7 +217,7 @@ impl std::ops::Deref for Provider {
     }
 }
 
-/// Active provider, model and effort: env vars, then `config.json`.
+/// Active provider, model and effort: env vars, then `august.json`.
 pub struct Selection {
     pub provider: Provider,
     pub model: Option<String>,
@@ -213,7 +225,7 @@ pub struct Selection {
 }
 
 pub fn selection() -> Result<Selection> {
-    let cfg: Config = config::load(config::CONFIG)?;
+    let cfg: Config = config::app()?;
     let id = env("AUGUST_PROVIDER")
         .or(cfg.provider.clone())
         .context("no provider configured: run `cargo run -- login`")?;
@@ -233,7 +245,7 @@ pub fn selection() -> Result<Selection> {
 }
 
 /// Builds the active provider, wrapped with retries and the optional fallback
-/// (`AUGUST_FALLBACK` or `fallback` in `config.json`, as `provider:model`).
+/// (`AUGUST_FALLBACK` or `fallback` in `august.json`, as `provider:model`).
 pub async fn build(sel: Selection) -> Result<Arc<dyn LlmProvider>> {
     let primary = sel.provider.def.build(&sel).await?;
     let fallback = match fallback_selection(&sel) {
@@ -254,7 +266,7 @@ pub async fn build(sel: Selection) -> Result<Arc<dyn LlmProvider>> {
 }
 
 fn fallback_selection(active: &Selection) -> Result<Option<Selection>> {
-    let cfg: Config = config::load(config::CONFIG)?;
+    let cfg: Config = config::app()?;
     let Some(spec) = env("AUGUST_FALLBACK").or(cfg.fallback) else {
         return Ok(None);
     };

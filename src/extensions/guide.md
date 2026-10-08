@@ -145,6 +145,33 @@ helpers for the common ones:
 - `august.extensions.list()`, `.enable(name)`, `.disable(name)`, `.reload()`: like
   `/extensions` and `/reload`.
 
+## Settings
+
+An extension's settings live in `config/extensions/<name>.json` (with `enabled` and
+`origin`, which only the user and August write). Declare them with a JSON Schema in setup,
+and read them when you need them:
+
+```ts
+august.settings.schema({
+  type: "object",
+  properties: {
+    city: { type: "string", default: "Berlin" },
+    api_key: { type: "string", secret: true },
+  },
+});
+const { city, api_key } = await august.settings.get();
+```
+
+The user sets them with `/config extensions.<name>.settings.city Paris` (or
+`august config ...` in a terminal); secrets show as `••••`. Hook `config_changed { path }`
+to react at once. `august.settings.set(path, value)` changes your own. Don't keep keys in
+code or in the store: ask the user to put them into your settings.
+
+Where a call takes a thread, `"home"` is the user's home thread (set with `/home`, else the
+thread they wrote in last), e.g. `august.send("home", "...")` for reports nobody asked for.
+`extension_state { name, state, error }` tells when an extension started, failed, crashed or
+was turned off.
+
 ## Permissions
 
 An extension declares what it uses beyond the thread of the call in progress, and August
@@ -156,10 +183,12 @@ refuses the rest: `august.needs("messaging", "turns")` in its setup.
 - `models`: `august.model.set`;
 - `sessions`: `august.sessions.*`;
 - `memory`: `august.memory()`;
+- `config`: `august.config.get/set` (any unit's settings);
 - `admin`: `august.extensions.*` (other extensions: list, enable, disable, reload).
 
 Answering in the call's own thread while it runs (`ctx.send`, `ctx.ask`), the store,
-`ctx.approve`, and reading `ops`, `tools`, `commands`, `status` need nothing. `/extensions`
+`ctx.approve`, your own settings, and reading `ops`, `tools`, `commands`, `status` need
+nothing. `/extensions`
 shows what each one needs. Ask for no more than the extension uses.
 
 ## Rules

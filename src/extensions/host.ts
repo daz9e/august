@@ -40,6 +40,7 @@ const tools = new Map<string, any>();
 const commands = new Map<string, any>();
 const sections = new Map<string, string>();
 const needs = new Set<string>();
+let settingsSchema: unknown = null;
 let started = false;
 let manifestQueued = false;
 
@@ -56,6 +57,7 @@ function manifest() {
     timeouts: Object.fromEntries(timeouts),
     protocol: 2,
     needs: [...needs],
+    settings: settingsSchema,
   };
 }
 
@@ -178,6 +180,20 @@ const api = {
     wait: (id: number, opts: { timeout?: number } = {}) => call("turn_wait", { id, timeout_ms: opts.timeout }),
     cancel: (id: number) => call("turn_cancel", { id }),
     list: (thread?: Thread) => call("turns", { thread }),
+  },
+  /** This extension's settings: declare a schema, read them (defaults filled in), change one. */
+  settings: {
+    schema(schema: unknown) {
+      settingsSchema = schema;
+      changed();
+    },
+    get: () => call("settings", {}),
+    set: (path: string, value: unknown) => call("settings_set", { path, value: value ?? null }),
+  },
+  /** Any unit's settings by path (`august.model`, `extensions.web.settings`); needs `config`. */
+  config: {
+    get: (path: string) => call("config_get", { path }),
+    set: (path: string, value: unknown) => call("config_set", { path, value: value ?? null }),
   },
   /** Any operation of the core's table by name (`august.ops()` lists them). */
   call: (op: string, params: object = {}) => call(op, params),
