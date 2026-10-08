@@ -61,6 +61,22 @@ declare module "august" {
     toolCalls: { name: string; input: any; output: string; isError: boolean }[];
   };
 
+  /** What an extension declares it uses (`august.needs`); each operation needs at most one. */
+  export type Permission = "messaging" | "turns" | "tools" | "llm" | "models" | "sessions" | "memory" | "admin";
+
+  /** An operation of the core's table. */
+  export type Op = { name: string; permission: Permission | null; about: string };
+
+  export type UsageTotal = { calls: number; input: number; output: number; cache_read: number; cache_write: number };
+
+  export type ExtensionInfo = {
+    name: string;
+    state: "running" | "failed" | "disabled";
+    error: string | null;
+    /** Only while running: what it registered, and the built-in tools it replaces. */
+    tools?: string[]; replaces?: string[]; commands?: string[]; hooks?: string[]; needs?: Permission[]; sections?: string[];
+  };
+
   export interface Context {
     /** The thread the event, tool call or command belongs to (null outside one). */
     thread: Thread | null;
@@ -205,7 +221,7 @@ declare module "august" {
      *  `messaging` (messengers, sending to or listening in any thread, prompt), `turns`
      *  (starting turns, sub-agents), `tools` (callTool), `llm`. Without it, those calls fail;
      *  answering in the thread of the call in progress, the store and approvals need nothing. */
-    needs(...permissions: ("messaging" | "turns" | "tools" | "llm")[]): void;
+    needs(...permissions: Permission[]): void;
     /** A section of the system prompt (Markdown, e.g. "## Reminders\n..."): how and when the
      *  model should use what this extension offers. Fixed for each conversation, so a change
      *  shows up from the next one (`/new`). Registering a name again replaces it. */
@@ -250,6 +266,42 @@ declare module "august" {
       wait(id: number, opts?: { timeout?: number }): Promise<TurnOutcome>;
       cancel(id: number): Promise<boolean>;
       list(thread?: Thread): Promise<(Turn & { thread: Thread })[]>;
+    };
+    /** Any operation of the core's table by name, e.g. `august.call("model_set", { model })`.
+     *  The helpers below are the same calls, typed. */
+    call(op: string, params?: object): Promise<any>;
+    /** Every operation with the permission it needs. */
+    ops(): Promise<Op[]>;
+    /** Every agent tool and who offers it (`august` for built-in ones). */
+    tools(): Promise<{ name: string; description: string; parameters: object; owner: string }[]>;
+    /** Every slash command and who offers it. */
+    commands(): Promise<{ name: string; description: string; owner: string }[]>;
+    /** The model in use, the workspace, and whether `thread` is busy (null without one). */
+    status(thread?: Thread): Promise<{ provider: string; model: string; workspace: string; busy: boolean | null }>;
+    /** Stops everything running in `thread`, as /stop does; how many turns were running. Needs `turns`. */
+    stop(thread: Thread): Promise<{ cancelled: number }>;
+    /** The facts August remembers. Needs `memory`. */
+    memory(): Promise<{ id: number; text: string }[]>;
+    /** Switches to another model of the current provider (persisted). Needs `models`. */
+    model: { set(model: string): Promise<{ provider: string; model: string }> };
+    /** A thread's conversation. Need `sessions`. */
+    sessions: {
+      /** Starts a new conversation, as /new does. */
+      new(thread: Thread): Promise<void>;
+      /** Summarises older messages; estimated tokens, or null if there was nothing to do. */
+      compact(thread: Thread): Promise<{ before: number; after: number } | null>;
+      /** Token usage of its current conversation, and of today across all threads. */
+      usage(thread: Thread): Promise<{ session: UsageTotal; today: UsageTotal }>;
+    };
+    /** Other extensions. Need `admin`. */
+    extensions: {
+      list(): Promise<ExtensionInfo[]>;
+      /** Starts it and keeps it enabled; resolves to its status line. */
+      enable(name: string): Promise<string>;
+      /** Stops it and keeps it disabled. */
+      disable(name: string): Promise<void>;
+      /** Restarts every extension, this one too. */
+      reload(): Promise<ExtensionInfo[]>;
     };
   }
 }

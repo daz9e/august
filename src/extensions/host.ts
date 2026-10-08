@@ -179,6 +179,26 @@ const api = {
     cancel: (id: number) => call("turn_cancel", { id }),
     list: (thread?: Thread) => call("turns", { thread }),
   },
+  /** Any operation of the core's table by name (`august.ops()` lists them). */
+  call: (op: string, params: object = {}) => call(op, params),
+  ops: () => call("ops", {}),
+  tools: () => call("tools", {}),
+  commands: () => call("commands", {}),
+  status: (thread?: Thread) => call("status", { thread }),
+  stop: (thread: Thread) => call("stop", { thread }),
+  memory: () => call("memory", {}),
+  model: { set: (model: string) => call("model_set", { model }) },
+  sessions: {
+    new: (thread: Thread) => call("session_new", { thread }),
+    compact: (thread: Thread) => call("compact", { thread }),
+    usage: (thread: Thread) => call("usage", { thread }),
+  },
+  extensions: {
+    list: () => call("extensions", {}),
+    enable: (name: string) => call("extension_enable", { name }),
+    disable: (name: string) => call("extension_disable", { name }),
+    reload: () => call("extensions_reload", {}),
+  },
 };
 
 async function handle(method: string, params: any, signal: AbortSignal): Promise<unknown> {

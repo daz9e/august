@@ -128,15 +128,39 @@ call.
 A tool with the name of a built-in one (`shell`, `read_file`, ...) replaces it, e.g. to run
 shell commands in a container.
 
+## Operations
+
+Everything August can be asked to do is one table of operations; slash commands like
+`/model` or `/new` are thin wrappers around the same ones. `await august.ops()` lists them
+with the permission each needs; `await august.call(name, params)` calls any of them. Typed
+helpers for the common ones:
+- `august.tools()`, `august.commands()`: every agent tool and slash command, with its
+  `owner` (`august` or the extension).
+- `august.status(thread?)`: `{ provider, model, workspace, busy }`.
+- `august.model.set(id)`: switch the model, like `/model id`.
+- `august.sessions.new(thread)`, `.compact(thread)`, `.usage(thread)`: like `/new`,
+  `/compact`, `/usage`.
+- `august.stop(thread)`: like `/stop`.
+- `august.memory()`: the remembered facts, like `/memory`.
+- `august.extensions.list()`, `.enable(name)`, `.disable(name)`, `.reload()`: like
+  `/extensions` and `/reload`.
+
 ## Permissions
 
 An extension declares what it uses beyond the thread of the call in progress, and August
-refuses the rest: `august.needs("messaging", "turns", "tools", "llm")` in its setup —
-`messaging` for messengers and any thread (`august.send`/`listen`/`prompt` elsewhere, or
-later), `turns` for `august.turns` and `ctx.agent`, `tools` for `ctx.callTool`, `llm` for
-`ctx.llm`. Answering in the call's own thread while it runs (`ctx.send`, `ctx.ask`), the store
-and `ctx.approve` need nothing. `/extensions` shows what each one needs. Ask for no more
-than the extension uses.
+refuses the rest: `august.needs("messaging", "turns")` in its setup.
+- `messaging`: messengers and any thread (`august.send`/`listen`/`prompt` elsewhere, or later);
+- `turns`: `august.turns`, `ctx.agent`, `august.stop`;
+- `tools`: `ctx.callTool`;
+- `llm`: `ctx.llm`;
+- `models`: `august.model.set`;
+- `sessions`: `august.sessions.*`;
+- `memory`: `august.memory()`;
+- `admin`: `august.extensions.*` (other extensions: list, enable, disable, reload).
+
+Answering in the call's own thread while it runs (`ctx.send`, `ctx.ask`), the store,
+`ctx.approve`, and reading `ops`, `tools`, `commands`, `status` need nothing. `/extensions`
+shows what each one needs. Ask for no more than the extension uses.
 
 ## Rules
 

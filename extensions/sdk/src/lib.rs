@@ -342,6 +342,12 @@ impl August {
         Ok((v["output"].as_str().unwrap_or_default().to_string(), v["isError"] == true))
     }
 
+    /// Any operation of the core's table by name (`ops` lists them), e.g.
+    /// `call("model_set", json!({"model": "..."}))`; its permission must be declared.
+    pub async fn call(&self, op: &str, params: Value) -> Result<Value> {
+        self.0.link.call(op, params).await
+    }
+
     /// Hands `thread` a message as if the user sent it.
     pub async fn prompt(&self, thread: &Thread, text: &str) -> Result<()> {
         self.0.link.call("prompt", json!({"thread": thread, "text": text})).await.map(drop)
@@ -385,7 +391,8 @@ impl August {
     }
 
     /// Declares what this extension uses beyond its own thread: `messaging`, `turns`,
-    /// `tools`, `llm` (see the guide); other such calls are refused.
+    /// `tools`, `llm`, `models`, `sessions`, `memory`, `admin` (see the guide); other such
+    /// calls are refused.
     pub fn needs(&self, permissions: &[&str]) {
         self.0.needs.write().unwrap().extend(permissions.iter().map(|p| p.to_string()));
         self.changed();

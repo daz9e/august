@@ -4,7 +4,8 @@
 
 use super::Core;
 use crate::llm::ToolSpec;
-use crate::messengers::{Button, OutMessage, Thread};
+use crate::gateway::ops;
+use crate::messengers::Thread;
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;
@@ -40,24 +41,11 @@ pub struct Manifest {
     pub protocol: u64,
 }
 
-/// The permission a call into August needs, if any: `messaging` for messengers and any
-/// thread (the thread of a call in progress is free), `turns`, `tools`, `llm`. Storage and
-/// approvals need none.
-fn permission(method: &str) -> Option<&'static str> {
-    match method {
-        "messengers" | "send" | "edit" | "delete" | "react" | "listen" | "next" | "prompt" => Some("messaging"),
-        "turn_start" | "turn_wait" | "turn_cancel" | "turns" => Some("turns"),
-        "callTool" => Some("tools"),
-        "llm" => Some("llm"),
-        _ => None,
-    }
-}
-
 /// Threads of August's calls into the extension that are still running.
 type Busy = Arc<StdMutex<HashMap<Thread, usize>>>;
 
 fn call_thread(params: &Value) -> Option<Thread> {
-    thread(&json!({"thread": params["ctx"]["thread"]})).ok()
+    ops::thread(&json!({"thread": params["ctx"]["thread"]})).ok()
 }
 
 pub struct Host {
@@ -271,40 +259,16 @@ impl Drop for CancelOnDrop {
     }
 }
 
-fn thread(params: &Value) -> anyhow::Result<Thread> {
-    let t = &params["thread"];
-    match (t["messenger"].as_str(), t["id"].as_str()) {
-        (Some(m), Some(id)) => Ok(Thread::new(m, id)),
-        _ => anyhow::bail!("this needs a thread ({{messenger, id}}); the call has none"),
-    }
-}
-
-fn message(params: &Value) -> anyhow::Result<OutMessage> {
-    let m = &params["message"];
-    let text = m.as_str().or(m["text"].as_str()).ok_or_else(|| anyhow::anyhow!("missing `message.text`"))?;
-    let button = |b: &Value| match (b["id"].as_str(), b["label"].as_str()) {
-        (Some(id), Some(label)) => Ok(Button { id: id.into(), label: label.into() }),
-        _ => Err(anyhow::anyhow!("a button needs `id` and `label`")),
-    };
-    // Rows of buttons, or one flat list as a single row.
-    let list = m["buttons"].as_array().cloned().unwrap_or_default();
-    let buttons = if list.iter().all(Value::is_array) {
-        list.iter().map(|row| row.as_array().into_iter().flatten().map(button).collect()).collect::<anyhow::Result<_>>()?
-    } else {
-        vec![list.iter().map(button).collect::<anyhow::Result<_>>()?]
-    };
-    let files = m["files"].as_array().into_iter().flatten().filter_map(Value::as_str).map(std::path::PathBuf::from).collect();
-    let reply_to = m["reply_to"].as_str().map(String::from);
-    Ok(OutMessage { text: text.into(), buttons, files, reply_to })
-}
-
-/// Whether the extension may make this call, given what it declared it needs.
+/// Whether the extension may make this call: the operation's permission (from the core's
+/// table) must be among what it declared it needs. Answering in the thread of a call in
+/// progress needs no `messaging`.
 fn allowed(manifest: &RwLock<Manifest>, busy: &Busy, method: &str, params: &Value) -> anyhow::Result<()> {
-    let Some(need) = permission(method) else { return Ok(()) };
+    let Some(op) = ops::find(method) else { anyhow::bail!("unknown method {method}") };
+    let Some(need) = op.permission else { return Ok(()) };
     if manifest.read().unwrap().needs.iter().any(|n| n == need) {
         return Ok(());
     }
-    let own_thread = need == "messaging" && thread(params).is_ok_and(|t| busy.lock().unwrap().contains_key(&t));
+    let own_thread = need == "messaging" && ops::thread(params).is_ok_and(|t| busy.lock().unwrap().contains_key(&t));
     if own_thread {
         return Ok(());
     }
@@ -314,51 +278,7 @@ fn allowed(manifest: &RwLock<Manifest>, busy: &Busy, method: &str, params: &Valu
 /// A call from extension `name` into August.
 async fn serve(core: Option<&dyn Core>, name: &str, method: &str, params: &Value) -> anyhow::Result<Value> {
     let core = core.ok_or_else(|| anyhow::anyhow!("August is not ready yet"))?;
-    let arg = |k: &str| params[k].as_str().ok_or_else(|| anyhow::anyhow!("missing string `{k}`"));
-    Ok(match method {
-        "messengers" => core.messengers().await?,
-        "send" => json!(core.send(&thread(params)?, message(params)?).await?),
-        "edit" => core.edit(&thread(params)?, arg("id")?, message(params)?).await.map(|_| Value::Null)?,
-        "delete" => core.delete(&thread(params)?, arg("id")?).await.map(|_| Value::Null)?,
-        "react" => core.react(&thread(params)?, arg("id")?, params["emoji"].as_str().unwrap_or("")).await.map(|_| Value::Null)?,
-        "listen" => {
-            let buttons: Vec<String> = serde_json::from_value(params["buttons"].clone()).unwrap_or_default();
-            let ttl = Duration::from_millis(params["ttl_ms"].as_u64().unwrap_or(600_000));
-            json!(core.listen(&thread(params)?, buttons, params["text"] == true, ttl)?)
-        }
-        "next" => {
-            let listener = params["listener"].as_u64().ok_or_else(|| anyhow::anyhow!("missing `listener`"))?;
-            let timeout = Duration::from_millis(params["timeout_ms"].as_u64().unwrap_or(300_000));
-            core.next(listener, timeout).await?
-        }
-        "prompt" => core.prompt(&thread(params)?, arg("text")?).await.map(|_| Value::Null)?,
-        "turn_start" => json!(core.start_turn(&thread(params)?, params["turn"].clone())?),
-        "turn_wait" => {
-            let id = params["id"].as_u64().ok_or_else(|| anyhow::anyhow!("missing `id`"))?;
-            core.wait_turn(id, Duration::from_millis(params["timeout_ms"].as_u64().unwrap_or(3_600_000))).await?
-        }
-        "turn_cancel" => json!(core.cancel_turn(params["id"].as_u64().unwrap_or(0))),
-        "turns" => core.turns(thread(params).ok().as_ref()),
-        "approve" => json!(core.approve(&thread(params)?, arg("action")?).await?),
-        "callTool" => {
-            let (output, is_error) = core.call_tool(&thread(params)?, arg("name")?, &params["input"]).await?;
-            json!({"output": output, "isError": is_error})
-        }
-        "store_get" => match core.store()?.kv_get(name, arg("key")?)? {
-            Some(v) => serde_json::from_str(&v).unwrap_or(Value::Null),
-            None => Value::Null,
-        },
-        "store_set" => {
-            let value = (!params["value"].is_null()).then(|| params["value"].to_string());
-            core.store()?.kv_set(name, arg("key")?, value.as_deref()).map(|_| Value::Null)?
-        }
-        "store_list" => {
-            let rows = core.store()?.kv_list(name, params["prefix"].as_str().unwrap_or(""))?;
-            Value::Array(rows.into_iter().map(|(k, v)| json!({"key": k, "value": serde_json::from_str::<Value>(&v).unwrap_or(Value::Null)})).collect())
-        }
-        "llm" => json!(core.llm(arg("prompt")?, params["system"].as_str().filter(|s| !s.is_empty()).unwrap_or("You are a helpful assistant.")).await?),
-        other => anyhow::bail!("unknown method {other}"),
-    })
+    core.call(name, method, params).await
 }
 
 fn parse_manifest(params: &Value) -> Manifest {

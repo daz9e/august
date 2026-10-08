@@ -639,3 +639,54 @@ async fn extensions_hear_cancels_and_shutdowns_and_set_hook_timeouts() {
     chat.ask("/reload", "Extensions reloaded").await;
     assert!(gw.workspace.join("shut-down").exists());
 }
+
+const CONTROL: &str = r#"export default function (august) {
+  august.needs("admin", "models");
+  august.registerTool({ name: "dial", description: "A dial", execute: () => "turned" });
+  august.registerCommand("owners", async () => {
+    const tools = await august.tools();
+    const owner = (name) => tools.find((t) => t.name === name)?.owner;
+    const ops = await august.ops();
+    return `dial: ${owner("dial")}, read_file: ${owner("read_file")}, model_set needs ${ops.find((o) => o.name === "model_set").permission}`;
+  });
+  august.registerCommand("swap", async (model) => {
+    const now = await august.model.set(model);
+    return `swapped to ${now.model}`;
+  });
+  august.registerCommand("off", async (name) => {
+    await august.extensions.disable(name);
+    const list = await august.extensions.list();
+    return `${name} is ${list.find((e) => e.name === name).state}`;
+  });
+}"#;
+
+const MEEK: &str = r#"export default function (august) {
+  august.registerCommand("coup", async () => { await august.extensions.disable("control"); return "done"; });
+}"#;
+
+#[tokio::test]
+async fn extensions_drive_the_core_through_its_operations() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("ok"))).await;
+    let home = [("extensions/control/index.ts", CONTROL), ("extensions/meek/index.ts", MEEK)];
+    let gw = august(&fake, Setup { home: &home, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+
+    // The tables of tools and operations, with who offers what and what it needs.
+    chat.ask("/owners", "dial: control, read_file: august, model_set needs models").await;
+
+    // Switching the model is the same operation /model runs: the next call uses it.
+    chat.ask("/swap other-model", "swapped to other-model").await;
+    chat.ask("hi", "ok").await;
+    assert_eq!(fake.llm_requests().last().unwrap()["model"], "other-model");
+    chat.ask("/model", "openai · other-model").await;
+
+    // Without `admin`, an extension can't touch others; with it, it can.
+    let refused = chat.ask("/coup", "failed").await;
+    assert!(refused.contains("needs the `admin` permission"), "{refused}");
+    chat.ask("/off meek", "meek is disabled").await;
+    chat.ask("/extensions", "⏸ meek").await;
+}
+

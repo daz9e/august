@@ -8,7 +8,7 @@
 mod host;
 
 use crate::llm::ToolSpec;
-use crate::messengers::{OutMessage, Thread};
+use crate::messengers::Thread;
 use anyhow::Result;
 use async_trait::async_trait;
 use host::Host;
@@ -39,46 +39,11 @@ const ENTRIES: [&str; 3] = ["index.ts", "index.js", "index.mjs"];
 /// Marker file in an extension folder that keeps it from starting.
 const DISABLED: &str = "disabled";
 
-/// What extensions can ask of August: the core's primitives.
+/// What extensions can ask of August: the operations of the core's table.
 #[async_trait]
 pub trait Core: Send + Sync {
-    /// Every messenger: its description (name, capabilities, extras) and its threads,
-    /// the active one marked.
-    async fn messengers(&self) -> Result<Value>;
-    /// Sends `message` (`{text, buttons: [{id, label}]}`) to `thread`; returns its id.
-    async fn send(&self, thread: &Thread, message: OutMessage) -> Result<String>;
-    /// Replaces a sent message.
-    async fn edit(&self, thread: &Thread, id: &str, message: OutMessage) -> Result<()>;
-    /// Deletes a sent message (where the messenger can).
-    async fn delete(&self, thread: &Thread, id: &str) -> Result<()>;
-    /// Sets August's emoji reaction on a message, any message (empty removes it).
-    async fn react(&self, thread: &Thread, id: &str, emoji: &str) -> Result<()>;
-    /// Starts listening in `thread` for a press of one of `buttons` or (with `text`) a text
-    /// message; what it takes doesn't reach the agent. The listener ends after `ttl` even if
-    /// nobody calls `next`. Returns its id for `next`.
-    fn listen(&self, thread: &Thread, buttons: Vec<String>, text: bool, ttl: Duration) -> Result<u64>;
-    /// Waits up to `timeout` for what the listener takes: `{"press": id}`, `{"text": ...}`,
-    /// `{"timeout": true}` or `{"cancelled": "stop" | "new"}`. Ends the listener.
-    async fn next(&self, listener: u64, timeout: Duration) -> Result<Value>;
-    /// Hands `thread` a message as if the user sent it: joins the running turn, or starts one.
-    async fn prompt(&self, thread: &Thread, text: &str) -> Result<()>;
-    /// Starts a turn in `thread` (`{text, mode: quiet|fork|fresh, source, parent, system,
-    /// tools, exclude, approve_all}`) and returns its id.
-    fn start_turn(&self, thread: &Thread, request: Value) -> Result<u64>;
-    /// Waits up to `timeout` for a turn's outcome: `{status: ok|error|cancelled, reply,
-    /// error, toolCalls}`, or `{status: "running"}` if it isn't done yet (once per turn).
-    async fn wait_turn(&self, id: u64, timeout: Duration) -> Result<Value>;
-    fn cancel_turn(&self, id: u64) -> bool;
-    /// Running turns, of one thread or all.
-    fn turns(&self, thread: Option<&Thread>) -> Value;
-    /// Asks the user in `thread` whether `action` may run.
-    async fn approve(&self, thread: &Thread, action: &str) -> Result<bool>;
-    /// Runs an agent tool for `thread` (hooks and approvals included): `(output, is_error)`.
-    async fn call_tool(&self, thread: &Thread, name: &str, input: &Value) -> Result<(String, bool)>;
-    /// One completion without tools on the configured model.
-    async fn llm(&self, prompt: &str, system: &str) -> Result<String>;
-    /// The calling extension's storage: JSON values by key, kept across restarts.
-    fn store(&self) -> Result<Arc<crate::db::Db>>;
+    /// Runs operation `op` for extension `ext`, whose permission was already checked.
+    async fn call(&self, ext: &str, op: &str, params: &Value) -> Result<Value>;
     /// What extensions offer changed (one was loaded, or registered something at runtime).
     fn changed(&self);
 }
@@ -368,13 +333,13 @@ impl Extensions {
         let (generation, state) = self.spawn(name, &launch).await;
         let ok = matches!(state, State::Running(_));
         let slot = Slot { name: name.to_string(), launch, state, generation, restarts: 0 };
-        let line = {
+        {
             let mut slots = self.slots.write().unwrap();
             slots.retain(|s| s.name != name);
             slots.push(slot);
             slots.sort_by(|a, b| a.name.cmp(&b.name));
-            self.describe(slots.iter().find(|s| s.name == name).unwrap(), &builtin_tools())
-        };
+        }
+        let line = self.line(name);
         if let Some(core) = self.core.read().unwrap().clone() {
             core.changed();
         }
@@ -399,20 +364,6 @@ impl Extensions {
         slots.push(Slot { name: name.to_string(), launch, state: State::Disabled, generation: 0, restarts: 0 });
         slots.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(())
-    }
-
-    /// `/extensions [enable|disable <name>]`: the status, after the change if one was asked for.
-    pub async fn command(&self, args: &str) -> String {
-        let r = match args.split_whitespace().collect::<Vec<_>>()[..] {
-            [] => return self.status(),
-            ["enable", name] => self.load(name).await.map(|_| ()),
-            ["disable", name] => self.disable(name).await,
-            _ => return "Usage: /extensions [enable|disable <name>]".into(),
-        };
-        match r {
-            Ok(()) => self.status(),
-            Err(e) => format!("{e:#}\n\n{}", self.status()),
-        }
     }
 
     fn running(&self) -> Vec<(String, Arc<Host>)> {
@@ -471,6 +422,17 @@ impl Extensions {
             .collect()
     }
 
+    /// The extension behind each extension tool (the first one, as in `tool_specs`).
+    pub fn tool_owners(&self) -> std::collections::HashMap<String, String> {
+        let mut owners = std::collections::HashMap::new();
+        for (name, h) in self.running() {
+            for t in &h.manifest().tools {
+                owners.entry(t.name.clone()).or_insert_with(|| name.clone());
+            }
+        }
+        owners
+    }
+
     pub fn has_tool(&self, name: &str) -> bool {
         self.running().iter().any(|(_, h)| h.manifest().tools.iter().any(|t| t.name == name))
     }
@@ -490,13 +452,13 @@ impl Extensions {
         self.running().iter().flat_map(|(_, h)| h.manifest().sections.clone()).map(|(_, text)| format!("\n\n{}", text.trim())).collect()
     }
 
-    /// `(name, description)` of extension commands, minus names in `reserved`.
-    pub fn commands(&self, reserved: &[&str]) -> Vec<(String, String)> {
+    /// `(extension, name, description)` of extension commands, minus names in `reserved`.
+    pub fn commands(&self, reserved: &[&str]) -> Vec<(String, String, String)> {
         let mut seen: HashSet<String> = reserved.iter().map(|s| s.to_string()).collect();
         self.running()
             .iter()
-            .flat_map(|(_, h)| h.manifest().commands.clone())
-            .filter(|(n, _)| seen.insert(n.clone()))
+            .flat_map(|(owner, h)| h.manifest().commands.iter().map(|(n, d)| (owner.clone(), n.clone(), d.clone())).collect::<Vec<_>>())
+            .filter(|(_, n, _)| seen.insert(n.clone()))
             .collect()
     }
 
@@ -507,49 +469,81 @@ impl Extensions {
         Some(host.request("command", params, COMMAND_TIMEOUT).await.map(|v| v.as_str().map(String::from)))
     }
 
-    fn describe(&self, slot: &Slot, builtin: &HashSet<String>) -> String {
-        match &slot.state {
-            State::Failed(e) => format!("❌ {} — {}", slot.name, e.trim()),
-            State::Disabled => format!("⏸ {} — disabled", slot.name),
-            State::Running(h) => {
-                let m = h.manifest();
-                let mut parts = Vec::new();
-                let list = |v: Vec<String>| v.join(", ");
-                if !m.tools.is_empty() {
-                    parts.push(format!("tools: {}", list(m.tools.iter().map(|t| t.name.clone()).collect())));
-                }
-                if !m.commands.is_empty() {
-                    parts.push(format!("commands: {}", list(m.commands.iter().map(|c| format!("/{}", c.0)).collect())));
-                }
-                if !m.events.is_empty() {
-                    parts.push(format!("hooks: {}", list(m.events.clone())));
-                }
-                if !m.needs.is_empty() {
-                    parts.push(format!("needs: {}", list(m.needs.clone())));
-                }
-                if !m.sections.is_empty() {
-                    parts.push(format!("prompt: {}", list(m.sections.iter().map(|(n, _)| n.clone()).collect())));
-                }
-                let replaced: Vec<_> = m.tools.iter().filter(|t| builtin.contains(&t.name)).map(|t| t.name.clone()).collect();
-                if !replaced.is_empty() {
-                    parts.push(format!("replaces built-in: {}", list(replaced)));
-                }
-                if parts.is_empty() {
-                    parts.push("registers nothing".into());
-                }
-                format!("✅ {} — {}", slot.name, parts.join("; "))
-            }
+    fn entry(&self, slot: &Slot, builtin: &HashSet<String>) -> Value {
+        let (state, error) = match &slot.state {
+            State::Running(_) => ("running", None),
+            State::Failed(e) => ("failed", Some(e.trim().to_string())),
+            State::Disabled => ("disabled", None),
+        };
+        let mut v = json!({"name": slot.name, "state": state, "error": error});
+        if let State::Running(h) = &slot.state {
+            let m = h.manifest();
+            let tools: Vec<&str> = m.tools.iter().map(|t| t.name.as_str()).collect();
+            v["tools"] = json!(tools);
+            v["replaces"] = json!(tools.iter().filter(|t| builtin.contains(**t)).collect::<Vec<_>>());
+            v["commands"] = json!(m.commands.iter().map(|c| &c.0).collect::<Vec<_>>());
+            v["hooks"] = json!(m.events);
+            v["needs"] = json!(m.needs);
+            v["sections"] = json!(m.sections.iter().map(|s| &s.0).collect::<Vec<_>>());
         }
+        v
     }
 
-    /// One line per extension, for `/extensions`.
-    pub fn status(&self) -> String {
+    fn line(&self, name: &str) -> String {
         let slots = self.slots.read().unwrap();
-        if slots.is_empty() {
-            return format!("No extensions. They live in `{}`.", self.dir.display());
-        }
+        slots.iter().find(|s| s.name == name).map(|s| status_line(&self.entry(s, &builtin_tools()))).unwrap_or_default()
+    }
+
+    /// Every extension in name order: `{name, state: running|failed|disabled, error, tools,
+    /// replaces, commands, hooks, needs, sections}`.
+    pub fn list(&self) -> Value {
         let builtin = builtin_tools();
-        slots.iter().map(|s| self.describe(s, &builtin)).collect::<Vec<_>>().join("\n")
+        Value::Array(self.slots.read().unwrap().iter().map(|s| self.entry(s, &builtin)).collect())
+    }
+
+    /// One line per extension, as `/extensions` shows them.
+    pub fn status(&self) -> String {
+        status(&self.list())
+    }
+}
+
+/// `/extensions`' text for a `list()`.
+pub fn status(list: &Value) -> String {
+    let all = list.as_array().cloned().unwrap_or_default();
+    if all.is_empty() {
+        return format!("No extensions. They live in `{}`.", dir().display());
+    }
+    all.iter().map(status_line).collect::<Vec<_>>().join("\n")
+}
+
+fn status_line(e: &Value) -> String {
+    let name = e["name"].as_str().unwrap_or("");
+    match e["state"].as_str() {
+        Some("failed") => format!("❌ {name} — {}", e["error"].as_str().unwrap_or("")),
+        Some("disabled") => format!("⏸ {name} — disabled"),
+        _ => {
+            let list = |k: &str, prefix: &str| -> Vec<String> {
+                e[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(|s| format!("{prefix}{s}")).collect()
+            };
+            let mut parts = Vec::new();
+            for (key, label, prefix) in [
+                ("tools", "tools", ""),
+                ("commands", "commands", "/"),
+                ("hooks", "hooks", ""),
+                ("needs", "needs", ""),
+                ("sections", "prompt", ""),
+                ("replaces", "replaces built-in", ""),
+            ] {
+                let items = list(key, prefix);
+                if !items.is_empty() {
+                    parts.push(format!("{label}: {}", items.join(", ")));
+                }
+            }
+            if parts.is_empty() {
+                parts.push("registers nothing".into());
+            }
+            format!("✅ {name} — {}", parts.join("; "))
+        }
     }
 }
 

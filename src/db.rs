@@ -216,8 +216,9 @@ impl Db {
         Ok((row.0 as u64, usage))
     }
 
-    /// `/usage`: totals of the chat's current session and today's across all chats.
-    pub fn usage_report(&self, chat_key: &str) -> Result<String> {
+    /// Totals of the chat's current session and of today across all chats:
+    /// `{session, today}`, each `{calls, input, output, cache_read, cache_write}`.
+    pub fn usage(&self, chat_key: &str) -> Result<serde_json::Value> {
         let session = self.latest_session(chat_key)?.unwrap_or_default();
         let midnight = chrono::Local::now()
             .date_naive()
@@ -225,17 +226,13 @@ impl Db {
             .and_local_timezone(chrono::Local)
             .earliest()
             .map_or(0, |t| t.timestamp());
-        let line = |(calls, u): (u64, Usage)| {
-            format!(
-                "{calls} calls · in {} · cache read {} · cache write {} · out {}",
-                u.input_tokens, u.cache_read_tokens, u.cache_write_tokens, u.output_tokens
-            )
+        let json = |(calls, u): (u64, Usage)| {
+            serde_json::json!({
+                "calls": calls, "input": u.input_tokens, "output": u.output_tokens,
+                "cache_read": u.cache_read_tokens, "cache_write": u.cache_write_tokens,
+            })
         };
-        Ok(format!(
-            "This session: {}\nToday, all chats: {}",
-            line(self.usage_total(Some(&session), 0)?),
-            line(self.usage_total(None, midnight)?)
-        ))
+        Ok(serde_json::json!({"session": json(self.usage_total(Some(&session), 0)?), "today": json(self.usage_total(None, midnight)?)}))
     }
 
     // ---- facts ---------------------------------------------------------
