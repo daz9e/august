@@ -40,6 +40,8 @@ const tools = new Map<string, any>();
 const commands = new Map<string, any>();
 const sections = new Map<string, string>();
 const needs = new Set<string>();
+const emits = new Map<string, { name: string; description: string; schema: unknown; observe: boolean }>();
+const replaces = new Set<string>();
 let settingsSchema: unknown = null;
 let started = false;
 let manifestQueued = false;
@@ -58,6 +60,8 @@ function manifest() {
     protocol: 2,
     needs: [...needs],
     settings: settingsSchema,
+    emits: [...emits.values()],
+    replaces: [...replaces],
   };
 }
 
@@ -104,7 +108,7 @@ async function runTurn(thread: Thread, turn: object): Promise<string> {
   throw new Error(out.status === "cancelled" ? "cancelled (/stop)" : out.error ?? out.status);
 }
 
-function context(thread: Thread | null, turn: Turn | null = null) {
+function context(thread: Thread | null, turn: Turn | null = null, depth = 0) {
   const need = (): Thread => {
     if (!thread) throw new Error("this call has no thread");
     return thread;
@@ -120,6 +124,7 @@ function context(thread: Thread | null, turn: Turn | null = null) {
     ask: async (question: string, options: string[], opts: { timeout?: number } = {}) => ask(need(), question, options, opts.timeout),
     callTool: (name: string, input: unknown = {}) => inThread("callTool", { name, input }),
     llm: (prompt: string, opts: { system?: string } = {}) => call("llm", { prompt, system: opts.system }),
+    emit: (event: string, data: object = {}) => call("emit", { event, data, thread, from_turn: turn?.id, depth }),
   };
 }
 
@@ -133,6 +138,15 @@ const api = {
     handlers.set(event, [...(handlers.get(event) ?? []), handler]);
     changed();
   },
+  defineEvent(event: string, spec: { description?: string; schema?: unknown; observe?: boolean } = {}) {
+    emits.set(event, { name: event, description: spec.description ?? "", schema: spec.schema ?? null, observe: spec.observe ?? false });
+    changed();
+  },
+  replaces(...extensions: string[]) {
+    extensions.forEach((e) => replaces.add(e));
+    changed();
+  },
+  emit: (event: string, data: object = {}) => call("emit", { event, data }),
   registerTool(tool: any) {
     if (!tool?.name || !tool?.description || typeof tool?.execute !== "function") {
       throw new Error("registerTool: name, description and execute are required");
@@ -226,7 +240,7 @@ const api = {
 };
 
 async function handle(method: string, params: any, signal: AbortSignal): Promise<unknown> {
-  const ctx = { ...context(params.ctx?.thread ?? null, params.ctx?.turn ?? null), signal };
+  const ctx = { ...context(params.ctx?.thread ?? null, params.ctx?.turn ?? null, params.ctx?.depth ?? 0), signal };
   switch (method) {
     case "event": {
       // Handlers run in order; each result is merged into the data the next one sees.

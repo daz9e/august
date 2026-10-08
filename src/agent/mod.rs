@@ -251,7 +251,7 @@ impl Agent {
     /// The thread for hooks outside a turn: `telegram:5#task1` -> `telegram:5`.
     fn chat_ref(&self) -> Origin {
         let thread = self.chat_key.split_once(':').map(|(m, id)| crate::messengers::Thread::new(m, id.split('#').next().unwrap_or(id)));
-        Origin { thread, turn: None }
+        Origin { thread, ..Default::default() }
     }
 
     /// Fires an observe-only extension event in the background.

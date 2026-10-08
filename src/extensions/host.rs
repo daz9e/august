@@ -42,6 +42,21 @@ pub struct Manifest {
     /// JSON Schema of its settings (`config/extensions/<name>.json` → `settings`); properties
     /// with `"secret": true` are shown masked.
     pub settings: Value,
+    /// Events it emits itself (`august.defineEvent`).
+    pub emits: Vec<EventDef>,
+    /// Extensions whose events it emits in their place (it took over their namespace).
+    pub replaces: Vec<String>,
+}
+
+/// An event an extension declares; others subscribe to it as `<namespace>:<name>`.
+#[derive(Debug, Clone)]
+pub struct EventDef {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema of its data (null: any object).
+    pub schema: Value,
+    /// Handlers only observe (run at once, in the background) rather than form a chain.
+    pub observe: bool,
 }
 
 /// Threads of August's calls into the extension that are still running.
@@ -313,5 +328,17 @@ fn parse_manifest(params: &Value) -> Manifest {
             .iter()
             .filter_map(|c| Some((c["name"].as_str()?.to_string(), c["text"].as_str().unwrap_or_default().to_string())))
             .collect(),
+        emits: list("emits")
+            .iter()
+            .filter_map(|e| {
+                Some(EventDef {
+                    name: e["name"].as_str()?.to_string(),
+                    description: e["description"].as_str().unwrap_or_default().to_string(),
+                    schema: e["schema"].clone(),
+                    observe: e["observe"] == true,
+                })
+            })
+            .collect(),
+        replaces: list("replaces").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
     }
 }

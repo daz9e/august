@@ -182,7 +182,7 @@ impl Gateway {
     }
 
     async fn run_turn(self: &Arc<Self>, thread: Thread, tag: TurnTag, cancel: Arc<Notify>, req: TurnRequest) -> Outcome {
-        let origin = Origin { thread: Some(thread.clone()), turn: Some(tag.clone()) };
+        let origin = Origin { thread: Some(thread.clone()), turn: Some(tag.clone()), ..Default::default() };
         let ctx = ToolCtx {
             workspace: self.workspace.clone(),
             db: self.db.clone(),
@@ -271,7 +271,7 @@ impl Gateway {
             "toolCalls": outcome.tool_calls.len(),
             "unattended": tag.mode != TurnMode::Visible,
         });
-        let origin = Origin { thread: Some(thread.clone()), turn: Some(tag.clone()) };
+        let origin = Origin { thread: Some(thread.clone()), turn: Some(tag.clone()), ..Default::default() };
         let (me, thread) = (self.clone(), thread.clone());
         *self.turns.ending.lock().unwrap().entry(thread.clone()).or_default() += 1;
         tokio::spawn(async move {

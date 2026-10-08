@@ -108,6 +108,19 @@ one sees the merged result, and `block` / `handled` ends the chain. `turn_end`,
 `config_changed` and `stop` only observe: every handler gets them at once, the results are
 ignored, and all but `stop` run in the background.
 
+Your own events: extensions hook each other the same way. Declare one with
+`august.defineEvent("done", { description, schema, observe })` and run it with
+`await ctx.emit("done", data)` (or `august.emit` outside a handler); others hook it as
+`august.on("<your name>:done", ...)`. A chain event resolves to the data its handlers leave
+(read `block` and the fields you allow them to change); an `observe` one returns at once.
+The data must be an object matching `schema` (top-level `required` and `type`s are checked).
+Keep dependencies soft: emit whether anyone listens or not, and hook another extension's
+event only for extra behaviour — nothing arrives while it isn't running.
+`august.extensions.list()` shows every extension's `events` with their descriptions and
+schemas. An extension that stands in for another (your own `compaction`) calls
+`august.replaces("compaction")` and emits `compaction:<event>`, so existing hooks keep
+working.
+
 `ctx.thread` is the thread the call belongs to: `{ messenger, id }`, e.g.
 `{ messenger: "telegram", id: "123" }` or a terminal window `{ messenger: "cli", id: "1" }`.
 

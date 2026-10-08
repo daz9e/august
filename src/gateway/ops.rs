@@ -65,6 +65,7 @@ pub const OPS: &[Op] = &[
     op("settings_set", None, "Set {path, value} in the calling extension's settings (null deletes)"),
     op("config_get", Some("config"), "A setting of any unit at {path} (`august.model`, `extensions.web.settings`); secrets masked"),
     op("config_set", Some("config"), "Change the setting at {path} to {value} (null deletes); `enabled` and `origin` are the user's"),
+    op("emit", None, "Run your declared event {event, data} through its handlers; returns the data they leave (an observed event: at once)"),
     op("store_get", None, "The caller's stored value at {key}"),
     op("store_set", None, "Store {key, value} (null deletes)"),
     op("store_list", None, "The caller's stored entries under {prefix}"),
@@ -290,6 +291,11 @@ impl Gateway {
                 self.set_config(path, p["value"].clone()).await?;
                 Value::Null
             }
+            "emit" => {
+                let turn = p["from_turn"].as_u64().and_then(|id| self.turns.tag(id));
+                let origin = extensions::Origin { thread: thread(p).ok(), turn, depth: p["depth"].as_u64().unwrap_or(0) as u32 };
+                self.ext.emit_own(ext, arg("event")?, p["data"].clone(), origin).await?
+            }
             "store_get" => match self.db.kv_get(ext, arg("key")?)? {
                 Some(v) => serde_json::from_str(&v).unwrap_or(Value::Null),
                 None => Value::Null,
@@ -423,7 +429,7 @@ impl Gateway {
     /// The thread of a call, and the turn it is made from (`from_turn`, which the SDKs send).
     fn origin(&self, p: &Value) -> Result<extensions::Origin> {
         let turn = p["from_turn"].as_u64().and_then(|id| self.turns.tag(id));
-        Ok(extensions::Origin { thread: Some(thread(p)?), turn })
+        Ok(extensions::Origin { thread: Some(thread(p)?), turn, ..Default::default() })
     }
 
     async fn call_tool(&self, origin: extensions::Origin, name: &str, input: &Value, caller: &str) -> Result<(String, bool)> {

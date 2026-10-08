@@ -73,7 +73,7 @@ impl Gateway {
         let renderer = tokio::spawn(render(channel.clone(), chat.to_string(), rx));
         self.live.lock().unwrap().insert(id.clone(), tx.clone());
 
-        let origin = crate::extensions::Origin { thread: Some(id.clone()), turn: Some(tag.clone()) };
+        let origin = crate::extensions::Origin { thread: Some(id.clone()), turn: Some(tag.clone()), ..Default::default() };
         let ctx = ToolCtx {
             workspace: self.workspace.clone(),
             db: self.db.clone(),

@@ -137,11 +137,12 @@ fn status_line(e: &Value) -> String {
                 ("tools", "tools", ""),
                 ("commands", "commands", "/"),
                 ("hooks", "hooks", ""),
+                ("events", "emits", ""),
                 ("needs", "needs", ""),
                 ("sections", "prompt", ""),
                 ("replaces", "replaces built-in", ""),
             ] {
-                let items: Vec<String> = e[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(|s| format!("{prefix}{s}")).collect();
+                let items: Vec<String> = e[key].as_array().into_iter().flatten().filter_map(|x| x.as_str().or(x["name"].as_str())).map(|s| format!("{prefix}{s}")).collect();
                 if !items.is_empty() {
                     parts.push(format!("{label}: {}", items.join(", ")));
                 }

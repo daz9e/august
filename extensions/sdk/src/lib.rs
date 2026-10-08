@@ -134,6 +134,8 @@ pub struct Ctx {
     pub thread: Option<Thread>,
     /// The turn it runs in.
     pub turn: Option<Turn>,
+    /// How many extension events this call is nested in (sent back with `emit`).
+    depth: u64,
 }
 
 impl Ctx {
@@ -153,6 +155,16 @@ impl Ctx {
     /// Runs operation `op` of the core's table for this thread (`thread` filled in).
     pub async fn call(&self, op: &str, params: Value) -> Result<Value> {
         self.in_thread(op, if params.is_object() { params } else { json!({}) }).await
+    }
+
+    /// Runs a declared event (`August::define_event`) through its handlers for this thread
+    /// and turn; returns the data they leave (an observed event: `data`, at once).
+    pub async fn emit(&self, event: &str, data: Value) -> Result<Value> {
+        let mut params = json!({"event": event, "data": data, "thread": self.thread, "depth": self.depth});
+        if let Some(turn) = &self.turn {
+            params["from_turn"] = json!(turn.id);
+        }
+        self.link.call("emit", params).await
     }
 
     /// `messenger:id` of the thread, or `none`.
@@ -232,6 +244,9 @@ struct Inner {
     settings: RwLock<Value>,
     needs: RwLock<Vec<String>>,
     timeouts: RwLock<HashMap<String, u64>>,
+    /// Events it declared (`define_event`), as the manifest lists them.
+    emits: RwLock<Vec<Value>>,
+    replaces: RwLock<Vec<String>>,
     /// Calls from August still running, by request id, so a cancel can stop them.
     running: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
     /// Set once `ready` was sent; later changes send a new manifest.
@@ -258,6 +273,8 @@ impl August {
             link: Arc::new(Link { out: Mutex::new(std::io::stdout()), next_id: AtomicU64::new(1), waiting: Mutex::default() }),
             tools: RwLock::default(),
             commands: RwLock::default(),
+            emits: RwLock::default(),
+            replaces: RwLock::default(),
             hooks: RwLock::default(),
             sections: RwLock::default(),
             settings: RwLock::new(Value::Null),
@@ -437,6 +454,28 @@ impl August {
         self.changed();
     }
 
+    /// Declares an event this extension emits; others hook it as `<name>:<event>`. `schema`:
+    /// JSON Schema of the data (null: any object). `observe`: handlers only watch; otherwise
+    /// they form a chain and may change the data or `block`.
+    pub fn define_event(&self, event: &str, description: &str, schema: Value, observe: bool) {
+        let mut emits = self.0.emits.write().unwrap();
+        emits.retain(|e| e["name"] != event);
+        emits.push(json!({"name": event, "description": description, "schema": schema, "observe": observe}));
+        drop(emits);
+        self.changed();
+    }
+
+    /// Takes over the event namespace of extensions this one stands in for.
+    pub fn replaces(&self, extensions: &[&str]) {
+        self.0.replaces.write().unwrap().extend(extensions.iter().map(|e| e.to_string()));
+        self.changed();
+    }
+
+    /// Runs a declared event outside any thread (inside a handler use `Ctx::emit`).
+    pub async fn emit(&self, event: &str, data: Value) -> Result<Value> {
+        self.0.link.call("emit", json!({"event": event, "data": data})).await
+    }
+
     /// How long August waits for this extension's `event` hooks (default 10 s; e.g. longer for
     /// a `tool_call` hook that asks the user).
     pub fn hook_timeout(&self, event: &str, timeout: Duration) {
@@ -473,6 +512,8 @@ impl August {
             "protocol": 2,
             "sections": self.0.sections.read().unwrap().iter().map(|(n, t)| json!({"name": n, "text": t})).collect::<Vec<_>>(),
             "settings": *self.0.settings.read().unwrap(),
+            "emits": *self.0.emits.read().unwrap(),
+            "replaces": *self.0.replaces.read().unwrap(),
         })
     }
 
@@ -530,7 +571,8 @@ impl August {
                 let task = tokio::spawn(async move {
                     let thread = serde_json::from_value(msg["params"]["ctx"]["thread"].clone()).ok();
                     let turn = serde_json::from_value(msg["params"]["ctx"]["turn"].clone()).ok();
-                    let ctx = Ctx { link: link.clone(), thread, turn };
+                    let depth = msg["params"]["ctx"]["depth"].as_u64().unwrap_or(0);
+                    let ctx = Ctx { link: link.clone(), thread, turn, depth };
                     let reply = match me.handle(&method, &msg["params"], ctx).await {
                         Ok(result) => json!({"id": msg["id"], "result": result}),
                         Err(e) => {

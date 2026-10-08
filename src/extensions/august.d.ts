@@ -117,6 +117,8 @@ declare module "august" {
     origin: "default" | "user" | "agent";
     /** Only while running: what it registered, and the built-in tools it replaces. */
     tools?: string[]; replaces?: string[]; commands?: string[]; hooks?: string[]; needs?: Permission[]; sections?: string[];
+    /** Events it emits, as others hook them. */
+    events?: { name: string; description: string; schema: object | null; observe: boolean }[];
   };
 
   export interface Context {
@@ -143,6 +145,8 @@ declare module "august" {
     callTool(name: string, input?: object): Promise<{ output: string; isError: boolean }>;
     /** One completion on the configured model, without tools; returns the text. */
     llm(prompt: string, opts?: { system?: string }): Promise<string>;
+    /** `august.emit` for this thread and turn (their handlers see both). */
+    emit<T extends object = any>(event: string, data?: object): Promise<T>;
   }
 
   export type Block =
@@ -315,6 +319,26 @@ declare module "august" {
       handler: (data: Events[E], ctx: Context) => Results[E] | void | Promise<Results[E] | void>,
       opts?: { timeout?: number },
     ): void;
+    /** Another extension's event, `<namespace>:<name>` (see `defineEvent`; `extensions.list()`
+     *  shows each one's `events` with their schemas). Nothing arrives while it isn't running. */
+    on(
+      event: `${string}:${string}`,
+      handler: (data: any, ctx: Context) => object | void | Promise<object | void>,
+      opts?: { timeout?: number },
+    ): void;
+    /** Declares an event this extension emits, so others can hook it as `<name>:<event>`
+     *  (`<name>` is this extension's). `schema`: JSON Schema of the data (top-level `required`
+     *  and property `type`s are checked on emit). `observe`: handlers only watch (run at once,
+     *  in the background); otherwise they form a chain in the user's order and may change the
+     *  data or `block`. */
+    defineEvent(event: string, spec?: { description?: string; schema?: object; observe?: boolean }): void;
+    /** Takes over the namespace of extensions this one stands in for (e.g. your own
+     *  `compaction`): its events go out as `compaction:<event>`, and the original can't emit
+     *  them any more. Emit them as `compaction:<event>`. */
+    replaces(...extensions: string[]): void;
+    /** Runs a declared event through its handlers; resolves to the data they leave (an
+     *  observed event: to `data`, at once). Inside a handler use `ctx.emit`, so loops are caught. */
+    emit<T extends object = any>(event: string, data?: object): Promise<T>;
     /** May be called any time; tools added or removed after setup show up from the next model call. */
     registerTool<P = any>(tool: Tool<P>): void;
     unregisterTool(name: string): void;

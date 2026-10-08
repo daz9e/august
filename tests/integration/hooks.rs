@@ -297,3 +297,92 @@ async fn turn_event_streams_what_a_visible_turn_does_in_order() {
     }
     assert!(chat.texts().iter().any(|t| t == "tool:read,step,text:done"), "{:?}", chat.texts());
 }
+
+// `meter` declares two events; `editor` changes one, `watcher` observes the other. Nobody
+// knows anyone else: they only share the declared contract.
+const METER: &str = r#"
+export default function (august) {
+  august.defineEvent("status", {
+    description: "Context size before a turn; handlers may add a note or block",
+    schema: { type: "object", required: ["tokens"], properties: { tokens: { type: "integer" } } },
+  });
+  august.defineEvent("done", { description: "A measurement finished", observe: true });
+  august.defineEvent("ping", { description: "Re-emits itself" });
+  august.on("meter:ping", async ({ n }, ctx) => {
+    try { return await ctx.emit("ping", { n: n + 1 }); } catch (e) { return { n, error: e.message }; }
+  });
+  const attempt = async (f) => { try { return JSON.stringify(await f()); } catch (e) { return `error: ${e.message}`; } };
+  august.registerCommand("meter", async (_, ctx) => {
+    const r = await ctx.emit("status", { tokens: 5 });
+    await ctx.emit("done", { tokens: r.tokens });
+    return r.block ? `blocked: ${r.block}` : `note: ${r.note}`;
+  });
+  august.registerCommand("bad", async (_, ctx) => attempt(() => ctx.emit("status", { tokens: "many" })));
+  august.registerCommand("undeclared", async (_, ctx) => attempt(() => ctx.emit("nope", {})));
+  august.registerCommand("loop", async (_, ctx) => attempt(() => ctx.emit("ping", { n: 0 })));
+}
+"#;
+
+const EDITOR: &str = r#"
+export default function (august) {
+  august.on("meter:status", ({ tokens }) => (tokens > 100 ? { block: "too big" } : { note: `${tokens} tokens seen` }));
+  august.registerCommand("fake", async () => {
+    try { await august.emit("meter:status", { tokens: 1 }); return "emitted"; } catch (e) { return `error: ${e.message}`; }
+  });
+}
+"#;
+
+const WATCHER: &str = r#"
+export default function (august) {
+  august.on("meter:done", ({ tokens }, ctx) => ctx.send(`watched done: ${tokens}`));
+}
+"#;
+
+#[tokio::test]
+async fn extensions_declare_events_others_hook() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("ok"))).await;
+    let home = [("extensions/meter/index.ts", METER), ("extensions/editor/index.ts", EDITOR), ("extensions/watcher/index.ts", WATCHER)];
+    let gw = august(&fake, Setup { home: &home, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+
+    // A chain hands back what its handlers changed; an observed event reaches its watchers.
+    chat.ask("/meter", "note: 5 tokens seen").await;
+    chat.wait_for("watched done: 5").await;
+
+    // The contract holds: the declared schema, declared names only, own namespace only.
+    chat.ask("/bad", "error: `meter:status`: `tokens` must be integer").await;
+    chat.ask("/undeclared", "error: declare `nope` first").await;
+    chat.ask("/fake", "error: events `meter:*` belong to meter").await;
+
+    // Handlers emitting each other end at the depth limit instead of hanging.
+    let looped = chat.ask("/loop", "nest deeper than 8").await;
+    assert!(looped.contains(r#""n":7"#), "{looped}");
+
+    // Who emits what is visible.
+    chat.ask("/extensions", "emits: meter:status, meter:done, meter:ping").await;
+}
+
+// A stand-in for `meter` takes over its namespace: `editor`'s hook keeps working unchanged.
+const METER2: &str = r#"
+export default function (august) {
+  august.replaces("meter");
+  august.defineEvent("status", { description: "Context size before a turn" });
+  august.registerCommand("meter2", async (_, ctx) => `note: ${(await ctx.emit("meter:status", { tokens: 7 })).note}`);
+}
+"#;
+
+#[tokio::test]
+async fn a_stand_in_takes_over_an_extensions_events() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("ok"))).await;
+    let home = [("extensions/meter/index.ts", METER), ("extensions/meter2/index.ts", METER2), ("extensions/editor/index.ts", EDITOR)];
+    let gw = august(&fake, Setup { home: &home, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("/meter2", "note: 7 tokens seen").await;
+    chat.ask("/meter", "belong to meter2").await;
+}

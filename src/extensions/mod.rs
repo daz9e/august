@@ -38,6 +38,8 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_RESTARTS: u32 = 3;
 /// Events whose handlers only observe: what they return is ignored.
 const OBSERVERS: &[&str] = &["turn_end", "turn_settled", "turn_event", "llm_result", "session_changed", "compaction", "reaction", "extension_state", "config_changed", "stop"];
+/// How deep events extensions emit may nest (a handler emitting another, ...).
+const MAX_DEPTH: u32 = 8;
 const ENTRIES: [&str; 3] = ["index.ts", "index.js", "index.mjs"];
 
 /// What extensions can ask of August: the operations of the core's table.
@@ -66,11 +68,13 @@ pub struct AgentOpts {
 pub struct Origin {
     pub thread: Option<Thread>,
     pub turn: Option<crate::agent::TurnTag>,
+    /// How many extension events this call is nested in.
+    pub depth: u32,
 }
 
 impl Origin {
     pub fn thread(thread: Thread) -> Self {
-        Self { thread: Some(thread), turn: None }
+        Self { thread: Some(thread), ..Default::default() }
     }
 }
 
@@ -461,8 +465,9 @@ impl Extensions {
     /// unchanged. Failing handlers are skipped.
     pub async fn emit(&self, event: &str, mut data: Value, chat: &Origin) -> Value {
         let mut hosts: Vec<_> = self.running().into_iter().filter(|(_, h)| h.manifest().events.iter().any(|e| e == event)).collect();
-        if OBSERVERS.contains(&event) {
-            futures_util::future::join_all(hosts.iter().map(|(n, h)| hook(n, h, event, &data, chat))).await;
+        let observe = self.observes(event);
+        if observe {
+            futures_util::future::join_all(hosts.iter().map(|(n, h)| hook(n, h, event, &data, chat, observe))).await;
             return data;
         }
         // ponytail: reads august.json on every chained event; cache it if that ever shows up.
@@ -470,7 +475,7 @@ impl Extensions {
         let order: Vec<&str> = order.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
         hosts.sort_by_key(|(n, _)| order.iter().position(|o| o == n).unwrap_or(usize::MAX));
         for (name, host) in hosts {
-            if let (Some(Value::Object(changes)), Some(d)) = (hook(&name, &host, event, &data, chat).await, data.as_object_mut()) {
+            if let (Some(Value::Object(changes)), Some(d)) = (hook(&name, &host, event, &data, chat, false).await, data.as_object_mut()) {
                 d.extend(changes);
             }
             if stopped(&data) {
@@ -478,6 +483,52 @@ impl Extensions {
             }
         }
         data
+    }
+
+    /// Whether `event`'s handlers only observe: one of the core's observers, or an extension
+    /// event declared `observe`.
+    fn observes(&self, event: &str) -> bool {
+        OBSERVERS.contains(&event) || self.declared(event).is_some_and(|d| d.observe)
+    }
+
+    /// The extension whose events go by `namespace`: one that replaces it, else its own.
+    fn owner(&self, namespace: &str) -> Option<(String, Arc<Host>)> {
+        let running = self.running();
+        let replacer = running.iter().find(|(_, h)| h.manifest().replaces.iter().any(|r| r == namespace));
+        replacer.or_else(|| running.iter().find(|(n, _)| n == namespace)).cloned()
+    }
+
+    /// The declaration of extension event `namespace:name`.
+    fn declared(&self, event: &str) -> Option<host::EventDef> {
+        let (namespace, name) = event.split_once(':')?;
+        let (_, host) = self.owner(namespace)?;
+        host.manifest().emits.iter().find(|d| d.name == name).cloned()
+    }
+
+    /// Extension `caller` emits `event` (`name`, or `namespace:name` for a namespace it
+    /// replaces): its data is checked against the declared schema and run through the
+    /// handlers of `<namespace>:<name>`. A chain returns the data the handlers leave; an
+    /// observed event returns at once.
+    pub async fn emit_own(&self, caller: &str, event: &str, data: Value, mut origin: Origin) -> Result<Value> {
+        let (namespace, name) = event.split_once(':').unwrap_or((caller, event));
+        match self.owner(namespace) {
+            Some((owner, _)) if owner == caller => {}
+            Some((owner, _)) => anyhow::bail!("events `{namespace}:*` belong to {owner}"),
+            None => anyhow::bail!("events `{namespace}:*` belong to {namespace}, which isn't running"),
+        }
+        let full = format!("{namespace}:{name}");
+        let def = self.declared(&full).ok_or_else(|| anyhow::anyhow!("declare `{name}` first (august.defineEvent)"))?;
+        check(&def.schema, &data).map_err(|e| anyhow::anyhow!("`{full}`: {e}"))?;
+        anyhow::ensure!(origin.depth < MAX_DEPTH, "`{full}`: events nest deeper than {MAX_DEPTH}; do handlers emit each other in a loop?");
+        origin.depth += 1;
+        if !def.observe {
+            return Ok(self.emit(&full, data, &origin).await);
+        }
+        if let Some(me) = self.me.upgrade() {
+            let echo = data.clone();
+            tokio::spawn(async move { me.emit(&full, echo, &origin).await });
+        }
+        Ok(data)
     }
 
     /// Tools of all running extensions; a name an earlier extension took is skipped.
@@ -563,6 +614,13 @@ impl Extensions {
             v["hooks"] = json!(m.events);
             v["needs"] = json!(m.needs);
             v["sections"] = json!(m.sections.iter().map(|s| &s.0).collect::<Vec<_>>());
+            let namespace = m.replaces.first().unwrap_or(&slot.name);
+            v["events"] = Value::Array(
+                m.emits
+                    .iter()
+                    .map(|d| json!({"name": format!("{namespace}:{}", d.name), "description": d.description, "schema": d.schema, "observe": d.observe}))
+                    .collect(),
+            );
         }
         v
     }
@@ -573,7 +631,7 @@ impl Extensions {
     }
 
     /// Every extension in name order: `{name, state: running|failed|disabled, error, tools,
-    /// replaces, commands, hooks, needs, sections}`.
+    /// replaces, commands, hooks, needs, sections, events}`.
     pub fn list(&self) -> Value {
         let builtin = builtin_tools();
         Value::Array(self.slots.read().unwrap().iter().map(|s| self.entry(s, &builtin)).collect())
@@ -601,13 +659,14 @@ fn status_line(e: &Value) -> String {
         Some("disabled") => format!("⏸ {name} — disabled"),
         _ => {
             let list = |k: &str, prefix: &str| -> Vec<String> {
-                e[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(|s| format!("{prefix}{s}")).collect()
+                e[k].as_array().into_iter().flatten().filter_map(|x| x.as_str().or(x["name"].as_str())).map(|s| format!("{prefix}{s}")).collect()
             };
             let mut parts = Vec::new();
             for (key, label, prefix) in [
                 ("tools", "tools", ""),
                 ("commands", "commands", "/"),
                 ("hooks", "hooks", ""),
+                ("events", "emits", ""),
                 ("needs", "needs", ""),
                 ("sections", "prompt", ""),
                 ("replaces", "replaces built-in", ""),
@@ -636,12 +695,12 @@ async fn shut_down(hosts: Vec<Arc<Host>>) {
 }
 
 /// One extension's handler of `event`; `None` when it failed.
-async fn hook(name: &str, host: &Host, event: &str, data: &Value, chat: &Origin) -> Option<Value> {
+async fn hook(name: &str, host: &Host, event: &str, data: &Value, chat: &Origin, observe: bool) -> Option<Value> {
     let params = json!({"name": event, "data": data, "ctx": ctx_json(chat)});
     let default = match event {
         "message_in" => MESSAGE_TIMEOUT,
         // Nobody waits for these: let them finish what they started (a fork, a judge).
-        _ if OBSERVERS.contains(&event) && event != "stop" => OBSERVER_TIMEOUT,
+        _ if observe && event != "stop" => OBSERVER_TIMEOUT,
         _ => EVENT_TIMEOUT,
     };
     let timeout = host.manifest().timeouts.get(event).copied().map(Duration::from_millis).unwrap_or(default);
@@ -652,5 +711,31 @@ fn ctx_json(origin: &Origin) -> Value {
     json!({
         "thread": origin.thread.as_ref().map(|t| json!({"messenger": t.messenger, "id": t.id})),
         "turn": origin.turn,
+        "depth": origin.depth,
     })
+}
+
+/// Checks event data against its declared schema.
+// ponytail: only the top level (required keys, property types); a full JSON Schema validator
+// when contracts need nested checks.
+fn check(schema: &Value, data: &Value) -> Result<()> {
+    let Some(fields) = data.as_object() else { anyhow::bail!("event data must be an object") };
+    for key in schema["required"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        anyhow::ensure!(fields.contains_key(key), "missing `{key}`");
+    }
+    for (key, value) in fields {
+        let Some(kind) = schema["properties"][key]["type"].as_str() else { continue };
+        let ok = match kind {
+            "string" => value.is_string(),
+            "number" => value.is_number(),
+            "integer" => value.is_i64() || value.is_u64(),
+            "boolean" => value.is_boolean(),
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "null" => value.is_null(),
+            _ => true,
+        };
+        anyhow::ensure!(ok, "`{key}` must be {kind}");
+    }
+    Ok(())
 }
