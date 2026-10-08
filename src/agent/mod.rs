@@ -149,6 +149,7 @@ impl Agent {
     /// Starts a new conversation; the old one stays searchable.
     pub fn reset(&mut self) -> Result<()> {
         let previous = std::mem::replace(&mut self.session, self.db.new_session(&self.chat_key)?);
+        self.log("session", json!({"reason": "new", "previous": previous}), None);
         self.notify_ext("session_start", json!({"previous": previous, "session": self.session}), self.chat_ref());
         self.history.clear();
         self.snapshot = None;
@@ -159,11 +160,21 @@ impl Agent {
         Ok(())
     }
 
+    /// Records `kind` in this session's journal, for turn `turn` if inside one.
+    fn log(&self, kind: &str, data: Value, turn: Option<&TurnTag>) {
+        let mut e = crate::db::Entry::new(kind, data);
+        e.session = Some(self.session.clone());
+        e.turn = turn.map(|t| t.id);
+        e.source = turn.map(|t| t.source.clone().unwrap_or_else(|| "user".into()));
+        self.db.journal(&e);
+    }
+
     /// Continues another stored session in this chat (the chat is bound to it from now on).
     pub fn switch(&mut self, session: &str) -> Result<()> {
         let history = self.db.live(session)?;
         self.db.bind(&self.chat_key, session)?;
-        self.session = session.to_string();
+        let previous = std::mem::replace(&mut self.session, session.to_string());
+        self.log("session", json!({"reason": "switch", "previous": previous}), None);
         self.stored = history.len();
         self.turn_start = history.len();
         self.history = history;
@@ -277,6 +288,7 @@ impl Agent {
             "usage": {"inputTokens": u.input_tokens, "outputTokens": u.output_tokens,
                       "cacheReadTokens": u.cache_read_tokens, "cacheWriteTokens": u.cache_write_tokens},
         });
+        self.log("assistant", data.clone(), ctx.origin.turn.as_ref());
         self.notify_ext("llm_result", data, ctx.origin.clone());
         Ok(completion)
     }
@@ -344,6 +356,7 @@ impl Agent {
                 self.turn_system = Some(s.to_string());
             }
         }
+        self.log("user_message", json!({"text": text}), ctx.origin.turn.as_ref());
         let result = self.run_turn_inner(&text, attachments, ctx, on_event).await;
         self.turn_system = None;
         match &result {

@@ -25,6 +25,29 @@ pub struct Hit {
     pub at: i64,
 }
 
+/// One journal entry (see `Db::journal`).
+#[derive(Debug, Clone, Default)]
+pub struct Entry {
+    pub session: Option<String>,
+    pub turn: Option<u64>,
+    pub kind: String,
+    /// Who the turn or message came from (`user`, `ext:goal`, ...).
+    pub source: Option<String>,
+    /// Who did it (`model`, `ext:<name>`, `user`).
+    pub caller: Option<String>,
+    pub data: serde_json::Value,
+}
+
+impl Entry {
+    pub fn new(kind: &str, data: serde_json::Value) -> Self {
+        Self { kind: kind.into(), data, ..Default::default() }
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -71,6 +94,17 @@ CREATE TABLE IF NOT EXISTS facts (
     text TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS journal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    session TEXT,
+    turn INTEGER,
+    kind TEXT NOT NULL,
+    source TEXT,
+    caller TEXT,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS journal_session ON journal(session, id);
 CREATE TABLE IF NOT EXISTS kv (
     scope TEXT NOT NULL,
     key TEXT NOT NULL,
@@ -228,6 +262,50 @@ impl Db {
             conn.execute("UPDATE sessions SET name = ?2 WHERE id = ?1", params![id, name])?;
         }
         Ok(())
+    }
+
+    /// The session `chat_key` is bound to now, if any.
+    pub fn current_session(&self, chat_key: &str) -> Result<Option<String>> {
+        self.latest_session(chat_key)
+    }
+
+    /// Appends to the journal: what happened, in which session and turn, on whose behalf.
+    pub fn journal(&self, e: &Entry) -> Result<i64> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO journal (ts, session, turn, kind, source, caller, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![now_ms(), e.session, e.turn.map(|t| t as i64), e.kind, e.source, e.caller, e.data.to_string()],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Journal entries after `since` (an entry id), oldest first, at most `limit` (the newest
+    /// ones then): of one session or all, of some kinds or all.
+    pub fn history(&self, session: Option<&str>, kinds: &[String], since: i64, limit: usize) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn();
+        let kinds = serde_json::to_string(kinds)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, session, turn, kind, source, caller, data FROM journal
+             WHERE id > ?1 AND (?2 IS NULL OR session = ?2)
+               AND (json_array_length(?3) = 0 OR kind IN (SELECT value FROM json_each(?3)))
+             ORDER BY id DESC LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(params![since, session, kinds, limit as i64], |r| {
+            let data: String = r.get(7)?;
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "ts": r.get::<_, i64>(1)?,
+                "session": r.get::<_, Option<String>>(2)?,
+                "turn": r.get::<_, Option<i64>>(3)?,
+                "kind": r.get::<_, String>(4)?,
+                "source": r.get::<_, Option<String>>(5)?,
+                "caller": r.get::<_, Option<String>>(6)?,
+                "data": serde_json::from_str::<serde_json::Value>(&data).unwrap_or_default(),
+            }))
+        })?;
+        let mut out: Vec<_> = rows.collect::<rusqlite::Result<_>>()?;
+        out.reverse();
+        Ok(out)
     }
 
     /// A session's settings (`{model, system, tools}`, each optional).
@@ -436,6 +514,11 @@ impl crate::agent::SessionStore for Db {
     }
     fn live(&self, session: &str) -> Result<Vec<Message>> {
         Db::live(self, session)
+    }
+    fn journal(&self, entry: &Entry) {
+        if let Err(e) = Db::journal(self, entry) {
+            eprintln!("journal: could not record `{}`: {e:#}", entry.kind);
+        }
     }
     fn bind(&self, chat_key: &str, session: &str) -> Result<()> {
         Db::bind(self, chat_key, session)

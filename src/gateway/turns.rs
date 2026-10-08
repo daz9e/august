@@ -160,6 +160,7 @@ impl Gateway {
             bail!("an extension starts quiet, fork or fresh turns; to hand the thread a message, use prompt");
         }
         let (tag, cancel) = self.turns.begin(&thread, mode, req.source.clone(), req.parent);
+        self.journal_turn(&thread, &tag, "turn_start", json!({"mode": tag.mode, "parent": tag.parent, "text": req.text}));
         let (tx, rx) = oneshot::channel();
         self.turns.outcomes.lock().unwrap().insert(tag.id, rx);
         let (me, id) = (self.clone(), tag.id);
@@ -263,9 +264,19 @@ impl Gateway {
         }
     }
 
+    /// Records a turn's start or end in the journal of the thread's session.
+    pub(super) fn journal_turn(&self, thread: &Thread, tag: &TurnTag, kind: &str, data: Value) {
+        let mut e = crate::db::Entry::new(kind, data);
+        e.session = self.db.current_session(&thread.key()).ok().flatten();
+        e.turn = Some(tag.id);
+        e.source = Some(tag.source.clone().unwrap_or_else(|| "user".into()));
+        crate::agent::SessionStore::journal(&*self.db, &e);
+    }
+
     /// Tells extensions a turn ended (in the background), then, once their `turn_end`
     /// handlers are done (they may start the next turn), whether the thread settled.
     pub(super) fn turn_ended(self: &Arc<Self>, thread: &Thread, tag: &TurnTag, text: &str, outcome: &Outcome) {
+        self.journal_turn(thread, tag, "turn_end", json!({"status": outcome.status, "error": outcome.error}));
         let data = json!({
             "text": text,
             "reply": outcome.reply,

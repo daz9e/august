@@ -61,6 +61,7 @@ impl Agent {
         self.last_input_tokens = 0;
         self.snapshot = None; // the cached prefix is gone anyway; pick up new facts
         let after = self.estimate_tokens();
+        self.log("compaction", serde_json::json!({"before": before, "after": after}), None);
         self.notify_ext("compaction", serde_json::json!({"before": before, "after": after}), self.chat_ref());
         Ok(Some((before, after)))
     }

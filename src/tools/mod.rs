@@ -154,6 +154,16 @@ impl ToolRegistry {
     /// model can react to them.
     /// `id` is the model's id of the call (`None` for calls from elsewhere).
     pub async fn call(&self, id: Option<&str>, name: &str, input: &Value, ctx: &ToolCtx) -> (String, bool) {
+        let (output, is_error) = self.call_hooked(id, name, input, ctx).await;
+        let mut e = crate::db::Entry::new("tool", json!({"tool": name, "id": id, "input": input, "output": output, "isError": is_error}));
+        e.session = ctx.origin.thread.as_ref().and_then(|t| ctx.db.current_session(&t.key()).ok().flatten());
+        e.turn = ctx.origin.turn.as_ref().map(|t| t.id);
+        e.caller = Some(ctx.caller.clone());
+        crate::agent::SessionStore::journal(&*ctx.db, &e);
+        (output, is_error)
+    }
+
+    async fn call_hooked(&self, id: Option<&str>, name: &str, input: &Value, ctx: &ToolCtx) -> (String, bool) {
         if !self.offered(name) {
             return (format!("unknown tool: {name}"), true);
         }

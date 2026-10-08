@@ -68,3 +68,41 @@ async fn sessions_have_their_own_settings_and_can_be_switched() {
     chat.ask("after restart", "ok").await;
     assert!(user_texts(fake.llm_requests().last().unwrap()).contains("first words"));
 }
+
+const AUDIT: &str = r#"
+export default function (august) {
+  august.needs("sessions", "tools");
+  august.registerCommand("peek", async (_, ctx) => (await ctx.callTool("read_file", { path: "note.txt" })).output);
+  august.registerCommand("mark", async (_, ctx) => { await august.journal.append({ thread: ctx.thread }, "bookmark", { at: "here" }); return "marked"; });
+  august.registerCommand("log", async (_, ctx) => {
+    const entries = await august.sessions.history({ thread: ctx.thread });
+    return entries.map((e) => e.kind === "tool" ? `tool:${e.data.tool}:${e.caller}` : e.kind === "custom" ? `custom:${e.data.type}:${e.caller}` : e.kind).join(",");
+  });
+}
+"#;
+
+#[tokio::test]
+async fn the_journal_records_what_happened_in_a_conversation() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|req| {
+        let last = req["messages"].as_array().unwrap().last().unwrap();
+        match last["role"].as_str() {
+            Some("tool") => reply_text("done"),
+            _ => reply_tool("read_file", serde_json::json!({"path": "note.txt"})),
+        }
+    }))
+    .await;
+    let seed: &[(&str, &[u8])] = &[("note.txt", b"hello")];
+    let gw = august(&fake, Setup { home: &[("extensions/audit/index.ts", AUDIT)], seed, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("read the note", "done").await;
+    chat.ask("/peek", "hello").await;
+    chat.ask("/mark", "marked").await;
+    chat.ask(
+        "/log",
+        "turn_start,user_message,assistant,tool:read_file:model,assistant,turn_end,tool:read_file:ext:audit,custom:bookmark:ext:audit",
+    )
+    .await;
+}

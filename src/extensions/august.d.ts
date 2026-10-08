@@ -87,6 +87,25 @@ declare module "august" {
     bound: string[];
   };
 
+  /** What the journal records. `source`: who the turn came from (`user`, `ext:goal`, ...);
+   *  `caller`: who acted (`model`, `ext:<name>`, `user`). `data` by kind:
+   *  `turn_start` {mode, parent, text}, `turn_end` {status, error}, `user_message` {text},
+   *  `assistant` {step, text, toolCalls, usage}, `tool` {tool, id, input, output, isError},
+   *  `compaction` {before, after}, `session` {reason: new|switch, previous},
+   *  `model_change` {model, previous}, `custom` {type, data} (an extension's own). */
+  export type JournalKind = "turn_start" | "turn_end" | "user_message" | "assistant" | "tool" | "compaction" | "session" | "model_change" | "custom";
+  export type JournalEntry = {
+    id: number;
+    /** Unix milliseconds. */
+    ts: number;
+    session: string | null;
+    turn: number | null;
+    kind: JournalKind;
+    source: string | null;
+    caller: string | null;
+    data: any;
+  };
+
   export type UsageTotal = { calls: number; input: number; output: number; cache_read: number; cache_write: number };
 
   export type ExtensionInfo = {
@@ -365,6 +384,9 @@ declare module "august" {
     memory(): Promise<{ id: number; text: string }[]>;
     /** Switches to another model of the current provider (persisted). Needs `models`. */
     model: { set(model: string): Promise<{ provider: string; model: string }> };
+    /** Your own entries in the journal (kind `custom`, `caller` you): state that follows a
+     *  conversation, rebuilt with `sessions.history`. */
+    journal: { append(where: { session?: string; thread?: Thread }, type: string, data?: unknown): Promise<number> };
     /** A thread's conversation. Need `sessions`. */
     sessions: {
       /** Stored conversations, newest first: of the chat that started them, or all. `bound`:
@@ -377,6 +399,10 @@ declare module "august" {
       update(session: string, change: { name?: string; settings?: Partial<Record<keyof SessionSettings, any>> }): Promise<void>;
       /** Continues a stored conversation in `thread`. */
       switch(thread: Thread, session: string): Promise<string>;
+      /** The journal of a conversation (`thread`: its current one; neither: everything):
+       *  entries after `since` (an entry id), of `kinds`, at most `limit` (default 100, the
+       *  newest), oldest first. */
+      history(where: { session?: string; thread?: Thread }, opts?: { kinds?: JournalKind[]; since?: number; limit?: number }): Promise<JournalEntry[]>;
       /** Summarises older messages; estimated tokens, or null if there was nothing to do. */
       compact(thread: Thread): Promise<{ before: number; after: number } | null>;
       /** Token usage of its current conversation, and of today across all threads. */

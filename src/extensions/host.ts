@@ -198,6 +198,9 @@ const api = {
   /** Any operation of the core's table by name (`august.ops()` lists them). */
   call: (op: string, params: object = {}) => call(op, params),
   ops: () => call("ops", {}),
+  journal: {
+    append: (where: { session?: string; thread?: Thread }, type: string, data?: unknown) => call("journal_append", { ...where, type, data }),
+  },
   tools: () => call("tools", {}),
   commands: () => call("commands", {}),
   status: (thread?: Thread) => call("status", { thread }),
@@ -209,6 +212,8 @@ const api = {
     new: (thread: Thread, opts: { name?: string; settings?: object } = {}) => call("session_new", { thread, ...opts }),
     update: (session: string, change: { name?: string; settings?: object }) => call("session_update", { session, ...change }),
     switch: (thread: Thread, session: string) => call("session_switch", { thread, session }),
+    history: (where: { session?: string; thread?: Thread }, opts: { kinds?: string[]; since?: number; limit?: number } = {}) =>
+      call("history", { ...where, ...opts }),
     compact: (thread: Thread) => call("compact", { thread }),
     usage: (thread: Thread) => call("usage", { thread }),
   },

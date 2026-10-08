@@ -52,6 +52,8 @@ pub const OPS: &[Op] = &[
     op("session_new", SESSIONS, "Start a new conversation in {thread}, optionally with {name, settings}; returns its id"),
     op("session_update", SESSIONS, "Rename {session} ({name}) or change its {settings}: {model, system, tools}, null deletes"),
     op("session_switch", SESSIONS, "Continue stored {session} in {thread}"),
+    op("history", SESSIONS, "The journal of {session} (or {thread}'s, or all): entries after {since} of {kinds}, at most {limit} (default 100)"),
+    op("journal_append", None, "Record {type, data} in the journal of {session} or {thread}'s (kind `custom`, caller you)"),
     op("compact", SESSIONS, "Summarise older messages of {thread}: {before, after} or null"),
     op("usage", SESSIONS, "Token usage of {thread}'s conversation and of today"),
     op("memory", Some("memory"), "The facts August remembers: [{id, text}]"),
@@ -79,6 +81,16 @@ pub fn find(name: &str) -> Option<&'static Op> {
 pub enum Caller<'a> {
     User,
     Extension(&'a str),
+}
+
+impl Caller<'_> {
+    /// `ext:<name>` or `user`, as hooks and the journal show who did something.
+    pub fn label(&self) -> String {
+        match self {
+            Caller::Extension(name) => format!("ext:{name}"),
+            Caller::User => "user".into(),
+        }
+    }
 }
 
 pub fn thread(params: &Value) -> Result<Thread> {
@@ -156,10 +168,7 @@ impl Gateway {
                 let t = thread(p)?;
                 let m = self.messenger(&t)?;
                 let (gw, text) = (self.clone(), arg("text")?.to_string());
-                let source = p["source"].as_str().map(String::from).unwrap_or_else(|| match caller {
-                    Caller::Extension(name) => format!("ext:{name}"),
-                    Caller::User => "user".into(),
-                });
+                let source = p["source"].as_str().map(String::from).unwrap_or_else(|| caller.label());
                 let deliver = p["deliver"].as_str().unwrap_or("steer").to_string();
                 anyhow::ensure!(["steer", "followUp", "nextTurn"].contains(&deliver.as_str()), "`deliver` is steer, followUp or nextTurn");
                 // Not awaited: the caller may be inside a turn of that very thread.
@@ -209,6 +218,26 @@ impl Gateway {
                     self.db.update_session(agent.session(), p["name"].as_str(), &p["settings"])?;
                 }
                 json!(agent.session())
+            }
+            "history" => {
+                let session = match (p["session"].as_str(), thread(p)) {
+                    (Some(s), _) => Some(s.to_string()),
+                    (None, Ok(t)) => Some(self.db.current_session(&t.key())?.ok_or_else(|| anyhow!("no conversation in that thread yet"))?),
+                    (None, Err(_)) => None,
+                };
+                let kinds: Vec<String> = serde_json::from_value(p["kinds"].clone()).unwrap_or_default();
+                let limit = p["limit"].as_u64().unwrap_or(100) as usize;
+                json!(self.db.history(session.as_deref(), &kinds, p["since"].as_i64().unwrap_or(0), limit)?)
+            }
+            "journal_append" => {
+                let mut e = crate::db::Entry::new("custom", json!({"type": arg("type")?, "data": p["data"]}));
+                e.session = match (p["session"].as_str(), thread(p)) {
+                    (Some(s), _) => Some(s.to_string()),
+                    (None, Ok(t)) => self.db.current_session(&t.key())?,
+                    (None, Err(_)) => None,
+                };
+                e.caller = Some(caller.label());
+                json!(self.db.journal(&e)?)
             }
             "session_update" => {
                 self.db.update_session(arg("session")?, p["name"].as_str(), &p["settings"])?;
@@ -411,10 +440,7 @@ impl Gateway {
             files: Some(Arc::new(files)),
             extensions: Some(self.ext.clone()),
             inbox: None,
-            caller: match caller {
-                Caller::Extension(name) => format!("ext:{name}"),
-                Caller::User => "user".into(),
-            },
+            caller: caller.label(),
         };
         Ok(self.tools().call(None, name, input, &ctx).await)
     }
@@ -433,6 +459,8 @@ impl Gateway {
             model = data["model"].as_str().map(String::from).unwrap_or(model);
         }
         let model = model.as_str();
+        let previous = self.model.read().unwrap().1.clone();
+        crate::agent::SessionStore::journal(&*self.db, &crate::db::Entry::new("model_change", json!({"model": model, "previous": previous})));
         let mut sel = providers::selection()?;
         sel.model = Some(model.to_string());
         let provider_id = sel.provider.id.to_string();

@@ -169,7 +169,11 @@ helpers for the common ones:
   like `/new`, `/compact`, `/usage`.
 - Conversations are stored and addressable: `august.sessions.list(thread?)`,
   `.switch(thread, id)` continues one in a thread, `.update(id, { name, settings })`. A
-  conversation's `settings` — `model` (`provider:model` or a model of the active provider),
+  conversation's journal — turns, messages, model replies, every tool call (also the ones
+  extensions make with `callTool`, with their `caller`), compactions, session and model
+  changes — is `august.sessions.history({ thread } | { session }, { kinds, since, limit })`;
+  `august.journal.append({ thread }, type, data)` adds an entry of your own (kind
+  `custom`). A conversation's `settings` — `model` (`provider:model` or a model of the active provider),
   `system` (added to the system prompt), `tools` (only these) — apply from its next turn.
 - `august.stop(thread)`: like `/stop`.
 - `august.memory()`: the remembered facts, like `/memory`.
