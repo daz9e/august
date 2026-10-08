@@ -18,6 +18,19 @@ pub trait TokenSource: Send + Sync {
     }
 }
 
+#[async_trait]
+impl<T: TokenSource + ?Sized> TokenSource for std::sync::Arc<T> {
+    async fn token(&self) -> Result<String> {
+        (**self).token().await
+    }
+    async fn on_unauthorized(&self) -> Result<bool> {
+        (**self).on_unauthorized().await
+    }
+    fn headers(&self) -> Vec<(&'static str, String)> {
+        (**self).headers()
+    }
+}
+
 pub struct ApiKey(pub String);
 
 #[async_trait]

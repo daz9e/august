@@ -1,14 +1,15 @@
 //! `openai`: models behind an OpenAI-compatible Chat Completions API (OpenAI itself,
-//! OpenRouter, Ollama, vLLM, ...). Provider `openai` uses `base_url` and `key`; every entry
-//! of `endpoints` is one more provider of its own id:
+//! OpenRouter, Ollama, vLLM, ...). Provider `openai` uses `base_url`; every entry of
+//! `endpoints` is one more provider of its own id:
 //!
 //! ```json
 //! {"endpoints": {"openrouter": {"label": "OpenRouter", "base_url": "https://openrouter.ai/api/v1",
 //!   "key_env": "OPENROUTER_API_KEY", "model": "anthropic/claude-sonnet-4.5", "context_window": 200000}}}
 //! ```
 //!
-//! The key comes from the endpoint's `key`, else the variable `key_env` names, else none
-//! (local servers). Endpoints are read at start; `/reload` picks up changes.
+//! Each provider is an account signed in to with an API key (`/login <id>`); the variable
+//! (`OPENAI_API_KEY`, an endpoint's `key_env`) stands in for it, and a local server needs
+//! none. Endpoints are read at start; `/reload` picks up changes.
 
 use anyhow::{Result, anyhow};
 use august_ext::August;
@@ -18,7 +19,7 @@ use serde_json::{Value, json};
 
 const DEFAULT_URL: &str = "https://api.openai.com/v1";
 
-/// One provider's connection, resolved from the settings at the time of a call.
+/// One provider's connection, resolved at the time of a call.
 struct Endpoint {
     base_url: String,
     key: String,
@@ -29,12 +30,27 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-fn endpoint(settings: &Value, id: &str) -> Result<Endpoint> {
-    let text = |v: &Value, k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(String::from);
+fn text(v: &Value, k: &str) -> Option<String> {
+    v[k].as_str().filter(|s| !s.is_empty()).map(String::from)
+}
+
+/// The variable that stands in for provider `id`'s key.
+fn key_env(settings: &Value, id: &str) -> Option<String> {
+    if id == "openai" { Some("OPENAI_API_KEY".into()) } else { text(&settings["endpoints"][id], "key_env") }
+}
+
+/// Where provider `id` is served and with which key: its variable, else the signed-in key,
+/// else one written into the settings by hand (older homes).
+async fn endpoint(august: &August, id: &str) -> Result<Endpoint> {
+    let settings = august.settings().await?;
+    let key = match key_env(&settings, id).and_then(|k| env(&k)) {
+        Some(k) => Some(k),
+        None => august.secret(id).await?,
+    };
     if id == "openai" {
         return Ok(Endpoint {
-            base_url: env("OPENAI_BASE_URL").or_else(|| text(settings, "base_url")).unwrap_or_else(|| DEFAULT_URL.into()),
-            key: env("OPENAI_API_KEY").or_else(|| text(settings, "key")).unwrap_or_default(),
+            base_url: env("OPENAI_BASE_URL").or_else(|| text(&settings, "base_url")).unwrap_or_else(|| DEFAULT_URL.into()),
+            key: key.or_else(|| text(&settings, "key")).unwrap_or_default(),
             window: None,
         });
     }
@@ -42,7 +58,7 @@ fn endpoint(settings: &Value, id: &str) -> Result<Endpoint> {
     anyhow::ensure!(e.is_object(), "no endpoint `{id}` in the openai extension's settings");
     Ok(Endpoint {
         base_url: text(e, "base_url").ok_or_else(|| anyhow!("endpoint `{id}` has no base_url"))?,
-        key: text(e, "key").or_else(|| text(e, "key_env").and_then(|k| env(&k))).unwrap_or_default(),
+        key: key.or_else(|| text(e, "key")).unwrap_or_default(),
         window: e["context_window"].as_u64().map(|n| n as usize),
     })
 }
@@ -65,8 +81,8 @@ async fn list(e: &Endpoint, default: Option<&str>) -> Result<Vec<ModelInfo>> {
     Ok(models)
 }
 
-fn provide(august: &August, id: &str, label: &str, default_model: Option<&str>) {
-    let (for_models, for_complete) = (august.clone(), august.clone());
+fn provide(august: &August, settings: &Value, id: &str, label: &str, default_model: Option<&str>) {
+    let (for_models, for_complete, for_check) = (august.clone(), august.clone(), august.clone());
     let default = default_model.map(String::from);
     august.register_provider(
         id,
@@ -74,18 +90,27 @@ fn provide(august: &August, id: &str, label: &str, default_model: Option<&str>) 
         default_model,
         move |id| {
             let (august, default) = (for_models.clone(), default.clone());
-            async move { list(&endpoint(&august.settings().await?, &id)?, default.as_deref()).await }
+            async move { list(&endpoint(&august, &id).await?, default.as_deref()).await }
         },
         move |req, stream| {
             let august = for_complete.clone();
             async move {
-                let e = endpoint(&august.settings().await?, &req.provider)?;
+                let e = endpoint(&august, &req.provider).await?;
                 let model = OpenAi::new(e.base_url, e.key, req.model).with_context_window(e.window);
                 let mut on_text = |t: &str| stream.text(t);
                 model.complete_stream(&req.session, &req.system, &req.messages, &req.tools, &mut on_text).await
             }
         },
     );
+    // A key is checked by listing the models with it.
+    august.register_key_account(id, label, &[id], "API key", key_env(settings, id).as_deref(), move |id, key| {
+        let august = for_check.clone();
+        async move {
+            let mut e = endpoint(&august, &id).await?;
+            e.key = key;
+            list(&e, None).await.map(drop)
+        }
+    });
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -95,17 +120,16 @@ async fn main() {
         "type": "object",
         "properties": {
             "base_url": {"type": "string", "default": DEFAULT_URL, "description": "Address of the OpenAI-compatible API"},
-            "key": {"type": "string", "secret": true, "description": "API key (OPENAI_API_KEY overrides it)"},
-            "endpoints": {"type": "object", "description": "More providers by id: {label, base_url, key | key_env, model, context_window}"},
+            "endpoints": {"type": "object", "description": "More providers by id: {label, base_url, key_env, model, context_window}"},
         },
     }));
-    provide(&august, "openai", "OpenAI-compatible (OpenAI, OpenRouter, Ollama, ...)", None);
+    provide(&august, &Value::Null, "openai", "OpenAI-compatible (OpenAI, OpenRouter, Ollama, ...)", None);
     // Settings can only be read once the link runs.
     let me = august.clone();
     tokio::spawn(async move {
         let Ok(settings) = me.settings().await else { return };
         for (id, e) in settings["endpoints"].as_object().into_iter().flatten() {
-            provide(&me, id, e["label"].as_str().unwrap_or(id), e["model"].as_str());
+            provide(&me, &settings, id, e["label"].as_str().unwrap_or(id), e["model"].as_str());
         }
     });
     august.run().await;

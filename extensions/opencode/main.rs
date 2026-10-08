@@ -86,8 +86,13 @@ fn guess_format(model: &str) -> Format {
     }
 }
 
-async fn complete(settings: Value, req: Request, on_text: &mut (dyn for<'a> FnMut(&'a str) + Send)) -> Result<Completion> {
-    let key = env("OPENCODE_API_KEY").or_else(|| text(&settings, "key")).ok_or_else(|| anyhow!("no OpenCode API key: run /login or set OPENCODE_API_KEY"))?;
+async fn complete(august: &August, req: Request, on_text: &mut (dyn for<'a> FnMut(&'a str) + Send)) -> Result<Completion> {
+    let settings = august.settings().await?;
+    let key = match env("OPENCODE_API_KEY") {
+        Some(k) => Some(k),
+        None => august.secret("opencode").await?,
+    };
+    let key = key.or_else(|| text(&settings, "key")).ok_or_else(|| anyhow!("not signed in to OpenCode: run /login opencode or set OPENCODE_API_KEY"))?;
     let format = match env("AUGUST_API_FORMAT").or_else(|| text(&settings, "format")) {
         Some(f) => parse_format(&f)?,
         None => catalog_format(&req.provider, &req.model).await.ok().flatten().unwrap_or_else(|| guess_format(&req.model)),
@@ -135,7 +140,7 @@ fn provide(august: &August, id: &str, label: &str) {
             let august = for_complete.clone();
             async move {
                 let mut on_text = |t: &str| stream.text(t);
-                complete(august.settings().await?, req, &mut on_text).await
+                complete(&august, req, &mut on_text).await
             }
         },
     );
@@ -147,12 +152,13 @@ async fn main() {
     august.settings_schema(json!({
         "type": "object",
         "properties": {
-            "key": {"type": "string", "secret": true, "description": "OpenCode API key (OPENCODE_API_KEY overrides it)"},
             "format": {"type": "string", "enum": ["chat", "responses", "messages"], "description": "Force one wire format instead of asking models.dev"},
             "base_url": {"type": "string", "description": "Another address of the OpenCode API"},
         },
     }));
     provide(&august, "opencode-go", "OpenCode Go (subscription)");
     provide(&august, "opencode", "OpenCode Zen (pay as you go)");
+    // One key for both; the API lists models without one, so it can't be checked up front.
+    august.register_key_account("opencode", "OpenCode Zen / Go", &["opencode-go", "opencode"], "API key", Some("OPENCODE_API_KEY"), |_, _| async { Ok(()) });
     august.run().await;
 }

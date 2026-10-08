@@ -10,7 +10,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("stop", "Cancel the current task"),
     ("queue", "Run a message as its own turn after the current one"),
     ("usage", "Show token usage of this conversation and today"),
-    ("model", "Show or change the model"),
+    ("model", "Show or change the model: /model <id> or <provider>:<id>"),
+    ("models", "List the models of the current provider: /models [filter]"),
+    ("login", "Sign in to an account (a model provider: then use it): /login [account]"),
+    ("logout", "Sign out of an account: /logout [account]"),
     ("status", "Show provider, model and workspace"),
     ("extensions", "List extensions; enable or disable one"),
     ("config", "Show or change a setting: /config [path [value]]"),
@@ -75,6 +78,40 @@ async fn command(august: &August, name: &str, args: &str, ctx: &Ctx) -> Result<S
             Ok(m) => format!("Now using `{} · {}` (applies to the next message).", str(&m["provider"]), str(&m["model"])),
             Err(e) => format!("Could not switch model: {e:#}"),
         },
+        "models" => {
+            let list = august.call("models", mine(json!({}))).await?;
+            let ids: Vec<&str> = list.as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).filter(|id| id.contains(args)).collect();
+            match ids.len() {
+                0 => "No models match.".into(),
+                n if n > 60 => format!("{n} models; narrow with `/models <filter>`. First ones:\n{}", ids[..60].join("\n")),
+                _ => ids.join("\n"),
+            }
+        }
+        "login" | "logout" => {
+            let Some(a) = pick_account(august, ctx, name, args).await? else {
+                return Ok("Cancelled.".into());
+            };
+            let (id, label) = (str(&a["id"]).to_string(), str(&a["label"]).to_string());
+            if name == "logout" {
+                return Ok(match august.call("logout", mine(json!({"account": id}))).await {
+                    Ok(_) => format!("Signed out of {label}."),
+                    Err(e) => format!("Could not sign out: {e:#}"),
+                });
+            }
+            let signed = match ctx.call("login", mine(json!({"account": id}))).await {
+                Ok(v) => v,
+                Err(e) => return Ok(format!("Sign-in failed: {e:#}")),
+            };
+            let done = match signed["who"].as_str() {
+                Some(who) => format!("Signed in to {label} as {who}."),
+                None => format!("Signed in to {label}."),
+            };
+            let Some(provider) = a["providers"][0].as_str() else { return Ok(done) };
+            match august.call("model_set", mine(json!({"model": format!("{provider}:")}))).await {
+                Ok(m) => format!("{done}\nNow using `{} · {}`. `/models` lists the others, `/model <id>` switches.", str(&m["provider"]), str(&m["model"])),
+                Err(e) => format!("{done}\nCould not switch to it: {e:#}"),
+            }
+        }
         "extensions" => {
             let changed = match args.split_whitespace().collect::<Vec<_>>()[..] {
                 [] => Ok(()),
@@ -92,7 +129,7 @@ async fn command(august: &August, name: &str, args: &str, ctx: &Ctx) -> Result<S
             let (path, value) = args.split_once(char::is_whitespace).map_or((args, ""), |(p, v)| (p, v.trim()));
             if path.is_empty() {
                 return Ok("Usage: /config <path> [value], e.g. /config august.model, /config extensions.web.settings.\n\
-                           Units: august, providers.<id>, messengers.<id>, extensions.<name>; `null` deletes."
+                           Units: august, messengers.<id>, extensions.<name>; `null` deletes."
                     .into());
             }
             if !value.is_empty() {
@@ -118,6 +155,31 @@ fn status(list: &Value) -> String {
         return "No extensions.".into();
     }
     all.iter().map(status_line).collect::<Vec<_>>().join("\n")
+}
+
+/// The account named in `args`, or the one the user picks from buttons (✓: signed in).
+async fn pick_account(august: &August, ctx: &Ctx, action: &str, args: &str) -> Result<Option<Value>> {
+    let all = august.call("accounts", mine(json!({}))).await?;
+    let mut all = all.as_array().cloned().unwrap_or_default();
+    if action == "logout" {
+        all.retain(|a| a["status"] != "none");
+    }
+    if !args.is_empty() {
+        return match all.iter().find(|a| a["id"] == args) {
+            Some(a) => Ok(Some(a.clone())),
+            None => anyhow::bail!("no account `{args}` (have: {})", all.iter().map(|a| str(&a["id"])).collect::<Vec<_>>().join(", ")),
+        };
+    }
+    anyhow::ensure!(!all.is_empty(), "no accounts to {action}");
+    let mark = |a: &Value| match str(&a["status"]) {
+        "connected" => " ✓",
+        "expired" => " ⚠",
+        _ => "",
+    };
+    let labels: Vec<String> = all.iter().map(|a| format!("{}{}", str(&a["label"]), mark(a))).collect();
+    let verb = if action == "login" { "Sign in to" } else { "Sign out of" };
+    let picked = ctx.ask(&format!("{verb} which account?"), &labels, std::time::Duration::from_secs(300)).await?;
+    Ok(picked.and_then(|l| labels.iter().position(|x| *x == l).map(|i| all[i].clone())))
 }
 
 fn status_line(e: &Value) -> String {

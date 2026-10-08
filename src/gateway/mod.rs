@@ -2,6 +2,7 @@
 //! extensions call; drawing replies is an extension's job (`render`).
 
 mod commands;
+mod login;
 mod media;
 mod outbound;
 pub(crate) mod ops;
@@ -56,6 +57,9 @@ pub struct Gateway {
     /// The renderer and event stream of each thread's reply in progress, so what else is sent
     /// there lands in order.
     live: StdMutex<HashMap<Thread, (String, tokio::sync::mpsc::UnboundedSender<turn::Live>)>>,
+    /// Sign-ins in progress, by session id.
+    logins: StdMutex<HashMap<u64, login::Session>>,
+    next_login: std::sync::atomic::AtomicU64,
 }
 
 /// The core's operations as extensions call them.
@@ -101,6 +105,8 @@ impl Gateway {
             ext,
             subagents: Default::default(),
             live: Default::default(),
+            logins: Default::default(),
+            next_login: Default::default(),
         });
         gw.ext.set_core(Arc::new(ExtCore(Arc::downgrade(&gw))));
         gw
@@ -191,7 +197,10 @@ impl Gateway {
         let chat = ev.thread.id.clone();
         self.activity.lock().unwrap().insert(ev.thread.clone(), chrono::Utc::now().timestamp_millis());
         // What something waits for (the answer to a question) goes there first.
-        if self.waits.offer(&ev) {
+        if let Some(secret) = self.waits.offer(&ev) {
+            if secret && let InboundKind::Message { id, .. } = &ev.kind {
+                channel.delete(&chat, id).await.ok();
+            }
             return Ok(());
         }
         match ev.kind {
@@ -241,9 +250,9 @@ pub async fn serve() -> Result<()> {
 pub async fn start(chans: Vec<Arc<dyn Messenger>>) -> Result<()> {
     let workspace = crate::config::workspace()?;
     let selection = providers::selection()?;
-    let model = (selection.provider.id.to_string(), selection.model.clone().unwrap_or_default());
-    let label = format!("{} · {}", model.0, model.1);
-    let provider = providers::build(selection).await?;
+    let model = (selection.provider.clone(), selection.model.clone());
+    let label = if model.0.is_empty() { "no model provider yet (/login)".to_string() } else { format!("{} · {}", model.0, model.1) };
+    let provider = providers::build(selection)?;
     println!(
         "august serving {} · {label} · workspace {}",
         chans.iter().map(|c| c.id().to_string()).collect::<Vec<_>>().join(", "),

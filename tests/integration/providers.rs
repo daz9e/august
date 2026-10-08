@@ -30,9 +30,9 @@ async fn anthropic_answers_with_the_key_an_older_home_saved() {
     let call = fake.requests().into_iter().find(|r| r.path == "/v1/messages").unwrap();
     assert_eq!(call.key, "sk-old");
     assert_eq!(call.json()["model"], "claude-opus-5-5");
-    // The key now lives in the extension's settings.
-    let moved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(gw.home.join("config/extensions/anthropic.json")).unwrap()).unwrap();
-    assert_eq!(moved["settings"]["key"], "sk-old");
+    // The key is now the account's secret.
+    let moved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(gw.home.join("secrets/anthropic.json")).unwrap()).unwrap();
+    assert_eq!(moved["anthropic"], "sk-old");
 }
 
 #[tokio::test]

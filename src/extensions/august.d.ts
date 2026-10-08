@@ -381,6 +381,18 @@ declare module "august" {
     registerPromptSection(name: string, text: string): void;
     /** `/name` in Telegram and the terminal. */
     registerCommand(name: string, command: Command | Command["handler"]): void;
+    /** Something the user signs in to through August (`/login`, which also switches to the
+     *  first of its `providers`). August runs the sign-in where the user started it. */
+    registerAccount(account: KeyAccount | LoginAccount): void;
+    unregisterAccount(id: string): void;
+    /** How an account stands; `expired` tells the user to sign in again. */
+    accountUpdate(id: string, status: "connected" | "expired" | "none", who?: string): Promise<void>;
+    /** This extension's secrets, kept by August in a file only it reads (an API key account's
+     *  key is under the account's id). Never keep keys in code, settings or the store. */
+    secrets: {
+      get(key: string): Promise<string | null>;
+      set(key: string, value: string | null): Promise<void>;
+    };
     /** This extension's storage in August's database: JSON values by key, kept across
      *  restarts and reloads (only this extension sees them). */
     store: {
@@ -493,5 +505,41 @@ declare module "august" {
       /** Restarts every extension but this one. */
       reload(): Promise<ExtensionInfo[]>;
     };
+  }
+
+  /** An account signed in to with an API key: August asks for it (the message is deleted),
+   *  runs `check` (throw to reject it) and keeps it as secret `id`. */
+  export interface KeyAccount {
+    id: string;
+    label?: string;
+    /** Model providers it unlocks. */
+    providers?: string[];
+    key: { label?: string; /** A variable that stands in for the key. */ env?: string };
+    check?(key: string): Promise<void>;
+  }
+
+  /** An account with a sign-in of its own (OAuth, a device code, ...), scripted step by step. */
+  export interface LoginAccount {
+    id: string;
+    label?: string;
+    providers?: string[];
+    login(steps: LoginSteps): Promise<{ who?: string; expiresAt?: number }>;
+    /** Forget what it keeps (revoke tokens, delete secrets). */
+    logout?(): Promise<void>;
+  }
+
+  /** The steps of a sign-in. August shows each where the user started it and brings the answer
+   *  back; nothing else may talk to the user or open ports for it. */
+  export interface LoginSteps {
+    ask(label: string, opts?: { secret?: boolean }): Promise<string>;
+    choose(question: string, options: string[]): Promise<string>;
+    /** Shows a link to open (opened by itself at this machine's terminal). */
+    open(url: string, note?: string): Promise<void>;
+    progress(text: string): Promise<void>;
+    /** Receives one redirect on http://localhost:<port><path> (port 0: any free one); returns
+     *  that address, e.g. for an OAuth `redirect_uri`. Call before `open`. */
+    callback(opts?: { port?: number; path?: string }): Promise<string>;
+    /** The redirect's query parameters; from a browser elsewhere the user pastes its address. */
+    waitCallback(opts?: { timeout?: number }): Promise<Record<string, string>>;
   }
 }

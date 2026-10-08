@@ -280,7 +280,42 @@ const { city, api_key } = await august.settings.get();
 The user sets them with `/config extensions.<name>.settings.city Paris` (or
 `august config ...` in a terminal); secrets show as `••••`. Hook `config_changed { path }`
 to react at once. `august.settings.set(path, value)` changes your own. Don't keep keys in
-code or in the store: ask the user to put them into your settings.
+code, settings or the store: declare an account (below).
+
+## Accounts and sign-in
+
+What the user signs in to (a model provider, a service with an API key or OAuth) is an
+account, and August runs the sign-in: `/login` lists every account, asks where the user
+is and keeps the secrets. An API key needs no code:
+
+```ts
+august.registerAccount({
+  id: "weather", label: "Weather API", key: { label: "API key", env: "WEATHER_KEY" },
+  check: async (key) => { if (!(await fetch(`https://api.example.com/ping?key=${key}`)).ok) throw new Error("rejected"); },
+});
+const key = process.env.WEATHER_KEY ?? (await august.secrets.get("weather"));
+```
+
+Anything else is a script of steps August shows to the user (`ask`, `choose`, `open`,
+`progress`) and a redirect August receives on localhost (`callback`, `waitCallback`):
+
+```ts
+august.registerAccount({
+  id: "github", label: "GitHub",
+  async login(steps) {
+    const redirect = await steps.callback({ path: "/github" });
+    await steps.open(`https://github.com/login/oauth/authorize?client_id=…&redirect_uri=${encodeURIComponent(redirect)}&state=s1`);
+    const q = await steps.waitCallback();
+    if (q.state !== "s1") throw new Error("state mismatch");
+    await august.secrets.set("github", await exchange(q.code));
+    return { who: "…" };
+  },
+  async logout() { await august.secrets.set("github", null); },
+});
+```
+
+When a token can't be refreshed any more, `august.accountUpdate("github", "expired")`: the
+user is told to sign in again.
 
 Where a call takes a thread, `"home"` is the user's home thread (set with `/home`, else the
 thread they wrote in last), e.g. `august.send("home", "...")` for reports nobody asked for.

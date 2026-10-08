@@ -175,6 +175,11 @@ fn start_august() -> Result<()> {
 }
 
 pub async fn run() -> Result<()> {
+    run_with(None).await
+}
+
+/// A terminal window that first sends `first` (a command, say) as if typed.
+pub async fn run_with(first: Option<&str>) -> Result<()> {
     let stream = connect().await?;
     let (read, mut write) = stream.into_split();
     let send = |msg: &ToAugust| serde_json::to_string(msg).unwrap_or_default() + "\n";
@@ -186,7 +191,10 @@ pub async fn run() -> Result<()> {
     };
     println!("august · terminal {thread} · /help lists commands, /exit quits.");
     let screen = Arc::new(Mutex::new(Screen::default()));
-    screen.lock().unwrap().prompt();
+    match first {
+        Some(line) => write.write_all(send(&ToAugust::Text { text: line.into() }).as_bytes()).await?,
+        None => screen.lock().unwrap().prompt(),
+    }
 
     let shown = screen.clone();
     let mut output = tokio::spawn(async move {

@@ -36,12 +36,23 @@ impl Remote {
     }
 }
 
-/// The model provider `id` starts with when none is chosen.
+/// Ids of the providers the running extensions offer.
+pub fn provider_ids() -> Vec<String> {
+    extensions().map(|e| e.providers().into_iter().map(|(_, p)| p.id).collect()).unwrap_or_default()
+}
+
+/// The model provider `id` starts with when none is chosen: its default, else the first
+/// it lists.
 pub async fn default_model(id: &str) -> Result<String> {
+    anyhow::ensure!(!id.is_empty(), "no model provider is chosen yet: sign in to one with /login");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        if let Some(p) = extensions()?.providers().into_iter().find(|p| p.id == id) {
-            return p.default_model.ok_or_else(|| anyhow::anyhow!("no model selected for {id}: run `august model`"));
+        if let Some(p) = extensions()?.providers().into_iter().map(|(_, p)| p).find(|p| p.id == id) {
+            if let Some(m) = p.default_model {
+                return Ok(m);
+            }
+            let first = models(id).await?.into_iter().next();
+            return first.map(|m| m.id).ok_or_else(|| anyhow::anyhow!("{id} offers no models"));
         }
         anyhow::ensure!(std::time::Instant::now() < deadline, "no provider `{id}` is offered by any extension");
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

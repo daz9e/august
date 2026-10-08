@@ -2,14 +2,6 @@
 
 pub const USER_AGENT: &str = concat!("august/", env!("CARGO_PKG_VERSION"));
 
-pub fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .expect("http client")
-}
-
 /// Random UUID v4, e.g. for session and host ids.
 pub fn new_uuid() -> String {
     let mut b = [0u8; 16];

@@ -46,6 +46,10 @@ name = "august-ext-claude-cli"
 path = "extensions/claude-cli/main.rs"
 
 [[bin]]
+name = "august-ext-chatgpt"
+path = "extensions/chatgpt/main.rs"
+
+[[bin]]
 name = "august-ext-clarify"
 path = "extensions/clarify/main.rs"
 

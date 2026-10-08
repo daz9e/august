@@ -43,6 +43,7 @@ const needs = new Set<string>();
 const emits = new Map<string, { name: string; description: string; schema: unknown; observe: boolean }>();
 const replaces = new Set<string>();
 const takes = new Set<string>();
+const accounts = new Map<string, any>();
 let settingsSchema: unknown = null;
 let started = false;
 let manifestQueued = false;
@@ -64,6 +65,28 @@ function manifest() {
     emits: [...emits.values()],
     replaces: [...replaces],
     takes: [...takes],
+    accounts: [...accounts.values()].map((a) => ({
+      id: a.id,
+      label: a.label ?? a.id,
+      providers: a.providers ?? [],
+      key: a.key ? { label: a.key.label ?? "API key", env: a.key.env ?? null } : null,
+      login: typeof a.login === "function",
+    })),
+  };
+}
+
+/** The steps of a sign-in; August shows each where the user started it. */
+function loginSteps(session: number) {
+  const step = (op: string, params: object = {}) => call(op, { session, ...params });
+  return {
+    ask: (label: string, opts: { secret?: boolean } = {}): Promise<string> => step("login_ask", { label, secret: opts.secret ?? false }),
+    choose: (question: string, options: string[]): Promise<string> => step("login_choose", { question, options }),
+    open: (url: string, note = "") => step("login_open", { url, note }),
+    progress: (text: string) => step("login_progress", { text }),
+    /** Receives one redirect on http://localhost:<port><path> (port 0: any free one); returns that address. */
+    callback: (opts: { port?: number; path?: string } = {}): Promise<string> => step("login_callback", { port: opts.port ?? 0, path: opts.path ?? "/callback" }),
+    /** The redirect's query parameters (or those of the address the user pastes). */
+    waitCallback: (opts: { timeout?: number } = {}): Promise<Record<string, string>> => step("login_wait", { timeout_ms: opts.timeout ?? 300_000 }),
   };
 }
 
@@ -181,6 +204,25 @@ const api = {
     commands.set(cmd.replace(/^\//, ""), command);
     changed();
   },
+  /** Something the user signs in to, through August (`/login`): `{id, label, providers,
+   * key: {label, env}, check(key)}` for an API key August asks for, or `{id, label, providers,
+   * login(steps) => ({who}), logout()}` for a sign-in of its own (OAuth, codes, ...). */
+  registerAccount(account: any) {
+    if (!account?.id) throw new Error("registerAccount: id is required");
+    if (!account.key && typeof account.login !== "function") throw new Error(`registerAccount("${account.id}"): key or login is required`);
+    accounts.set(account.id, account);
+    changed();
+  },
+  unregisterAccount(id: string) {
+    if (accounts.delete(id)) changed();
+  },
+  /** How an account stands: connected (by who), expired (the user is told) or none. */
+  accountUpdate: (id: string, status: string, who?: string) => call("account_update", { account: id, status, who }),
+  /** This extension's secrets (an account's API key is under the account's id). */
+  secrets: {
+    get: (key: string): Promise<string | null> => call("secret_get", { key }),
+    set: (key: string, value: string | null) => call("secret_set", { key, value }),
+  },
   /** This extension's storage: JSON values by key, kept across restarts. */
   store: {
     get: (key: string) => call("store_get", { key }),
@@ -267,6 +309,16 @@ async function handle(method: string, params: any, signal: AbortSignal): Promise
       if (!tool) throw new Error(`no tool named ${params.name}`);
       const out = await tool.execute(params.input ?? {}, ctx);
       return typeof out === "string" ? out : JSON.stringify(out ?? null);
+    }
+    case "account_check":
+    case "login":
+    case "logout": {
+      const account = accounts.get(params.account);
+      if (!account) throw new Error(`no account named ${params.account}`);
+      if (method === "account_check") return account.check ? ((await account.check(params.key)), null) : null;
+      if (method === "logout") return account.logout ? ((await account.logout()), null) : null;
+      const signed = await account.login(loginSteps(params.session));
+      return { who: signed?.who ?? null, expires_at: signed?.expiresAt ?? null };
     }
     case "command": {
       const command = commands.get(params.name);

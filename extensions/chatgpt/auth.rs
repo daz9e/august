@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const ISSUER: &str = "https://auth.openai.com";
 const AUTHORIZE_URL: &str = "https://auth.openai.com/api/accounts/authorize";
@@ -70,18 +69,18 @@ pub(super) fn random_b64(n: usize) -> String {
 }
 
 fn new_host_id() -> String {
-    format!("urn:uuid:{}", crate::util::new_uuid())
+    format!("urn:uuid:{}", crate::new_uuid())
 }
 
 const AUTH_FILE: &str = "chatgpt-auth.json";
 
 impl AuthFile {
-    pub fn load() -> Result<Self> {
-        crate::config::load(AUTH_FILE)
+    pub async fn load() -> Result<Self> {
+        crate::load("chatgpt", AUTH_FILE).await
     }
 
-    pub fn save(&self) -> Result<()> {
-        crate::config::save(AUTH_FILE, self)
+    pub async fn save(&self) -> Result<()> {
+        crate::save("chatgpt", self).await
     }
 }
 
@@ -155,13 +154,13 @@ fn issued_client_id(access_token: &str) -> Result<String> {
         .context("access token has no client_id")
 }
 
-/// Interactive browser sign-in (same flow as pi): registers a client for this host,
-/// exchanges the code with the issued client id, and saves the profile.
-pub async fn login(http: &reqwest::Client) -> Result<Profile> {
-    let mut file = AuthFile::load()?;
+/// Browser sign-in (same flow as pi), run through August: registers a client for this
+/// host, exchanges the code with the issued client id, and saves the profile.
+pub async fn login(http: &reqwest::Client, steps: &august_ext::Login) -> Result<Profile> {
+    let mut file = AuthFile::load().await?;
     if file.host_id.is_empty() {
         file.host_id = new_host_id();
-        file.save()?;
+        file.save().await?;
     }
 
     let verifier = random_b64(32);
@@ -186,20 +185,16 @@ pub async fn login(http: &reqwest::Client) -> Result<Profile> {
             .append_pair("code_challenge", &challenge);
     }
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
-        .await
-        .with_context(|| {
-            format!("port {CALLBACK_PORT} is in use, probably by an unfinished login or the Codex CLI")
-        })?;
-    println!("Opening the browser to sign in with ChatGPT. If it did not open, visit:\n\n{url}\n");
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    let _ = std::process::Command::new(opener)
-        .arg(url.as_str())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-
-    let (code, client_id) = wait_for_callback(listener, state).await?;
+    steps.callback(CALLBACK_PORT, CALLBACK_PATH).await?;
+    steps.open(url.as_str(), "Open this link to sign in with ChatGPT:").await?;
+    let q = steps.wait_callback(crate::LOGIN_TIMEOUT).await?;
+    let get = |k: &str| q[k].as_str().map(str::trim).filter(|v| !v.is_empty());
+    if let Some(err) = get("error") {
+        bail!("sign-in failed: {err} {}", get("error_description").unwrap_or_default());
+    }
+    anyhow::ensure!(get("state") == Some(state.as_str()), "OAuth state mismatch");
+    let code = get("code").context("missing authorization code")?.to_string();
+    let client_id = get("client_id").filter(|c| *c != DYNAMIC_CLIENT_ID).context("the callback did not contain an issued client ID")?.to_string();
 
     let tok = token_request(
         http,
@@ -247,96 +242,8 @@ pub async fn login(http: &reqwest::Client) -> Result<Profile> {
         earliest_refresh_at: tok.earliest_refresh_at.unwrap_or(0),
     };
     file.profile = Some(profile.clone());
-    file.save()?;
+    file.save().await?;
     Ok(profile)
-}
-
-/// Serves the loopback redirect until a valid callback arrives; returns the code and
-/// the issued client id. Each connection is handled in its own task: browsers open
-/// spare connections that never send a request and must not block the real one.
-async fn wait_for_callback(
-    listener: tokio::net::TcpListener,
-    state: String,
-) -> Result<(String, String)> {
-    let state = std::sync::Arc::new(state);
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(String, String)>>(1);
-    // Dropping the set on return aborts the remaining connection tasks.
-    let mut conns = tokio::task::JoinSet::new();
-    loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                let (sock, _) = accepted?;
-                conns.spawn(handle_callback(sock, state.clone(), tx.clone()));
-            }
-            Some(result) = rx.recv() => return result,
-        }
-    }
-}
-
-async fn handle_callback(
-    mut sock: tokio::net::TcpStream,
-    state: std::sync::Arc<String>,
-    tx: tokio::sync::mpsc::Sender<Result<(String, String)>>,
-) {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 64 * 1024 {
-        match sock.read(&mut chunk).await {
-            Ok(0) | Err(_) => return,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-        }
-    }
-    let req = String::from_utf8_lossy(&buf);
-    let target = req.split_whitespace().nth(1).unwrap_or("/");
-    let Ok(url) = reqwest::Url::parse(&format!("http://127.0.0.1{target}")) else {
-        return respond(&mut sock, 400, "Bad request.").await;
-    };
-    if url.path() != CALLBACK_PATH {
-        return respond(&mut sock, 404, "Callback route not found.").await;
-    }
-    let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-    let get = |k: &str| q.get(k).map(|v| v.trim()).filter(|v| !v.is_empty());
-
-    if let Some(err) = get("error") {
-        let desc = get("error_description").unwrap_or_default();
-        respond(&mut sock, 400, "ChatGPT was not connected. Return to the terminal.").await;
-        let _ = tx.send(Err(anyhow::anyhow!("sign-in failed: {err} {desc}"))).await;
-        return;
-    }
-    // Invalid callbacks get an error page; we keep waiting for the right one.
-    let result = match (get("code"), get("state"), get("client_id")) {
-        (None, ..) => Err("Missing authorization code."),
-        (_, s, _) if s != Some(state.as_str()) => Err("OAuth state mismatch."),
-        (_, _, None) => Err("The callback did not contain an issued client ID."),
-        (_, _, Some(DYNAMIC_CLIENT_ID)) => Err("The callback did not contain an issued client ID."),
-        (Some(code), _, Some(client_id)) => Ok((code.to_string(), client_id.to_string())),
-    };
-    match result {
-        Ok(ok) => {
-            respond(&mut sock, 200, "ChatGPT connected to August. You can close this window.").await;
-            let _ = tx.send(Ok(ok)).await;
-        }
-        Err(msg) => respond(&mut sock, 400, msg).await,
-    }
-}
-
-pub(super) async fn respond(sock: &mut tokio::net::TcpStream, status: u16, message: &str) {
-    let reason = match status {
-        200 => "OK",
-        404 => "Not Found",
-        _ => "Bad Request",
-    };
-    let body = format!(
-        "<!doctype html><meta charset=utf-8><title>August</title>\
-         <p style=\"font:16px system-ui;margin:3em\">{message}</p>"
-    );
-    let resp = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = sock.write_all(resp.as_bytes()).await;
-    let _ = sock.shutdown().await;
 }
 
 /// Rotates tokens and persists them. Unusable refresh tokens clear the profile.
@@ -357,10 +264,10 @@ pub async fn refresh(http: &reqwest::Client, profile: &mut Profile) -> Result<()
             if let Some(te) = e.downcast_ref::<TokenError>()
                 && matches!(te.code.as_str(), "invalid_grant" | "token_expired" | "refresh_token_expired" | "refresh_token_reused")
             {
-                let mut file = AuthFile::load()?;
+                let mut file = AuthFile::load().await?;
                 file.profile = None;
-                file.save()?;
-                bail!("ChatGPT session expired, run `cargo run -- login` ({e})");
+                file.save().await?;
+                bail!("ChatGPT session expired, run /login chatgpt ({e})");
             }
             return Err(e);
         }
@@ -378,9 +285,9 @@ pub async fn refresh(http: &reqwest::Client, profile: &mut Profile) -> Result<()
     profile.expires_at = now() + tok.expires_in;
     profile.earliest_refresh_at = tok.earliest_refresh_at.unwrap_or(0);
 
-    let mut file = AuthFile::load()?;
+    let mut file = AuthFile::load().await?;
     file.profile = Some(profile.clone());
-    file.save()
+    file.save().await
 }
 
 /// Refreshes if the access token expires within `EXPIRY_MARGIN_SECS`.
@@ -393,7 +300,7 @@ pub async fn ensure_fresh(http: &reqwest::Client, profile: &mut Profile) -> Resu
 
 /// Revokes the refresh token (best effort) and forgets the profile; host id is kept.
 pub async fn logout(http: &reqwest::Client) -> Result<Option<String>> {
-    let mut file = AuthFile::load()?;
+    let mut file = AuthFile::load().await?;
     let Some(p) = file.profile.take() else {
         return Ok(None);
     };
@@ -407,6 +314,6 @@ pub async fn logout(http: &reqwest::Client) -> Result<Option<String>> {
         ])
         .send()
         .await;
-    file.save()?;
+    file.save().await?;
     Ok(Some(p.email))
 }

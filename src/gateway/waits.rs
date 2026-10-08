@@ -13,6 +13,8 @@ pub struct Accept {
     pub buttons: Vec<String>,
     /// Any text message without files.
     pub text: bool,
+    /// The text is a secret (a key): its message is deleted from the chat once taken.
+    pub secret: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,8 +52,8 @@ impl Waits {
         self.list.lock().unwrap().retain(|w| w.id != id);
     }
 
-    /// Hands `ev` to the oldest wait in its thread that takes it; true if one did.
-    pub fn offer(&self, ev: &Inbound) -> bool {
+    /// Hands `ev` to the oldest wait in its thread that takes it; `Some(secret)` if one did.
+    pub fn offer(&self, ev: &Inbound) -> Option<bool> {
         let reply = |w: &Wait| match &ev.kind {
             InboundKind::Press { button, .. } if w.accept.buttons.contains(button) => Some(Reply::Press(button.clone())),
             InboundKind::Message { text, files, .. } if w.accept.text && files.is_empty() && !text.trim().is_empty() => {
@@ -60,10 +62,9 @@ impl Waits {
             _ => None,
         };
         let mut list = self.list.lock().unwrap();
-        let Some((i, r)) = list.iter().enumerate().filter(|(_, w)| w.thread == ev.thread).find_map(|(i, w)| Some((i, reply(w)?))) else {
-            return false;
-        };
-        list.remove(i).tx.send(r).is_ok()
+        let (i, r) = list.iter().enumerate().filter(|(_, w)| w.thread == ev.thread).find_map(|(i, w)| Some((i, reply(w)?)))?;
+        let secret = matches!(r, Reply::Text(_)) && list[i].accept.secret;
+        list.remove(i).tx.send(r).is_ok().then_some(secret)
     }
 
     /// Ends every wait in `thread` (on /stop or /new), telling them `why`.

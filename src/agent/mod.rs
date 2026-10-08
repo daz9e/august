@@ -211,7 +211,7 @@ impl Agent {
             return Ok(());
         }
         self.session_provider = match settings["model"].as_str() {
-            Some(m) => Some(crate::llm::providers::build_spec(m).await?),
+            Some(m) => Some(crate::llm::providers::build_spec(m)?),
             None => None,
         };
         self.settings = settings;
@@ -291,7 +291,7 @@ impl Agent {
             }
             if let Some(m) = data["model"].as_str().filter(|m| *m != model) {
                 // ponytail: builds the provider on every such call; cache by spec if it costs.
-                provider = crate::llm::providers::build_spec(m).await?;
+                provider = crate::llm::providers::build_spec(m)?;
             }
         }
         // A `context` hook may change what the model sees for this one call (`messages`), or
@@ -372,7 +372,7 @@ impl Agent {
                 tokio::time::sleep(std::time::Duration::from_millis(ms.min(600_000))).await;
             }
             if let Some(m) = data["model"].as_str().filter(|m| *m != self.provider().name()) {
-                self.turn_provider = Some(crate::llm::providers::build_spec(m).await?);
+                self.turn_provider = Some(crate::llm::providers::build_spec(m)?);
             }
             error = Some(failed);
         }

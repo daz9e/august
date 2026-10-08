@@ -45,6 +45,8 @@ type Tail = Arc<StdMutex<VecDeque<String>>>;
 pub struct Manifest {
     pub tools: Vec<ToolSpec>,
     pub commands: Vec<(String, String)>,
+    /// Accounts it signs in to (`/login`).
+    pub accounts: Vec<AccountInfo>,
     pub events: Vec<String>,
     /// `(name, text)` of sections for the system prompt.
     pub sections: Vec<(String, String)>,
@@ -65,6 +67,27 @@ pub struct Manifest {
     pub replaces: Vec<String>,
     /// Jobs of the core it does instead (`render`): the core leaves them to it.
     pub takes: Vec<String>,
+}
+
+/// An account an extension signs in to.
+#[derive(Debug, Clone)]
+pub struct AccountInfo {
+    pub id: String,
+    pub label: String,
+    /// Model providers it unlocks.
+    pub providers: Vec<String>,
+    /// Signed in with an API key August asks for.
+    pub key: Option<KeyLogin>,
+    /// Signed in by the extension's own script (`login`).
+    pub login: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct KeyLogin {
+    /// What to ask for.
+    pub label: String,
+    /// A variable that stands in for the key.
+    pub env: Option<String>,
 }
 
 /// A model provider an extension offers.
@@ -387,6 +410,18 @@ fn parse_manifest(params: &Value) -> Manifest {
         commands: list("commands")
             .iter()
             .filter_map(|c| Some((c["name"].as_str()?.to_string(), c["description"].as_str().unwrap_or_default().to_string())))
+            .collect(),
+        accounts: list("accounts")
+            .iter()
+            .filter_map(|a| {
+                Some(AccountInfo {
+                    id: a["id"].as_str()?.to_string(),
+                    label: a["label"].as_str().unwrap_or_default().to_string(),
+                    providers: a["providers"].as_array().into_iter().flatten().filter_map(|p| p.as_str().map(String::from)).collect(),
+                    key: a["key"]["label"].as_str().map(|label| KeyLogin { label: label.into(), env: a["key"]["env"].as_str().map(String::from) }),
+                    login: a["login"] == true,
+                })
+            })
             .collect(),
         events: list("events").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
         needs: list("needs").iter().filter_map(|e| e.as_str().map(String::from)).collect(),

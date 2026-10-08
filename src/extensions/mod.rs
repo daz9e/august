@@ -7,7 +7,7 @@
 
 mod host;
 
-pub use host::{ProviderInfo, RpcError};
+pub use host::{AccountInfo, ProviderInfo, RpcError};
 
 use crate::llm::ToolSpec;
 use crate::messengers::Thread;
@@ -465,9 +465,23 @@ impl Extensions {
             .collect()
     }
 
-    /// Model providers the running extensions offer.
-    pub fn providers(&self) -> Vec<ProviderInfo> {
-        self.running().iter().flat_map(|(_, h)| h.manifest().providers.clone()).collect()
+    /// Model providers the running extensions offer, with the extension offering each.
+    pub fn providers(&self) -> Vec<(String, ProviderInfo)> {
+        self.running().iter().flat_map(|(name, h)| h.manifest().providers.iter().map(|p| (name.clone(), p.clone())).collect::<Vec<_>>()).collect()
+    }
+
+    /// Accounts the running extensions sign in to, with the extension of each.
+    pub fn accounts(&self) -> Vec<(String, AccountInfo)> {
+        self.running().iter().flat_map(|(name, h)| h.manifest().accounts.iter().map(|a| (name.clone(), a.clone())).collect::<Vec<_>>()).collect()
+    }
+
+    /// Calls `method` (`account_check`, `login`, `logout`) of extension `ext` for an account.
+    pub async fn call_account(&self, ext: &str, method: &str, params: Value, chat: &Origin) -> Result<Value, String> {
+        let host = self.running().into_iter().find(|(n, _)| n == ext).map(|(_, h)| h).ok_or_else(|| format!("extension {ext} is not running"))?;
+        let mut params = params;
+        params["ctx"] = ctx_json(chat);
+        // A sign-in waits for the user (a browser, a code): give it time.
+        host.request(method, params, Duration::from_secs(900)).await
     }
 
     /// Calls `method` on the extension that offers provider `id`, waiting for it to start.
@@ -485,7 +499,7 @@ impl Extensions {
                 break h;
             }
             if std::time::Instant::now() > deadline {
-                let ids: Vec<_> = self.providers().into_iter().map(|p| p.id).collect();
+                let ids: Vec<_> = self.providers().into_iter().map(|(_, p)| p.id).collect();
                 return Err(format!("no provider `{id}` (running: {})", ids.join(", ")).into());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -663,6 +677,7 @@ impl Extensions {
             v["tools"] = json!(tools);
             v["replaces"] = json!(tools.iter().filter(|t| builtin.contains(**t)).collect::<Vec<_>>());
             v["commands"] = json!(m.commands.iter().map(|c| &c.0).collect::<Vec<_>>());
+            v["accounts"] = json!(m.accounts.iter().map(|a| &a.id).collect::<Vec<_>>());
             v["hooks"] = json!(m.events);
             v["needs"] = json!(m.needs);
             v["takes"] = json!(m.takes);

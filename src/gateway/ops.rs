@@ -38,7 +38,7 @@ pub const OPS: &[Op] = &[
     op("edit", MESSAGING, "Replace a sent message {thread, id, message}"),
     op("delete", MESSAGING, "Delete a sent message {thread, id}"),
     op("react", MESSAGING, "React to a message {thread, id, emoji}"),
-    op("listen", MESSAGING, "Listen in {thread} for {buttons, text}; returns a listener id"),
+    op("listen", MESSAGING, "Listen in {thread} for {buttons, text}; returns a listener id. With {secret} a text taken is deleted from the chat"),
     op("next", MESSAGING, "What {listener} took"),
     op("prompt", MESSAGING, "Hand {thread} a message as if the user sent it"),
     op("turn_start", TURNS, "Start a turn {thread, turn: {text, mode: visible|quiet|fork|fresh, source, parent, ...}}; returns its id"),
@@ -48,7 +48,21 @@ pub const OPS: &[Op] = &[
     op("stop", TURNS, "Stop everything running in {thread}, like /stop"),
     op("callTool", Some("tools"), "Run an agent tool {thread, name, input}"),
     op("llm", Some("llm"), "One completion without tools: {prompt} or {messages}, {system}; in {thread}'s conversation's model, counted in its usage"),
-    op("model_set", Some("models"), "Switch to {model} of the current provider"),
+    op("model_set", Some("models"), "Switch to {model} of the current provider, or `provider:model` (`provider:` for its default)"),
+    op("providers", Some("models"), "Every model provider: {id, label, default_model, extension}"),
+    op("models", Some("models"), "The models {provider} offers (default: the active one): [{id, context_window}]"),
+    op("accounts", Some("admin"), "Every account extensions sign in to: {id, label, extension, providers, kind: key|login, status: none|connected|expired, who}"),
+    op("login", Some("admin"), "Sign in to {account}, asking in {thread}; returns {who}"),
+    op("logout", Some("admin"), "Sign out of {account}"),
+    op("account_update", None, "Tell how your {account} stands: {status: none|connected|expired, who}"),
+    op("secret_get", None, "Your secret {key} (an account's API key is under the account's id)"),
+    op("secret_set", None, "Keep your secret {key, value} (null deletes)"),
+    op("login_ask", None, "In your sign-in {session}: ask for {label} ({secret}: deleted from the chat); returns the answer"),
+    op("login_choose", None, "In your sign-in {session}: {question} with {options} as buttons; returns the one picked"),
+    op("login_open", None, "In your sign-in {session}: show {url} to open, with {note}"),
+    op("login_progress", None, "In your sign-in {session}: say {text}"),
+    op("login_callback", None, "In your sign-in {session}: receive one redirect on localhost {port} (0: any) {path}; returns its address"),
+    op("login_wait", None, "In your sign-in {session}: the redirect's query {timeout_ms} (or the address the user pastes)"),
     op("sessions", SESSIONS, "Stored conversations, newest first, of {thread} or all: {id, chat, name, settings, messages, bound}"),
     op("session_new", SESSIONS, "Start a new conversation in {thread} (none: of no chat, addressed as thread {messenger: \"session\", id}), optionally with {name, settings}; returns its id"),
     op("session_update", SESSIONS, "Rename {session} ({name}) or change its {settings}: {model, system, tools}, null deletes"),
@@ -144,7 +158,8 @@ impl Gateway {
             }
             "listen" => {
                 let buttons: Vec<String> = serde_json::from_value(p["buttons"].clone()).unwrap_or_default();
-                json!(self.listen(thread(p)?, buttons, p["text"] == true, ms("ttl_ms", 600_000)))
+                let accept = waits::Accept { buttons, text: p["text"] == true, secret: p["secret"] == true };
+                json!(self.listen(thread(p)?, accept, ms("ttl_ms", 600_000)))
             }
             "next" => self.next(p["listener"].as_u64().ok_or_else(|| anyhow!("missing `listener`"))?, ms("timeout_ms", 300_000)).await?,
             "prompt" => {
@@ -192,7 +207,7 @@ impl Gateway {
                     None => None,
                 };
                 let provider = match model {
-                    Some(m) => providers::build_spec(&m).await?,
+                    Some(m) => providers::build_spec(&m)?,
                     None => self.provider.read().unwrap().clone(),
                 };
                 let c = provider.complete(&crate::util::new_uuid(), system, &messages, &[]).await?;
@@ -205,6 +220,36 @@ impl Gateway {
                 let (provider, model) = self.switch_model(arg("model")?).await?;
                 json!({"provider": provider, "model": model})
             }
+            "providers" => Value::Array(
+                self.ext
+                    .providers()
+                    .into_iter()
+                    .map(|(ext, p)| json!({"id": p.id, "label": p.label, "default_model": p.default_model, "extension": ext}))
+                    .collect(),
+            ),
+            "models" => {
+                let id = match p["provider"].as_str() {
+                    Some(id) => id.to_string(),
+                    None => self.model.read().unwrap().0.clone(),
+                };
+                json!(crate::llm::remote::models(&id).await?.iter().map(|m| m.to_json()).collect::<Vec<_>>())
+            }
+            "accounts" => self.accounts()?,
+            "login" => self.login(arg("account")?, thread(p)?).await?,
+            "logout" => {
+                self.logout(arg("account")?).await?;
+                Value::Null
+            }
+            "account_update" => {
+                self.account_update(ext, arg("account")?, arg("status")?, p["who"].as_str()).await?;
+                Value::Null
+            }
+            "secret_get" => json!(crate::config::secret(ext, arg("key")?)?),
+            "secret_set" => {
+                crate::config::set_secret(ext, arg("key")?, p["value"].as_str())?;
+                Value::Null
+            }
+            "login_ask" | "login_choose" | "login_open" | "login_progress" | "login_callback" | "login_wait" => self.login_step(ext, name, p).await?,
             "sessions" => json!(self.db.sessions(thread(p).ok().map(|t| t.key()).as_deref())?),
             // A conversation of no chat, addressed as thread `{messenger: "session", id}`.
             "session_new" if thread(p).is_err() => {
@@ -351,7 +396,7 @@ impl Gateway {
     }
 
     /// The home thread: the one set with `/home`, else the one the user wrote in last.
-    fn home(&self) -> Result<Thread> {
+    pub(super) fn home(&self) -> Result<Thread> {
         if let Some((m, id)) = crate::config::app()?.home.as_deref().and_then(|h| h.split_once(':')) {
             return Ok(Thread::new(m, id));
         }
@@ -425,8 +470,8 @@ impl Gateway {
         Value::Array(out)
     }
 
-    fn listen(self: &Arc<Self>, thread: Thread, buttons: Vec<String>, text: bool, ttl: Duration) -> u64 {
-        let (id, rx) = self.waits.add(thread, waits::Accept { buttons, text });
+    fn listen(self: &Arc<Self>, thread: Thread, accept: waits::Accept, ttl: Duration) -> u64 {
+        let (id, rx) = self.waits.add(thread, accept);
         self.listeners.lock().unwrap().insert(id, rx);
         // A listener nobody collects mustn't keep taking the user's messages.
         let me = Arc::downgrade(self);
@@ -483,7 +528,8 @@ impl Gateway {
         Ok(self.tools().call(None, name, input, &ctx).await)
     }
 
-    /// Rebuilds the provider with another model of the active provider and persists it.
+    /// Switches to `model` of the active provider, or to `provider:model` (`provider:` for
+    /// its default), and persists it.
     async fn switch_model(&self, model: &str) -> Result<(String, String)> {
         let mut model = model.to_string();
         if self.ext.listens("model_select") {
@@ -496,19 +542,22 @@ impl Gateway {
             }
             model = data["model"].as_str().map(String::from).unwrap_or(model);
         }
-        let model = model.as_str();
+        let ids: Vec<String> = self.ext.providers().into_iter().map(|(_, p)| p.id).collect();
+        let mut sel = providers::parse_spec(&model, &ids)?;
+        anyhow::ensure!(!sel.provider.is_empty(), "no model provider is chosen yet: sign in to one with /login");
+        anyhow::ensure!(ids.contains(&sel.provider), "no provider `{}` (have: {})", sel.provider, ids.join(", "));
+        if sel.model.is_empty() {
+            sel.model = crate::llm::remote::default_model(&sel.provider).await?;
+        }
+        let (provider_id, model) = (sel.provider.clone(), sel.model.clone());
         let previous = self.model.read().unwrap().1.clone();
         crate::agent::SessionStore::journal(&*self.db, &crate::db::Entry::new("model_change", json!({"model": model, "previous": previous})));
-        let mut sel = providers::selection()?;
-        sel.model = Some(model.to_string());
-        let provider_id = sel.provider.id.to_string();
-        let provider = providers::build(sel).await?;
-        *self.provider.write().unwrap() = provider;
-        *self.model.write().unwrap() = (provider_id.clone(), model.to_string());
+        *self.provider.write().unwrap() = providers::build(sel)?;
+        *self.model.write().unwrap() = (provider_id.clone(), model.clone());
         let mut cfg = crate::config::app()?;
         cfg.provider = Some(provider_id.clone());
-        cfg.model = Some(model.to_string());
+        cfg.model = Some(model.clone());
         crate::config::save_app(&cfg)?;
-        Ok((provider_id, model.to_string()))
+        Ok((provider_id, model))
     }
 }

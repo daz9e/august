@@ -1,7 +1,7 @@
 //! Legacy sign-in: the Codex CLI's public OAuth client and the `chatgpt.com/backend-api/codex`
 //! Responses endpoint. Same wire format as `responses.rs`, billed to the ChatGPT plan.
 
-use super::auth::{TokenError, id_claims, now, random_b64, respond, token_request_to};
+use super::auth::{TokenError, id_claims, now, random_b64, token_request_to};
 use super::*;
 use anyhow::bail;
 use base64::Engine;
@@ -39,22 +39,18 @@ pub struct CodexProfile {
 }
 
 impl CodexFile {
-    pub fn load() -> Result<Self> {
-        crate::config::load(AUTH_FILE)
+    pub async fn load() -> Result<Self> {
+        crate::load("chatgpt-codex", AUTH_FILE).await
     }
-    fn save(&self) -> Result<()> {
-        crate::config::save(AUTH_FILE, self)
+    async fn save(&self) -> Result<()> {
+        crate::save("chatgpt-codex", self).await
     }
 }
 
-pub fn is_signed_in() -> Result<bool> {
-    Ok(CodexFile::load()?.profile.is_some())
-}
-
-pub fn logout() -> Result<()> {
-    let mut f = CodexFile::load()?;
+pub async fn logout() -> Result<()> {
+    let mut f = CodexFile::load().await?;
     f.profile = None;
-    f.save()
+    f.save().await
 }
 
 fn profile_from(tok: super::auth::TokenResponse, old: Option<&CodexProfile>) -> Result<CodexProfile> {
@@ -82,7 +78,8 @@ fn profile_from(tok: super::auth::TokenResponse, old: Option<&CodexProfile>) -> 
     })
 }
 
-pub async fn login(http: &reqwest::Client) -> Result<CodexProfile> {
+/// Browser sign-in, run through August.
+pub async fn login(http: &reqwest::Client, steps: &august_ext::Login) -> Result<CodexProfile> {
     let verifier = random_b64(32);
     let challenge = B64.encode(Sha256::digest(verifier.as_bytes()));
     let state = random_b64(16);
@@ -100,20 +97,15 @@ pub async fn login(http: &reqwest::Client) -> Result<CodexProfile> {
         .append_pair("codex_cli_simplified_flow", "true")
         .append_pair("originator", ORIGINATOR);
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
-        .await
-        .with_context(|| {
-            format!("port {CALLBACK_PORT} is in use, probably by an unfinished login or the Codex CLI")
-        })?;
-    println!("Opening the browser to sign in with ChatGPT. If it did not open, visit:\n\n{url}\n");
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    let _ = std::process::Command::new(opener)
-        .arg(url.as_str())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-
-    let code = wait_for_code(listener, state).await?;
+    steps.callback(CALLBACK_PORT, CALLBACK_PATH).await?;
+    steps.open(url.as_str(), "Open this link to sign in with ChatGPT:").await?;
+    let q = steps.wait_callback(crate::LOGIN_TIMEOUT).await?;
+    let get = |k: &str| q[k].as_str().map(str::trim).filter(|v| !v.is_empty());
+    if let Some(err) = get("error") {
+        bail!("sign-in failed: {err} {}", get("error_description").unwrap_or_default());
+    }
+    anyhow::ensure!(get("state") == Some(state.as_str()), "OAuth state mismatch");
+    let code = get("code").context("missing authorization code")?.to_string();
     let tok = token_request_to(
         http,
         TOKEN_URL,
@@ -127,65 +119,10 @@ pub async fn login(http: &reqwest::Client) -> Result<CodexProfile> {
     )
     .await?;
     let profile = profile_from(tok, None)?;
-    let mut file = CodexFile::load()?;
+    let mut file = CodexFile::load().await?;
     file.profile = Some(profile.clone());
-    file.save()?;
+    file.save().await?;
     Ok(profile)
-}
-
-/// Serves the loopback redirect until a callback with the right state arrives.
-async fn wait_for_code(listener: tokio::net::TcpListener, state: String) -> Result<String> {
-    let state = std::sync::Arc::new(state);
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<String>>(1);
-    let mut conns = tokio::task::JoinSet::new();
-    loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                let (sock, _) = accepted?;
-                conns.spawn(handle_callback(sock, state.clone(), tx.clone()));
-            }
-            Some(result) = rx.recv() => return result,
-        }
-    }
-}
-
-async fn handle_callback(
-    mut sock: tokio::net::TcpStream,
-    state: std::sync::Arc<String>,
-    tx: tokio::sync::mpsc::Sender<Result<String>>,
-) {
-    use tokio::io::AsyncReadExt;
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 64 * 1024 {
-        match sock.read(&mut chunk).await {
-            Ok(0) | Err(_) => return,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-        }
-    }
-    let req = String::from_utf8_lossy(&buf);
-    let target = req.split_whitespace().nth(1).unwrap_or("/");
-    let Ok(url) = reqwest::Url::parse(&format!("http://localhost{target}")) else {
-        return respond(&mut sock, 400, "Bad request.").await;
-    };
-    if url.path() != CALLBACK_PATH {
-        return respond(&mut sock, 404, "Callback route not found.").await;
-    }
-    let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-    if let Some(err) = q.get("error") {
-        respond(&mut sock, 400, "ChatGPT was not connected. Return to the terminal.").await;
-        let desc = q.get("error_description").map(String::as_str).unwrap_or_default();
-        let _ = tx.send(Err(anyhow::anyhow!("sign-in failed: {err} {desc}"))).await;
-        return;
-    }
-    match (q.get("code").filter(|c| !c.is_empty()), q.get("state")) {
-        (Some(code), Some(s)) if s == state.as_str() => {
-            respond(&mut sock, 200, "ChatGPT connected to August. You can close this window.").await;
-            let _ = tx.send(Ok(code.clone())).await;
-        }
-        (None, _) => respond(&mut sock, 400, "Missing authorization code.").await,
-        _ => respond(&mut sock, 400, "OAuth state mismatch.").await,
-    }
 }
 
 async fn refresh(http: &reqwest::Client, p: &mut CodexProfile) -> Result<()> {
@@ -205,16 +142,16 @@ async fn refresh(http: &reqwest::Client, p: &mut CodexProfile) -> Result<()> {
             if let Some(te) = e.downcast_ref::<TokenError>()
                 && matches!(te.code.as_str(), "invalid_grant" | "refresh_token_expired" | "refresh_token_reused")
             {
-                logout()?;
-                bail!("ChatGPT session expired, run `cargo run -- login` ({e})");
+                logout().await?;
+                bail!("ChatGPT session expired, run /login chatgpt-codex ({e})");
             }
             return Err(e);
         }
     };
     *p = profile_from(tok, Some(p))?;
-    let mut file = CodexFile::load()?;
+    let mut file = CodexFile::load().await?;
     file.profile = Some(p.clone());
-    file.save()
+    file.save().await
 }
 
 pub struct Session {
@@ -252,15 +189,15 @@ impl TokenSource for Session {
     }
 }
 
-fn load_profile() -> Result<CodexProfile> {
-    CodexFile::load()?
+async fn load_profile() -> Result<CodexProfile> {
+    CodexFile::load().await?
         .profile
-        .context("not signed in to ChatGPT, run `cargo run -- login`")
+        .context("not signed in to ChatGPT (Codex login), run /login chatgpt-codex")
 }
 
 /// Best effort: the Codex backend's model list, if it serves one.
 pub async fn list_models(http: &reqwest::Client) -> Result<Vec<String>> {
-    let mut p = load_profile()?;
+    let mut p = load_profile().await?;
     if p.expires_at <= now() + EXPIRY_MARGIN_SECS {
         refresh(http, &mut p).await?;
     }
@@ -285,15 +222,13 @@ pub async fn list_models(http: &reqwest::Client) -> Result<Vec<String>> {
         .collect())
 }
 
-pub type Codex = Responses<Session>;
-
-pub async fn provider(model: String, effort: String) -> Result<Codex> {
-    let profile = load_profile()?;
+/// The signed-in session (one per process: refresh tokens rotate).
+pub async fn session() -> Result<Session> {
+    let profile = load_profile().await?;
     let account_id = profile.account_id.clone();
-    let session = Session {
-        http: crate::util::http_client(),
-        profile: Mutex::new(profile),
-        account_id,
-    };
-    Ok(Responses::new(API_BASE, session, model, Some(effort)))
+    Ok(Session { http: august_llm::http_client(), profile: Mutex::new(profile), account_id })
+}
+
+pub fn model(session: std::sync::Arc<Session>, model: String, effort: String) -> Responses<std::sync::Arc<Session>> {
+    Responses::new(API_BASE, session, model, Some(effort))
 }

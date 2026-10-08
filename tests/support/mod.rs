@@ -132,7 +132,7 @@ async fn handle(State(s): State<Arc<Inner>>, method: Method, uri: Uri, headers: 
     let path = uri.path().to_string();
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
     let key = Some(header("x-api-key")).filter(|k| !k.is_empty()).unwrap_or_else(|| header("authorization").trim_start_matches("Bearer ").to_string());
-    s.log.lock().unwrap().push(Req { path: path.clone(), body: body.to_vec(), key });
+    s.log.lock().unwrap().push(Req { path: path.clone(), body: body.to_vec(), key: key.clone() });
 
     // The Anthropic Messages API, streamed: the fake LLM's text answer as one delta.
     if path.ends_with("/messages") {
@@ -160,6 +160,13 @@ async fn handle(State(s): State<Arc<Inner>>, method: Method, uri: Uri, headers: 
         let fake = s.clone();
         let reply = tokio::task::spawn_blocking(move || (fake.llm.as_ref().unwrap())(&req)).await.unwrap();
         return axum::Json(reply).into_response();
+    }
+    // A model list, for any API; the key `bad` is refused.
+    if path.ends_with("/models") {
+        if key == "bad" {
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+        return axum::Json(json!({"data": [{"id": "fake-model"}]})).into_response();
     }
     if path.ends_with("/audio/transcriptions") {
         return axum::Json(json!({"text": TRANSCRIPT})).into_response();
@@ -312,6 +319,8 @@ fn spawn(fake: &Fake, setup: Setup) -> Gateway {
         ("AUGUST_MODEL".into(), "fake-model".into()),
         ("OPENAI_API_KEY".into(), "test".into()),
         ("OPENAI_BASE_URL".into(), format!("{}/v1", fake.url)),
+        // Sign-in links must not open a browser on the machine running the tests.
+        ("AUGUST_OPEN_BROWSER".into(), "0".into()),
     ];
     if setup.telegram {
         env.push(("TELEGRAM_API_BASE".into(), fake.url.clone()));

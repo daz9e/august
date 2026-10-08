@@ -27,6 +27,9 @@ type ToolFn = Arc<dyn Fn(Value, Ctx) -> Fut<String> + Send + Sync>;
 type CommandFn = Arc<dyn Fn(String, Ctx) -> Fut<Option<String>> + Send + Sync>;
 type CompleteFn = Arc<dyn Fn(llm::Request, Stream) -> Fut<llm::Completion> + Send + Sync>;
 type ModelsFn = Arc<dyn Fn(String) -> Fut<Vec<llm::ModelInfo>> + Send + Sync>;
+type CheckFn = Arc<dyn Fn(String, String) -> Fut<()> + Send + Sync>;
+type LoginFn = Arc<dyn Fn(String, Login) -> Fut<Signed> + Send + Sync>;
+type LogoutFn = Arc<dyn Fn(String) -> Fut<()> + Send + Sync>;
 /// Returns fields that replace the event's data (`None` leaves it as is).
 type HookFn = Arc<dyn Fn(Value, Ctx) -> Fut<Option<Value>> + Send + Sync>;
 
@@ -69,6 +72,80 @@ impl Stream {
         if !text.is_empty() {
             self.event(json!({"type": "text", "text": text}));
         }
+    }
+}
+
+/// Something a user signs in to (a model provider's account, a service an extension
+/// uses). August runs the sign-in and keeps its secrets; the extension only scripts it.
+struct Account {
+    id: String,
+    label: String,
+    /// Model providers it unlocks (after `/login` August switches to the first).
+    providers: Vec<String>,
+    /// Signed in with an API key August asks for: `(what to ask, env var that stands in)`.
+    key: Option<(String, Option<String>)>,
+    check: Option<CheckFn>,
+    login: Option<LoginFn>,
+    logout: Option<LogoutFn>,
+}
+
+impl Account {
+    fn manifest(&self) -> Value {
+        let key = self.key.as_ref().map(|(label, env)| json!({"label": label, "env": env}));
+        json!({"id": self.id, "label": self.label, "providers": self.providers, "key": key, "login": self.login.is_some()})
+    }
+}
+
+/// A finished sign-in: who is signed in, and until when (unix seconds).
+pub struct Signed {
+    pub who: String,
+    pub expires_at: Option<u64>,
+}
+
+/// A sign-in in progress. Every step goes through August, which shows it wherever the
+/// user started it (a chat, the terminal) and brings back the answer.
+pub struct Login {
+    link: Arc<Link>,
+    session: u64,
+}
+
+impl Login {
+    async fn step(&self, op: &str, mut params: Value) -> Result<Value> {
+        params["session"] = json!(self.session);
+        self.link.call(op, params).await
+    }
+
+    /// Asks for a value; with `secret` the answer is deleted from the chat and hidden.
+    pub async fn ask(&self, label: &str, secret: bool) -> Result<String> {
+        let v = self.step("login_ask", json!({"label": label, "secret": secret})).await?;
+        Ok(v.as_str().unwrap_or_default().to_string())
+    }
+
+    /// Lets the user pick one of `options`.
+    pub async fn choose(&self, question: &str, options: &[&str]) -> Result<String> {
+        let v = self.step("login_choose", json!({"question": question, "options": options})).await?;
+        Ok(v.as_str().unwrap_or_default().to_string())
+    }
+
+    /// Shows `url` to open (and opens it when the user is at this machine).
+    pub async fn open(&self, url: &str, note: &str) -> Result<()> {
+        self.step("login_open", json!({"url": url, "note": note})).await.map(drop)
+    }
+
+    pub async fn progress(&self, text: &str) -> Result<()> {
+        self.step("login_progress", json!({"text": text})).await.map(drop)
+    }
+
+    /// Starts receiving one redirect on `http://localhost:<port><path>` (`port` 0: any
+    /// free one); returns that address.
+    pub async fn callback(&self, port: u16, path: &str) -> Result<String> {
+        let v = self.step("login_callback", json!({"port": port, "path": path})).await?;
+        Ok(v.as_str().unwrap_or_default().to_string())
+    }
+
+    /// The redirect's query parameters, once it came (or the user pasted its address).
+    pub async fn wait_callback(&self, timeout: Duration) -> Result<Value> {
+        self.step("login_wait", json!({"timeout_ms": timeout.as_millis() as u64})).await
     }
 }
 
@@ -251,6 +328,7 @@ impl Ctx {
         self.link.ask(self.thread()?, question, options, timeout).await
     }
 
+
     /// Runs any agent tool (built-in, MCP or an extension's) for the thread, with its hooks:
     /// `(output, is_error)`.
     pub async fn call_tool(&self, name: &str, input: Value) -> Result<(String, bool)> {
@@ -285,6 +363,7 @@ struct Inner {
     link: Arc<Link>,
     tools: RwLock<Vec<Tool>>,
     commands: RwLock<Vec<(String, String, CommandFn)>>,
+    accounts: RwLock<Vec<Account>>,
     hooks: RwLock<Vec<(String, HookFn)>>,
     sections: RwLock<Vec<(String, String)>>,
     settings: RwLock<Value>,
@@ -321,6 +400,7 @@ impl August {
             link: Arc::new(Link { out: Mutex::new(std::io::stdout()), next_id: AtomicU64::new(1), waiting: Mutex::default() }),
             tools: RwLock::default(),
             commands: RwLock::default(),
+            accounts: RwLock::default(),
             emits: RwLock::default(),
             replaces: RwLock::default(),
             takes: RwLock::default(),
@@ -486,6 +566,64 @@ impl August {
         self.changed();
     }
 
+    /// An account signed in to with an API key: August asks for it (`/login`), runs `check(account,
+    /// key)` (an error rejects it) and keeps it; read it with `secret(account)`. `env`: a
+    /// variable that stands in for it.
+    pub fn register_key_account<F, R>(&self, id: &str, label: &str, providers: &[&str], ask: &str, env: Option<&str>, check: F)
+    where
+        F: Fn(String, String) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<()>> + Send + 'static,
+    {
+        let check: CheckFn = Arc::new(move |a, k| Box::pin(check(a, k)));
+        let key = Some((ask.to_string(), env.map(String::from)));
+        self.add_account(Account { id: id.into(), label: label.into(), providers: providers.iter().map(|p| p.to_string()).collect(), key, check: Some(check), login: None, logout: None });
+    }
+
+    /// An account with a sign-in of its own (OAuth, a device code, ...): `login(account, steps)`
+    /// scripts it with the steps of `Login` and returns who signed in; `logout(account)`
+    /// forgets what it keeps. Keep tokens with `set_secret`.
+    pub fn register_login_account<F, R, G, GR>(&self, id: &str, label: &str, providers: &[&str], login: F, logout: G)
+    where
+        F: Fn(String, Login) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<Signed>> + Send + 'static,
+        G: Fn(String) -> GR + Send + Sync + 'static,
+        GR: Future<Output = Result<()>> + Send + 'static,
+    {
+        let login: LoginFn = Arc::new(move |a, l| Box::pin(login(a, l)));
+        let logout: LogoutFn = Arc::new(move |a| Box::pin(logout(a)));
+        self.add_account(Account { id: id.into(), label: label.into(), providers: providers.iter().map(|p| p.to_string()).collect(), key: None, check: None, login: Some(login), logout: Some(logout) });
+    }
+
+    fn add_account(&self, account: Account) {
+        let mut accounts = self.0.accounts.write().unwrap();
+        accounts.retain(|a| a.id != account.id);
+        accounts.push(account);
+        drop(accounts);
+        self.changed();
+    }
+
+    pub fn unregister_account(&self, id: &str) {
+        self.0.accounts.write().unwrap().retain(|a| a.id != id);
+        self.changed();
+    }
+
+    /// This extension's secret `key` (an account's API key is kept under the account's id).
+    pub async fn secret(&self, key: &str) -> Result<Option<String>> {
+        let v = self.0.link.call("secret_get", json!({"key": key})).await?;
+        Ok(v.as_str().map(String::from))
+    }
+
+    /// Keeps (or with `None` deletes) secret `key`.
+    pub async fn set_secret(&self, key: &str, value: Option<&str>) -> Result<()> {
+        self.0.link.call("secret_set", json!({"key": key, "value": value})).await.map(drop)
+    }
+
+    /// Tells August how an account stands: `connected` (by `who`) or `expired` (the user is
+    /// told to sign in again) or `none`.
+    pub async fn account_update(&self, id: &str, status: &str, who: Option<&str>) -> Result<()> {
+        self.0.link.call("account_update", json!({"account": id, "status": status, "who": who})).await.map(drop)
+    }
+
     /// Declares what this extension uses beyond its own thread: `messaging`, `turns`,
     /// `tools`, `llm`, `models`, `sessions`, `memory`, `config`, `admin` (see the guide); other such
     /// calls are refused.
@@ -592,6 +730,7 @@ impl August {
         json!({
             "tools": tools.iter().map(|t| json!({"name": t.name, "description": t.description, "parameters": t.parameters})).collect::<Vec<_>>(),
             "commands": commands.iter().map(|(n, d, _)| json!({"name": n, "description": d})).collect::<Vec<_>>(),
+            "accounts": self.0.accounts.read().unwrap().iter().map(Account::manifest).collect::<Vec<_>>(),
             "events": events,
             "needs": *self.0.needs.read().unwrap(),
             "timeouts": *self.0.timeouts.read().unwrap(),
@@ -637,6 +776,23 @@ impl August {
                 let run = run.ok_or_else(|| anyhow!("no command named {name}"))?;
                 let reply = run(params["args"].as_str().unwrap_or_default().to_string(), ctx).await?;
                 Ok(reply.map(Value::String).unwrap_or(Value::Null))
+            }
+            "account_check" | "login" | "logout" => {
+                let id = params["account"].as_str().unwrap_or_default().to_string();
+                let account = self.0.accounts.read().unwrap().iter().find(|a| a.id == id).map(|a| (a.check.clone(), a.login.clone(), a.logout.clone()));
+                let (check, login, logout) = account.ok_or_else(|| anyhow!("no account named {id}"))?;
+                match (method, check, login, logout) {
+                    ("account_check", Some(check), ..) => check(id, params["key"].as_str().unwrap_or_default().to_string()).await.map(|_| Value::Null),
+                    ("account_check", None, ..) => Ok(Value::Null),
+                    ("login", _, Some(login), _) => {
+                        let session = Login { link: ctx.link.clone(), session: params["session"].as_u64().unwrap_or(0) };
+                        let signed = login(id, session).await?;
+                        Ok(json!({"who": signed.who, "expires_at": signed.expires_at}))
+                    }
+                    ("logout", _, _, Some(logout)) => logout(id).await.map(|_| Value::Null),
+                    ("logout", ..) => Ok(Value::Null),
+                    _ => Err(anyhow!("account {id} has no {method}")),
+                }
             }
             "complete" => {
                 let req = llm::Request::from_json(params).ok_or_else(|| anyhow!("bad complete request"))?;

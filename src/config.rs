@@ -3,9 +3,9 @@
 //!
 //! ```text
 //! config/august.json               provider, model, effort, fallback, home thread
-//! config/providers/<id>.json       key of a built-in provider not yet an extension
 //! config/messengers/<id>.json      e.g. telegram: token, allowed
 //! config/extensions/<name>.json    enabled, origin, settings
+//! secrets/<name>.json              an extension's secrets: API keys of accounts, tokens
 //! ```
 //!
 //! Older homes (`config.json`, `credentials.json`, `providers.json`, `channels.json`,
@@ -13,7 +13,7 @@
 //! `config/.migrated/`.
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -37,35 +37,8 @@ pub fn home() -> PathBuf {
         })
 }
 
-/// Reads `~/.august/<name>`; a missing file yields `T::default()`.
-pub fn load<T: DeserializeOwned + Default>(name: &str) -> Result<T> {
-    let path = home().join(name);
-    match std::fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str(&s).with_context(|| format!("parse {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
-    }
-}
-
-/// Atomically writes `~/.august/<name>` with mode 0600.
-pub fn save<T: Serialize>(name: &str, value: &T) -> Result<()> {
-    let path = home().join(name);
-    std::fs::create_dir_all(home())?;
-    let tmp = path.with_extension("json.tmp");
-    {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-        let mut f = opts.open(&tmp)?;
-        std::io::Write::write_all(&mut f, serde_json::to_string_pretty(value)?.as_bytes())?;
-    }
-    std::fs::rename(&tmp, &path).with_context(|| format!("write {}", path.display()))
-}
-
-
 /// August's own settings (`config/august.json`): the active provider and model, chosen
-/// with `august login` / `august model`, and the home thread.
+/// with `/login` / `/model` (or `august login` / `august model`), and the home thread.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,22 +55,10 @@ pub struct Config {
     pub home: Option<String>,
 }
 
-/// API keys by provider id (from `config/providers/<id>.json`). ChatGPT OAuth tokens live
-/// in `chatgpt-auth.json`.
-pub type Credentials = BTreeMap<String, ApiCredential>;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApiCredential {
-    pub key: String,
-    /// OpenAI-compatible endpoints only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-}
-
 // ---- units -------------------------------------------------------------------
 
 /// Kinds of units with a file each under `config/<kind>/`.
-pub const KINDS: [&str; 3] = ["providers", "messengers", "extensions"];
+pub const KINDS: [&str; 2] = ["messengers", "extensions"];
 
 /// Fields whose values are secrets wherever they appear: shown as `••••`.
 const SECRET_FIELDS: [&str; 5] = ["key", "token", "api_key", "password", "secret"];
@@ -155,19 +116,6 @@ pub fn save_unit(kind: &str, id: &str, value: &serde_json::Value) -> Result<()> 
     write_json(&unit_file(kind, id)?, value)
 }
 
-/// Every unit of `kind` with a file, by id.
-pub fn units(kind: &str) -> Result<BTreeMap<String, serde_json::Value>> {
-    let mut out = BTreeMap::new();
-    let dir = config_dir().join(kind);
-    for e in std::fs::read_dir(&dir).into_iter().flatten().filter_map(|e| e.ok()) {
-        let name = e.file_name().to_string_lossy().to_string();
-        if let Some(id) = name.strip_suffix(".json") {
-            out.insert(id.to_string(), read_json(&e.path())?);
-        }
-    }
-    Ok(out)
-}
-
 pub fn app() -> Result<Config> {
     Ok(serde_json::from_value(unit("august", "")?)?)
 }
@@ -185,33 +133,32 @@ pub fn save_app(cfg: &Config) -> Result<()> {
     save_unit("august", "", &v)
 }
 
-/// Stored API keys of every provider.
-pub fn credentials() -> Result<Credentials> {
-    Ok(units("providers")?
-        .into_iter()
-        .filter_map(|(id, v)| {
-            let key = v["key"].as_str()?.to_string();
-            Some((id, ApiCredential { key, base_url: v["base_url"].as_str().map(String::from) }))
-        })
-        .collect())
+// ---- secrets -----------------------------------------------------------------
+
+/// `secrets/<ext>.json` (mode 0600): an extension's secrets by key (an account's API key
+/// under the account's id, tokens, ...). Only August reads them, for that extension.
+fn secrets_file(ext: &str) -> Result<PathBuf> {
+    anyhow::ensure!(valid_name(ext), "bad extension name `{ext}`");
+    Ok(home().join("secrets").join(format!("{ext}.json")))
 }
 
-/// Stores (or with `None` removes) a provider's key; its other settings stay.
-pub fn save_credential(id: &str, cred: Option<&ApiCredential>) -> Result<()> {
-    let mut v = unit("providers", id)?;
-    let o = v.as_object_mut().context("provider settings must be an object")?;
-    o.remove("key");
-    o.remove("base_url");
-    if let Some(c) = cred {
-        o.insert("key".into(), c.key.clone().into());
-        if let Some(url) = &c.base_url {
-            o.insert("base_url".into(), url.clone().into());
-        }
-    }
-    save_unit("providers", id, &v)
+pub fn secret(ext: &str, key: &str) -> Result<Option<String>> {
+    Ok(read_json(&secrets_file(ext)?)?[key].as_str().map(String::from))
 }
 
-/// A dotted path into the settings: `august.model`, `providers.openai.base_url`,
+/// Keeps (or with `None` deletes) secret `key` of `ext`.
+pub fn set_secret(ext: &str, key: &str, value: Option<&str>) -> Result<()> {
+    let path = secrets_file(ext)?;
+    let mut all = read_json(&path)?;
+    let o = all.as_object_mut().context("secrets must be an object")?;
+    match value {
+        Some(v) => o.insert(key.into(), v.into()),
+        None => o.remove(key),
+    };
+    write_json(&path, &all)
+}
+
+/// A dotted path into the settings: `august.model`,
 /// `messengers.telegram.allowed`, `extensions.browser.settings.headless`.
 /// Returns `(kind, id, path inside the unit's file)`.
 pub fn split_path(path: &str) -> Result<(String, String, Vec<String>)> {
@@ -355,7 +302,7 @@ fn migrate() -> Result<()> {
 }
 
 /// Moves `config/providers/<id>.json` of providers that became extensions into those
-/// extensions' settings (`anthropic`: key, base_url; `opencode`, `opencode-go`: key; a provider of the user's own with a
+/// extensions (`anthropic`, `opencode`, `opencode-go`: the key becomes the account's secret, base_url a setting; a provider of the user's own with a
 /// `format` becomes an endpoint of the extension speaking it). The old file goes to
 /// `config/.migrated/providers/`.
 fn migrate_providers() -> Result<()> {
@@ -365,8 +312,13 @@ fn migrate_providers() -> Result<()> {
         let Some(id) = name.strip_suffix(".json") else { continue };
         let v = read_json(&e.path())?;
         let (ext, patch) = match (id, v["format"].as_str()) {
-            ("anthropic", _) => ("anthropic", serde_json::json!({"key": v["key"], "base_url": v["base_url"]})),
-            ("opencode" | "opencode-go", _) => ("opencode", serde_json::json!({"key": v["key"]})),
+            ("anthropic" | "opencode" | "opencode-go", _) => {
+                let ext = if id == "anthropic" { "anthropic" } else { "opencode" };
+                if let Some(key) = v["key"].as_str() {
+                    set_secret(ext, ext, Some(key))?;
+                }
+                (ext, serde_json::json!({"base_url": v["base_url"]}))
+            }
             (_, Some(f @ ("openai" | "anthropic"))) => (f, serde_json::json!({"endpoints": {id: v}})),
             _ => continue,
         };

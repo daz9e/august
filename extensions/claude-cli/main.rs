@@ -256,5 +256,21 @@ async fn main() {
             complete(req, &mut on_text).await
         },
     );
+    // The CLI holds its own login; signing in here checks that it is there.
+    august.register_login_account(
+        "claude-cli",
+        "Claude Pro/Max via the Claude Code CLI",
+        &["claude-cli"],
+        |_, login| async move {
+            let out = tokio::process::Command::new(bin()).arg("--version").output().await;
+            let version = match out {
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+                _ => anyhow::bail!("`{}` not found: install Claude Code or set AUGUST_CLAUDE_BIN", bin()),
+            };
+            login.progress(&format!("Using `{}` ({version}). If it isn't signed in yet, run `claude auth login` in a terminal.", bin())).await?;
+            Ok(august_ext::Signed { who: format!("Claude Code {version}"), expires_at: None })
+        },
+        |_| async { Ok(()) },
+    );
     august.run().await;
 }
