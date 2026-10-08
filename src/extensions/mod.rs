@@ -23,12 +23,13 @@ const HOST_TS: &str = include_str!("host.ts");
 const TYPES: &str = include_str!("august.d.ts");
 const GUIDE: &str = include_str!("guide.md");
 /// The extensions that ship with August, as binaries `august-ext-<name>` next to `august`.
-const DEFAULTS: &[&str] = &["browser", "clarify", "goal", "mcp", "messaging", "review", "scheduler", "subagents", "voice", "web"];
+const DEFAULTS: &[&str] = &["browser", "clarify", "commands", "goal", "mcp", "messaging", "review", "scheduler", "subagents", "voice", "web"];
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message_in` may do real work on attachments (e.g. transcribe a voice note).
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(120);
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+/// Long enough for `/compact` to summarise a big conversation.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
 /// Observe-only hooks run in the background, so they may take long.
 const OBSERVER_TIMEOUT: Duration = Duration::from_secs(3600);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -520,9 +521,9 @@ impl Extensions {
         self.running().iter().flat_map(|(_, h)| h.manifest().sections.clone()).map(|(_, text)| format!("\n\n{}", text.trim())).collect()
     }
 
-    /// `(extension, name, description)` of extension commands, minus names in `reserved`.
-    pub fn commands(&self, reserved: &[&str]) -> Vec<(String, String, String)> {
-        let mut seen: HashSet<String> = reserved.iter().map(|s| s.to_string()).collect();
+    /// `(extension, name, description)` of extension commands; of two with one name, the first.
+    pub fn commands(&self) -> Vec<(String, String, String)> {
+        let mut seen = HashSet::new();
         self.running()
             .iter()
             .flat_map(|(owner, h)| h.manifest().commands.iter().map(|(n, d)| (owner.clone(), n.clone(), d.clone())).collect::<Vec<_>>())
@@ -580,8 +581,8 @@ impl Extensions {
     }
 }
 
-/// `/extensions`' text for a `list()`.
-pub fn status(list: &Value) -> String {
+/// The status report (logged at start) for a `list()`.
+fn status(list: &Value) -> String {
     let all = list.as_array().cloned().unwrap_or_default();
     if all.is_empty() {
         return format!("No extensions. They live in `{}`.", dir().display());

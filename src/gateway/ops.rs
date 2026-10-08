@@ -75,24 +75,6 @@ pub fn find(name: &str) -> Option<&'static Op> {
     OPS.iter().find(|o| o.name == name)
 }
 
-/// Who asks: the user (a slash command, the CLI) or an extension, whose permissions its
-/// host has already checked.
-#[derive(Clone, Copy)]
-pub enum Caller<'a> {
-    User,
-    Extension(&'a str),
-}
-
-impl Caller<'_> {
-    /// `ext:<name>` or `user`, as hooks and the journal show who did something.
-    pub fn label(&self) -> String {
-        match self {
-            Caller::Extension(name) => format!("ext:{name}"),
-            Caller::User => "user".into(),
-        }
-    }
-}
-
 pub fn thread(params: &Value) -> Result<Thread> {
     let t = &params["thread"];
     match (t["messenger"].as_str(), t["id"].as_str()) {
@@ -121,10 +103,11 @@ pub(super) fn message(params: &Value) -> Result<OutMessage> {
 }
 
 impl Gateway {
-    /// Runs operation `name` for `caller`.
-    pub(crate) async fn op(self: &Arc<Self>, caller: Caller<'_>, name: &str, p: &Value) -> Result<Value> {
-        // `as_user` (a slash command, say): the extension acts for the user.
-        let caller = if p["as_user"] == true { Caller::User } else { caller };
+    /// Runs operation `name` for extension `ext`, whose permissions its host has checked;
+    /// with `as_user` (a slash command, say) it acts for the user.
+    pub(crate) async fn op(self: &Arc<Self>, ext: &str, name: &str, p: &Value) -> Result<Value> {
+        // As hooks and the journal show who did something.
+        let caller = if p["as_user"] == true { "user".to_string() } else { format!("ext:{ext}") };
         // `"thread": "home"` is the user's home thread.
         let home;
         let p = if p["thread"] == "home" {
@@ -136,11 +119,6 @@ impl Gateway {
         };
         let arg = |k: &str| p[k].as_str().ok_or_else(|| anyhow!("missing string `{k}`"));
         let ms = |k: &str, default: u64| Duration::from_millis(p[k].as_u64().unwrap_or(default));
-        let own = || match caller {
-            Caller::Extension(name) => Ok(name),
-            Caller::User => Err(anyhow!("`{name}` is for extensions")),
-        };
-        let store_scope = own;
         Ok(match name {
             "ops" => Value::Array(OPS.iter().map(|o| json!({"name": o.name, "permission": o.permission, "about": o.about})).collect()),
             "tools" => json!(self.tool_list()),
@@ -170,7 +148,7 @@ impl Gateway {
                 let t = thread(p)?;
                 let m = self.messenger(&t)?;
                 let (gw, text) = (self.clone(), arg("text")?.to_string());
-                let source = p["source"].as_str().map(String::from).unwrap_or_else(|| caller.label());
+                let source = p["source"].as_str().map(String::from).unwrap_or_else(|| caller.clone());
                 let deliver = p["deliver"].as_str().unwrap_or("steer").to_string();
                 anyhow::ensure!(["steer", "followUp", "nextTurn"].contains(&deliver.as_str()), "`deliver` is steer, followUp or nextTurn");
                 // Not awaited: the caller may be inside a turn of that very thread.
@@ -210,7 +188,7 @@ impl Gateway {
                 let event = if name == "session_new" { "session_before_new" } else { "session_before_switch" };
                 if self.ext.listens(event) {
                     let current = self.db.current_session(&t.key())?;
-                    let data = json!({"session": current, "to": p["session"], "by": caller.label()});
+                    let data = json!({"session": current, "to": p["session"], "by": caller});
                     let data = self.ext.emit(event, data, &Origin::thread(t.clone())).await;
                     match &data["block"] {
                         Value::String(why) if !why.is_empty() => bail!("blocked by an extension: {why}"),
@@ -249,7 +227,7 @@ impl Gateway {
                     (None, Ok(t)) => self.db.current_session(&t.key())?,
                     (None, Err(_)) => None,
                 };
-                e.caller = Some(caller.label());
+                e.caller = Some(caller);
                 json!(self.db.journal(&e)?)
             }
             "session_update" => {
@@ -274,20 +252,15 @@ impl Gateway {
                 Value::Null
             }
             "extensions_reload" => {
-                let keep = match caller {
-                    Caller::Extension(name) => Some(name),
-                    Caller::User => None,
-                };
-                self.ext.reload_except(keep).await;
+                self.ext.reload_except(Some(ext)).await;
                 self.publish_commands().await;
                 self.ext.list()
             }
             "settings" => {
-                let ext = own()?;
                 extensions::with_defaults(&self.ext.settings_schema(ext), &crate::config::unit("extensions", ext)?["settings"])
             }
             "settings_set" => {
-                let path = format!("extensions.{}.settings.{}", own()?, arg("path")?);
+                let path = format!("extensions.{}.settings.{}", ext, arg("path")?);
                 self.set_config(&path, p["value"].clone()).await?;
                 Value::Null
             }
@@ -301,12 +274,10 @@ impl Gateway {
             }
             "config_set" => {
                 let path = arg("path")?;
-                if let Caller::Extension(_) = caller {
-                    let (kind, _, inner) = crate::config::split_path(path)?;
-                    let field = inner.first().map(String::as_str);
-                    if kind == "extensions" && matches!(field, None | Some("enabled" | "origin")) {
-                        bail!("only the user turns extensions on and off");
-                    }
+                let (kind, _, inner) = crate::config::split_path(path)?;
+                let field = inner.first().map(String::as_str);
+                if caller != "user" && kind == "extensions" && matches!(field, None | Some("enabled" | "origin")) {
+                    bail!("only the user turns extensions on and off");
                 }
                 self.set_config(path, p["value"].clone()).await?;
                 Value::Null
@@ -316,16 +287,16 @@ impl Gateway {
                 let approver = self.approver(self.messenger(&t)?, t, None);
                 json!(approver.approve(arg("action")?).await)
             }
-            "store_get" => match self.db.kv_get(store_scope()?, arg("key")?)? {
+            "store_get" => match self.db.kv_get(ext, arg("key")?)? {
                 Some(v) => serde_json::from_str(&v).unwrap_or(Value::Null),
                 None => Value::Null,
             },
             "store_set" => {
                 let value = (!p["value"].is_null()).then(|| p["value"].to_string());
-                self.db.kv_set(store_scope()?, arg("key")?, value.as_deref()).map(|_| Value::Null)?
+                self.db.kv_set(ext, arg("key")?, value.as_deref()).map(|_| Value::Null)?
             }
             "store_list" => {
-                let rows = self.db.kv_list(store_scope()?, p["prefix"].as_str().unwrap_or(""))?;
+                let rows = self.db.kv_list(ext, p["prefix"].as_str().unwrap_or(""))?;
                 Value::Array(rows.into_iter().map(|(k, v)| json!({"key": k, "value": serde_json::from_str::<Value>(&v).unwrap_or(Value::Null)})).collect())
             }
             other => bail!("unknown operation `{other}`"),
@@ -446,7 +417,7 @@ impl Gateway {
         self.turns.cancel_thread(thread)
     }
 
-    async fn call_tool(&self, thread: &Thread, name: &str, input: &Value, caller: &Caller<'_>) -> Result<(String, bool)> {
+    async fn call_tool(&self, thread: &Thread, name: &str, input: &Value, caller: &str) -> Result<(String, bool)> {
         let m = self.messenger(thread)?;
         let files = turn::ThreadFiles { messenger: m.clone(), thread: thread.id.clone() };
         let ctx = ToolCtx {
@@ -457,7 +428,7 @@ impl Gateway {
             files: Some(Arc::new(files)),
             extensions: Some(self.ext.clone()),
             inbox: None,
-            caller: caller.label(),
+            caller: caller.into(),
         };
         Ok(self.tools().call(None, name, input, &ctx).await)
     }

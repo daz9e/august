@@ -722,7 +722,7 @@ async fn extensions_have_settings_the_user_sets_and_secrets_stay_hidden() {
     chat.ask("/home", "home thread").await;
 
     // The user sets a secret; it's shown masked, and the extension hears of the change.
-    let shown = chat.ask("/config extensions.weather.settings.api_key abc123", "api_key").await;
+    let shown = chat.ask("/config extensions.weather.settings.api_key abc123", "settings.api_key` =").await;
     assert!(shown.contains("••••") && !shown.contains("abc123"), "{shown}");
     chat.wait_for("noticed extensions.weather.settings.api_key").await;
     chat.ask("/config extensions.weather.settings.city Paris", "Paris").await;

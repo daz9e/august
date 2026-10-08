@@ -64,7 +64,7 @@ struct ExtCore(Weak<Gateway>);
 impl extensions::Core for ExtCore {
     async fn call(&self, ext: &str, op: &str, params: &Value) -> Result<Value> {
         let gw = self.0.upgrade().ok_or_else(|| anyhow::anyhow!("August is shutting down"))?;
-        gw.op(ops::Caller::Extension(ext), op, params).await
+        gw.op(ext, op, params).await
     }
 
     fn changed(&self) {
