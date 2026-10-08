@@ -2,7 +2,6 @@
 
 mod bash;
 mod fs;
-mod skills;
 
 
 use crate::db::Db;
@@ -54,9 +53,6 @@ impl ToolRegistry {
                 Arc::new(fs::ReadFile),
                 Arc::new(fs::WriteFile),
                 Arc::new(fs::EditFile),
-                Arc::new(skills::LoadSkill),
-                Arc::new(skills::SaveSkill),
-                Arc::new(skills::EditSkill),
             ],
             ext: None,
             hidden: HashSet::new(),

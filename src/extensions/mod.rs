@@ -23,7 +23,7 @@ const HOST_TS: &str = include_str!("host.ts");
 const TYPES: &str = include_str!("august.d.ts");
 const GUIDE: &str = include_str!("guide.md");
 /// The extensions that ship with August, as binaries `august-ext-<name>` next to `august`.
-const DEFAULTS: &[&str] = &["approvals", "browser", "clarify", "commands", "extend", "goal", "mcp", "memory", "messaging", "review", "scheduler", "subagents", "voice", "web"];
+const DEFAULTS: &[&str] = &["approvals", "browser", "clarify", "commands", "extend", "goal", "mcp", "memory", "messaging", "review", "scheduler", "skills", "subagents", "voice", "web"];
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message_in` may do real work on attachments (e.g. transcribe a voice note).
@@ -126,7 +126,7 @@ pub fn guide() -> String {
 }
 
 pub fn valid_name(name: &str) -> bool {
-    crate::skills::valid_name(name)
+    crate::config::valid_name(name)
 }
 
 /// `$AUGUST_BUN`, `bun` on PATH, or the usual install locations.
@@ -227,14 +227,18 @@ impl Extensions {
         found
     }
 
-    /// Folders of the defaults; drops the TypeScript copies earlier versions wrote there.
+    /// Folders of the defaults (dropping the TypeScript copies earlier versions wrote there),
+    /// and the skills August ships in `.runtime/skills`.
     fn prepare_defaults(&self) -> std::io::Result<()> {
         for name in DEFAULTS {
             let folder = self.defaults_dir().join(name);
             std::fs::create_dir_all(&folder)?;
             std::fs::remove_file(folder.join("index.ts")).ok();
         }
-        Ok(())
+        let skill = self.dir.join(".runtime/skills/writing-extensions");
+        std::fs::create_dir_all(&skill)?;
+        let about = "How to extend August itself with TypeScript extensions (tools, slash commands, hooks); read before `save_extension`";
+        std::fs::write(skill.join("SKILL.md"), format!("---\nname: writing-extensions\ndescription: {about}\n---\n{}", guide()))
     }
 
     /// Writes `host.ts` next to the extensions and returns `(bun, host.ts)`.
@@ -272,7 +276,7 @@ impl Extensions {
                     return (generation, State::Failed(format!("{} is missing; build it with `cargo build`", exe.display())));
                 }
                 let mut c = tokio::process::Command::new(exe);
-                c.current_dir(dir).env("AUGUST_EXTENSION_DIR", dir).env("AUGUST_EXTENSIONS", &self.dir);
+                c.current_dir(dir).env("AUGUST_EXTENSION_DIR", dir).env("AUGUST_EXTENSIONS", &self.dir).env("AUGUST_HOME", crate::config::home());
                 c
             }
         };

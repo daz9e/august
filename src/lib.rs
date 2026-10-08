@@ -10,6 +10,5 @@ mod db;
 mod extensions;
 pub mod gateway;
 mod llm;
-mod skills;
 mod tools;
 mod util;

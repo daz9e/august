@@ -1,5 +1,5 @@
-//! The system prompt: the core's own instructions, then sections from the skills module
-//! and the extensions (memory, ...), fixed once per session so the prefix stays cacheable.
+//! The system prompt: the core's own instructions, then the extensions' sections (memory,
+//! skills, ...), fixed once per session so the prefix stays cacheable.
 
 use super::Agent;
 
@@ -18,14 +18,14 @@ pub fn system_prompt(workspace: &std::path::Path, surface: &str) -> String {
 
 impl Agent {
     /// System prompt for the next model call: the base prompt plus a snapshot of the
-    /// sections (skills, extensions'). The snapshot is taken once per session
+    /// extensions' sections. The snapshot is taken once per session
     /// (and again after a compaction), so the prompt prefix stays byte-identical and
     /// provider caching works; changes show up in the next session.
     pub(super) fn system_now(&mut self) -> String {
         if self.snapshot.is_none() {
             let extensions = self.tools.extensions().map(|e| e.prompt_sections()).unwrap_or_default();
             let own = self.settings["system"].as_str().map(|s| format!("\n\n{}", s.trim())).unwrap_or_default();
-            self.snapshot = Some(own + &crate::skills::prompt_section() + &extensions);
+            self.snapshot = Some(own + &extensions);
         }
         self.turn_system.as_ref().unwrap_or(&self.system).clone() + self.snapshot.as_deref().unwrap_or_default()
     }

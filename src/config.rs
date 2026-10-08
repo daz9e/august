@@ -24,6 +24,11 @@ pub fn workspace() -> Result<PathBuf> {
     Ok(dir.canonicalize()?)
 }
 
+/// A unit's, extension's or skill's name: lowercase letters, digits, `-` and `_` (max 64).
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
 pub fn home() -> PathBuf {
     std::env::var("AUGUST_HOME")
         .map(PathBuf::from)
@@ -114,7 +119,7 @@ fn unit_file(kind: &str, id: &str) -> Result<PathBuf> {
         return Ok(config_dir().join("august.json"));
     }
     anyhow::ensure!(KINDS.contains(&kind), "unknown kind `{kind}` (august | {})", KINDS.join(" | "));
-    anyhow::ensure!(crate::skills::valid_name(id), "bad unit name `{id}`");
+    anyhow::ensure!(valid_name(id), "bad unit name `{id}`");
     Ok(config_dir().join(kind).join(format!("{id}.json")))
 }
 
