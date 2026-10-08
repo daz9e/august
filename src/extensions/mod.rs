@@ -35,6 +35,8 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Restarts after a crash before an extension stays down until `/reload`.
 const MAX_RESTARTS: u32 = 3;
+/// Events whose handlers only observe: what they return is ignored.
+const OBSERVERS: &[&str] = &["turn_end", "llm_result", "session_start", "compaction", "reaction", "extension_state", "config_changed", "stop"];
 const ENTRIES: [&str; 3] = ["index.ts", "index.js", "index.mjs"];
 
 /// What extensions can ask of August: the operations of the core's table.
@@ -433,29 +435,24 @@ impl Extensions {
         self.running().iter().any(|(_, h)| h.manifest().events.iter().any(|e| e == event))
     }
 
-    /// Runs `event` through every extension that handles it, in name order. Each one gets
-    /// the data the previous one returned; a `block` or `handled` result stops the chain.
-    /// Failing handlers are skipped.
+    /// Runs `event` through every extension that handles it. Mutating events form a chain in
+    /// the user's order (`hooks.order` in `august.json`, then the rest by name): the fields a
+    /// handler returns are merged into the data the next one sees, and a `block` or `handled`
+    /// result stops the chain. Observe-only events reach every handler at once and come back
+    /// unchanged. Failing handlers are skipped.
     pub async fn emit(&self, event: &str, mut data: Value, chat: &Origin) -> Value {
-        for (name, host) in self.running() {
-            if !host.manifest().events.iter().any(|e| e == event) {
-                continue;
-            }
-            let params = json!({"name": event, "data": data, "ctx": ctx_json(chat)});
-            let default = match event {
-                "message_in" => MESSAGE_TIMEOUT,
-                // Nobody waits for these: let them finish what they started (a fork, a judge).
-                "turn_end" | "llm_result" | "session_start" | "compaction" | "reaction" | "extension_state" | "config_changed" => {
-                    OBSERVER_TIMEOUT
-                }
-                _ => EVENT_TIMEOUT,
-            };
-            let own = host.manifest().timeouts.get(event).copied().map(Duration::from_millis);
-            let timeout = own.unwrap_or(default);
-            match host.request("event", params, timeout).await {
-                Ok(v) if v.is_object() => data = v,
-                Ok(_) => {}
-                Err(e) => eprintln!("extension {name}: `{event}` hook failed: {e}"),
+        let mut hosts: Vec<_> = self.running().into_iter().filter(|(_, h)| h.manifest().events.iter().any(|e| e == event)).collect();
+        if OBSERVERS.contains(&event) {
+            futures_util::future::join_all(hosts.iter().map(|(n, h)| hook(n, h, event, &data, chat))).await;
+            return data;
+        }
+        // ponytail: reads august.json on every chained event; cache it if that ever shows up.
+        let order = crate::config::get("august.hooks.order").unwrap_or_default();
+        let order: Vec<&str> = order.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        hosts.sort_by_key(|(n, _)| order.iter().position(|o| o == n).unwrap_or(usize::MAX));
+        for (name, host) in hosts {
+            if let (Some(Value::Object(changes)), Some(d)) = (hook(&name, &host, event, &data, chat).await, data.as_object_mut()) {
+                d.extend(changes);
             }
             if stopped(&data) {
                 break;
@@ -617,6 +614,19 @@ async fn shut_down(hosts: Vec<Arc<Host>>) {
         h.request("event", params, SHUTDOWN_TIMEOUT)
     });
     futures_util::future::join_all(asked).await;
+}
+
+/// One extension's handler of `event`; `None` when it failed.
+async fn hook(name: &str, host: &Host, event: &str, data: &Value, chat: &Origin) -> Option<Value> {
+    let params = json!({"name": event, "data": data, "ctx": ctx_json(chat)});
+    let default = match event {
+        "message_in" => MESSAGE_TIMEOUT,
+        // Nobody waits for these: let them finish what they started (a fork, a judge).
+        _ if OBSERVERS.contains(&event) && event != "stop" => OBSERVER_TIMEOUT,
+        _ => EVENT_TIMEOUT,
+    };
+    let timeout = host.manifest().timeouts.get(event).copied().map(Duration::from_millis).unwrap_or(default);
+    host.request("event", params, timeout).await.inspect_err(|e| eprintln!("extension {name}: `{event}` hook failed: {e}")).ok()
 }
 
 fn ctx_json(origin: &Origin) -> Value {

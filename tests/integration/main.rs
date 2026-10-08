@@ -26,3 +26,4 @@ mod browser;
 mod web;
 mod clarify;
 mod config;
+mod hooks;

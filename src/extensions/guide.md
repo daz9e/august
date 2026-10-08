@@ -66,8 +66,12 @@ leave it unchanged.
 - `session_start` `{ previous, session }`: the thread started a new conversation (`/new`).
 - `compaction` `{ before, after }`: older history was summarised (estimated tokens).
 
-`turn_end`, `llm_result`, `session_start` and `compaction` only observe: they run in the
-background and their result is ignored.
+Hooks that may change data form a chain: extensions in the user's order (`hooks.order` in
+`august.json`, then the rest by name), each returning only the fields it changes; the next
+one sees the merged result, and `block` / `handled` ends the chain. `turn_end`,
+`llm_result`, `session_start`, `compaction`, `reaction`, `extension_state`,
+`config_changed` and `stop` only observe: every handler gets them at once, the results are
+ignored, and all but `stop` run in the background.
 
 `ctx.thread` is the thread the call belongs to: `{ messenger, id }`, e.g.
 `{ messenger: "telegram", id: "123" }` or a terminal window `{ messenger: "cli", id: "1" }`.
