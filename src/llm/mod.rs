@@ -2,7 +2,6 @@
 //! (`august_ext::llm`), the wire formats in `august-llm`.
 
 pub mod chatgpt;
-pub mod claude_cli;
 pub mod providers;
 pub mod remote;
 pub mod resilient;

@@ -71,10 +71,6 @@ async fn login() -> Result<()> {
             let profile = codex::login(&crate::util::http_client()).await?;
             println!("signed in as {}", profile.email);
         }
-        Auth::Cli => {
-            crate::llm::claude_cli::check_installed().await?;
-            println!("using `{}`; sign in there with `claude auth login` if needed", crate::llm::claude_cli::bin());
-        }
         Auth::Extension => bail!("{} is configured with `august config` (extensions.<name>.settings)", p.id()),
         Auth::ApiKey => {
             let existing = creds.get(p.id()).cloned();

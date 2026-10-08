@@ -42,6 +42,10 @@ name = "august-ext-browser"
 path = "extensions/browser/main.rs"
 
 [[bin]]
+name = "august-ext-claude-cli"
+path = "extensions/claude-cli/main.rs"
+
+[[bin]]
 name = "august-ext-clarify"
 path = "extensions/clarify/main.rs"
 

@@ -14,8 +14,6 @@ pub enum Auth {
     OAuth,
     /// Browser sign-in with the Codex CLI client (legacy ChatGPT login).
     CodexOAuth,
-    /// A local CLI that holds its own login (Claude Code).
-    Cli,
     /// An extension holds the settings and the login.
     Extension,
 }
@@ -40,8 +38,7 @@ pub trait ProviderDef: Send + Sync {
 
 /// All providers, in menu order.
 pub fn registry() -> &'static [&'static dyn ProviderDef] {
-    static REGISTRY: [&dyn ProviderDef; 3] = [
-        &ClaudeCliDef,
+    static REGISTRY: [&dyn ProviderDef; 2] = [
         &ChatGptDef,
         &CodexDef,
     ];
@@ -211,35 +208,6 @@ fn need_model(p: &dyn ProviderDef, sel: &Selection) -> Result<String> {
         .with_context(|| format!("no model selected for {}: run `cargo run -- model`", p.id()))
 }
 
-
-struct ClaudeCliDef;
-
-#[async_trait]
-impl ProviderDef for ClaudeCliDef {
-    fn id(&self) -> &'static str {
-        "claude-cli"
-    }
-    fn label(&self) -> &'static str {
-        "Claude Pro/Max via the Claude Code CLI (tools via text protocol)"
-    }
-    fn auth(&self) -> Auth {
-        Auth::Cli
-    }
-    fn default_model(&self) -> Option<&'static str> {
-        Some("opus")
-    }
-    async fn build(&self, sel: &Selection) -> Result<Arc<dyn LlmProvider>> {
-        llm::claude_cli::check_installed().await?;
-        Ok(Arc::new(llm::claude_cli::ClaudeCli {
-            model: sel.model.clone(),
-            effort: sel.effort.clone(),
-        }))
-    }
-    async fn list_models(&self, _cred: Option<&ApiCredential>) -> Result<Vec<String>> {
-        // Aliases the CLI resolves to the latest model of each family.
-        Ok(["opus", "sonnet", "haiku"].map(String::from).to_vec())
-    }
-}
 
 struct ChatGptDef;
 
