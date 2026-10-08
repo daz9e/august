@@ -233,7 +233,7 @@ refuses the rest: `august.needs("messaging", "turns")` in its setup.
 - `sessions`: `august.sessions.*`;
 - `memory`: `august.memory()`;
 - `config`: `august.config.get/set` (any unit's settings);
-- `admin`: `august.extensions.*` (other extensions: list, enable, disable, reload).
+- `admin`: `august.extensions.*` (other extensions: list, enable, disable, reload; a reload restarts every extension but yours).
 
 Answering in the call's own thread while it runs (`ctx.send`, `ctx.ask`), the store,
 `ctx.approve`, your own settings, and reading `ops`, `tools`, `commands`, `status` need

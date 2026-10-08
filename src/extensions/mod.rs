@@ -73,6 +73,7 @@ impl Origin {
     }
 }
 
+#[derive(Clone)]
 enum State {
     Running(Arc<Host>),
     Failed(String),
@@ -329,16 +330,29 @@ impl Extensions {
 
     /// Stops every extension and starts what is on disk now. Returns the status report.
     pub async fn reload(&self) -> String {
-        let old: Vec<Arc<Host>> = self.running().into_iter().map(|(_, h)| h).collect();
-        shut_down(old).await;
+        self.reload_except(None).await
+    }
+
+    /// Like `reload`, but extension `keep` (the one asking, mid-call) runs on as it is.
+    pub async fn reload_except(&self, keep: Option<&str>) -> String {
+        let (kept, old): (Vec<_>, Vec<_>) = self.running().into_iter().partition(|(name, _)| Some(name.as_str()) == keep);
+        shut_down(old.into_iter().map(|(_, h)| h).collect()).await;
+        let kept: Option<(u64, State)> = kept.into_iter().next().and_then(|(name, _)| {
+            let slots = self.slots.read().unwrap();
+            slots.iter().find(|s| s.name == name).map(|s| (s.generation, s.state.clone()))
+        });
         if let Err(e) = self.prepare_defaults() {
             eprintln!("could not prepare default extensions: {e}");
         }
         let found = self.discover();
-        let started = futures_util::future::join_all(found.iter().map(|(name, launch)| async move {
-            match enabled(name) {
-                false => (0, State::Disabled),
-                true => self.spawn(name, launch).await,
+        let started = futures_util::future::join_all(found.iter().map(|(name, launch)| {
+            let kept = kept.clone().filter(|_| Some(name.as_str()) == keep);
+            async move {
+                match (kept, enabled(name)) {
+                    (Some(kept), _) => kept,
+                    (None, false) => (0, State::Disabled),
+                    (None, true) => self.spawn(name, launch).await,
+                }
             }
         }))
         .await;

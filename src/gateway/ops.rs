@@ -60,7 +60,7 @@ pub const OPS: &[Op] = &[
     op("extensions", Some("admin"), "Every extension with its state and what it registers"),
     op("extension_enable", Some("admin"), "Start {name} and keep it enabled"),
     op("extension_disable", Some("admin"), "Stop {name} and keep it disabled"),
-    op("extensions_reload", Some("admin"), "Restart every extension"),
+    op("extensions_reload", Some("admin"), "Restart every extension but the caller"),
     op("settings", None, "The calling extension's settings, schema defaults filled in"),
     op("settings_set", None, "Set {path, value} in the calling extension's settings (null deletes)"),
     op("config_get", Some("config"), "A setting of any unit at {path} (`august.model`, `extensions.web.settings`); secrets masked"),
@@ -272,7 +272,11 @@ impl Gateway {
                 Value::Null
             }
             "extensions_reload" => {
-                self.ext.reload().await;
+                let keep = match caller {
+                    Caller::Extension(name) => Some(name),
+                    Caller::User => None,
+                };
+                self.ext.reload_except(keep).await;
                 self.publish_commands().await;
                 self.ext.list()
             }
