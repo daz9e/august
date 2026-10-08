@@ -149,3 +149,26 @@ async fn llm_call_picks_the_model_and_tools_of_one_call() {
     assert_eq!(reqs[1]["model"], "fake-model");
     assert!(names(&reqs[1]).len() > 1);
 }
+
+const CENSOR: &str = r#"
+export default function (august) {
+  august.on("message_out", ({ text }) =>
+    text.includes("DROP ME") ? { block: true } : { text: text.replaceAll("sk-123", "[masked]") });
+  august.registerCommand("noise", { description: "Says something dropped", handler: () => "DROP ME" });
+}
+"#;
+
+#[tokio::test]
+async fn message_out_changes_or_drops_what_august_sends() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("the key is sk-123"))).await;
+    let gw = august(&fake, Setup { home: &[("extensions/censor/index.ts", CENSOR)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("what is the key?", "the key is [masked]").await;
+    chat.say("/noise").await;
+    chat.ask("/help", "/noise").await;
+    let all = chat.history().join("\n");
+    assert!(!all.contains("sk-123") && !all.contains("DROP ME"), "{all}");
+}

@@ -4,6 +4,7 @@
 mod approval;
 mod commands;
 mod media;
+mod outbound;
 pub(crate) mod ops;
 mod render;
 mod subagents;
@@ -83,7 +84,10 @@ impl Gateway {
         ext: Arc<Extensions>,
     ) -> Arc<Self> {
         let gw = Arc::new(Self {
-            channels: channels.into_iter().map(|c| (c.id().to_string(), c)).collect(),
+            channels: channels
+                .into_iter()
+                .map(|inner| (inner.id().to_string(), Arc::new(outbound::Hooked { inner, ext: ext.clone() }) as Arc<dyn Messenger>))
+                .collect(),
             chats: Mutex::new(HashMap::new()),
             waits: Arc::default(),
             turns: Default::default(),

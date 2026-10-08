@@ -43,6 +43,10 @@ leave it unchanged.
 - `message_in` `{ text, files }`: a user message, before the agent sees it. `files` are its
   attachments, already saved (`{ path, mime, voice }`). Return `{ text }` to rewrite it, or
   `{ handled: true, reply? }` to swallow it.
+- `message_out` `{ kind: send|edit, id, text, buttons, files, reply_to }`: before August
+  sends or edits any message (replies, command answers, questions, extensions' `send`);
+  a streamed reply passes once per edit. Return changed fields, or `{ block: true }` to drop
+  the message.
 - `before_turn` `{ text, system }`: once per turn. Return `{ system }` to change the base
   system prompt for this turn, `{ text }` to change the user message.
 - `tool_call` `{ tool, input, id, caller }`: before any tool runs (built-in or extension);

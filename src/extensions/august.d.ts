@@ -130,6 +130,16 @@ declare module "august" {
     };
     /** A turn is about to start; `system` is the base system prompt. */
     before_turn: { text: string; system: string };
+    /** August is about to send (`kind: "send"`) or replace (`"edit"`, message `id`) a message
+     *  in `ctx.thread`, whoever sends it; streamed replies pass once per edit. */
+    message_out: {
+      kind: "send" | "edit";
+      id: string | null;
+      text: string;
+      buttons: { id: string; label: string }[][];
+      files: string[];
+      reply_to: string | null;
+    };
     /** A tool is about to run. `id`: the model's call id (null outside a model call);
      *  `caller`: `model`, or `ext:<name>` for an extension's callTool. */
     tool_call: { tool: string; input: any; id: string | null; caller: string };
@@ -176,6 +186,8 @@ declare module "august" {
     /** `handled: true` swallows the message (optionally answering with `reply`). */
     message_in: { text?: string; handled?: boolean; reply?: string };
     before_turn: { text?: string; system?: string };
+    /** Changed fields replace the message's; `block: true` drops it. */
+    message_out: { text?: string; buttons?: { id: string; label: string }[][]; files?: string[]; block?: boolean };
     /** `block` (a reason) stops the call; the model sees the reason as an error. */
     tool_call: { input?: any; block?: string; approve?: boolean; ask?: string };
     tool_result: { output?: string; isError?: boolean };

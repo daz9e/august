@@ -86,7 +86,7 @@ pub fn thread(params: &Value) -> Result<Thread> {
     }
 }
 
-fn message(params: &Value) -> Result<OutMessage> {
+pub(super) fn message(params: &Value) -> Result<OutMessage> {
     let m = &params["message"];
     let text = m.as_str().or(m["text"].as_str()).ok_or_else(|| anyhow!("missing `message.text`"))?;
     let button = |b: &Value| match (b["id"].as_str(), b["label"].as_str()) {
