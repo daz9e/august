@@ -19,10 +19,9 @@ struct ChatFiles(mpsc::UnboundedSender<Ui>);
 impl FileSink for ChatFiles {
     async fn send_file(&self, path: &std::path::Path, caption: &str) -> Result<()> {
         let (done, result) = oneshot::channel();
-        self.0
-            .send(Ui::File { path: path.to_path_buf(), caption: caption.to_string(), done })
-            .map_err(|_| anyhow::anyhow!("the chat is gone"))?;
-        result.await.map_err(|_| anyhow::anyhow!("the chat is gone"))?
+        let message = crate::messengers::OutMessage { text: caption.into(), files: vec![path.to_path_buf()], ..Default::default() };
+        self.0.send(Ui::Send { message, done }).map_err(|_| anyhow::anyhow!("the chat is gone"))?;
+        result.await.map_err(|_| anyhow::anyhow!("the chat is gone"))?.map(drop)
     }
 }
 
@@ -41,6 +40,17 @@ impl FileSink for ThreadFiles {
 }
 
 impl Gateway {
+    /// Sends `message` to `thread`; while a reply streams there, in its place in the stream.
+    pub(super) async fn send_in_order(&self, thread: &Thread, message: crate::messengers::OutMessage) -> Result<String> {
+        let live = self.live.lock().unwrap().get(thread).cloned();
+        let Some(live) = live else {
+            return self.messenger(thread)?.send(&thread.id, &message).await;
+        };
+        let (done, sent) = tokio::sync::oneshot::channel();
+        live.send(Ui::Send { message, done }).map_err(|_| anyhow::anyhow!("the chat is gone"))?;
+        sent.await.map_err(|_| anyhow::anyhow!("the chat is gone"))?
+    }
+
     /// Runs a turn once the chat is free, then whatever the user sent meanwhile that the
     /// turn didn't pick up.
     pub(super) async fn turn(
@@ -89,6 +99,7 @@ impl Gateway {
 
         let (tx, rx) = mpsc::unbounded_channel();
         let renderer = tokio::spawn(render(channel.clone(), chat.to_string(), rx));
+        self.live.lock().unwrap().insert(id.clone(), tx.clone());
 
         let origin = crate::extensions::Origin { thread: Some(id.clone()), turn: Some(tag.clone()) };
         let ctx = ToolCtx {
@@ -153,6 +164,7 @@ impl Gateway {
         }
         self.turns.end(tag.id);
         self.turn_ended(id, &tag, text, &ended);
+        self.live.lock().unwrap().remove(id);
         drop(tx);
         drop(ctx);
         drop(on_event);

@@ -132,7 +132,7 @@ impl Gateway {
                 let t = thread(p)?;
                 let m = self.messenger(&t)?;
                 match name {
-                    "send" => json!(m.send(&t.id, &message(p)?).await?),
+                    "send" => json!(self.send_in_order(&t, message(p)?).await?),
                     "edit" => m.edit(&t.id, arg("id")?, &message(p)?).await.map(|_| Value::Null)?,
                     "delete" => m.delete(&t.id, arg("id")?).await.map(|_| Value::Null)?,
                     _ => m.react(&t.id, arg("id")?, p["emoji"].as_str().unwrap_or("")).await.map(|_| Value::Null)?,
@@ -326,7 +326,7 @@ impl Gateway {
         Ok(())
     }
 
-    fn messenger(&self, thread: &Thread) -> Result<Arc<dyn Messenger>> {
+    pub(super) fn messenger(&self, thread: &Thread) -> Result<Arc<dyn Messenger>> {
         self.channels.get(&thread.messenger).cloned().ok_or_else(|| anyhow!("messenger `{}` is not running", thread.messenger))
     }
 

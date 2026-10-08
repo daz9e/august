@@ -1,7 +1,6 @@
 //! Turns an agent's event stream into sent and edited chat messages.
 
 use crate::messengers::{Messenger, OutMessage};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
@@ -11,8 +10,9 @@ pub(super) enum Ui {
     Text(String),
     Step,
     Tool(String),
-    /// Send a file; text after it continues in a new message below.
-    File { path: PathBuf, caption: String, done: oneshot::Sender<anyhow::Result<()>> },
+    /// Send a message (a file, a question) in its place; text after it continues in a new
+    /// message below. `done` gets its id.
+    Send { message: OutMessage, done: oneshot::Sender<anyhow::Result<String>> },
 }
 
 pub(super) fn tool_line(name: &str, input: &serde_json::Value) -> String {
@@ -54,12 +54,11 @@ pub(super) async fn render(channel: Arc<dyn Messenger>, chat: String, mut rx: mp
                         buf.push_str(&line);
                         buf.push_str("\n\n");
                     }
-                    Ui::File { path, caption, done } => {
+                    Ui::Send { message, done } => {
                         if dirty {
                             flush(&*channel, &chat, &buf, &mut sent, caps.max_len).await;
                         }
-                        let file = OutMessage { text: caption, files: vec![path], ..Default::default() };
-                        done.send(channel.send(&chat, &file).await.map(drop)).ok();
+                        done.send(channel.send(&chat, &message).await).ok();
                         buf.clear();
                         sent.clear();
                         dirty = false;

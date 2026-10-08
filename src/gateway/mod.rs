@@ -54,6 +54,8 @@ pub struct Gateway {
     ext: Arc<Extensions>,
     /// Numbers sub-agents.
     subagents: std::sync::atomic::AtomicU64,
+    /// The stream of each thread's reply in progress, so what else is sent there lands in order.
+    live: StdMutex<HashMap<Thread, tokio::sync::mpsc::UnboundedSender<render::Ui>>>,
 }
 
 /// The core's operations as extensions call them.
@@ -98,6 +100,7 @@ impl Gateway {
             db,
             ext,
             subagents: Default::default(),
+            live: Default::default(),
         });
         gw.ext.set_core(Arc::new(ExtCore(Arc::downgrade(&gw))));
         gw
