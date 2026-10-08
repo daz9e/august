@@ -106,3 +106,64 @@ async fn the_journal_records_what_happened_in_a_conversation() {
     )
     .await;
 }
+
+const ROUTER: &str = r#"
+export default function (august) {
+  august.on("session_start", async ({ reason, previous }, ctx) => {
+    await ctx.send(`session_start ${reason} after ${previous ? "one" : "none"}`);
+    return ctx.thread.messenger === "cli" ? { model: "terminal-model", system: "Be brief." } : undefined;
+  });
+}
+"#;
+
+#[tokio::test]
+async fn session_start_sets_up_a_conversation_before_its_first_turn() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("ok"))).await;
+    let gw = august(&fake, Setup { home: &[("extensions/router/index.ts", ROUTER)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("hello", "ok").await;
+    chat.wait_for("session_start start after none").await;
+    let req = fake.llm_requests().last().unwrap().clone();
+    assert_eq!(req["model"], "terminal-model");
+    assert!(req["messages"][0]["content"].as_str().unwrap().contains("Be brief."));
+
+    // Only once per conversation; /new starts the next one.
+    chat.ask("more", "ok").await;
+    chat.ask("/new", "").await;
+    chat.ask("fresh", "ok").await;
+    chat.wait_for("session_start new after one").await;
+    assert_eq!(chat.texts().iter().filter(|t| t.starts_with("session_start")).count(), 2);
+}
+
+const GUARD: &str = r#"
+export default function (august) {
+  august.needs("sessions");
+  let locked = true;
+  august.on("session_before_new", ({ by }) => (locked ? { block: `locked (asked by ${by})` } : undefined));
+  august.on("session_before_switch", ({ to }) => ({ block: `not to ${to}` }));
+  august.on("session_changed", ({ reason }, ctx) => ctx.send(`changed: ${reason}`));
+  august.registerCommand("unlock", () => { locked = false; return "unlocked"; });
+  august.registerCommand("hop", async (_, ctx) => {
+    try { await august.sessions.switch(ctx.thread, "nowhere"); return "hopped"; } catch (e) { return `hop failed: ${e.message}`; }
+  });
+}
+"#;
+
+#[tokio::test]
+async fn extensions_can_refuse_a_new_or_switched_conversation() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("ok"))).await;
+    let gw = august(&fake, Setup { home: &[("extensions/guard/index.ts", GUARD)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("hello", "ok").await;
+    chat.ask("/new", "blocked by an extension: locked (asked by user)").await;
+    chat.ask("/hop", "hop failed: blocked by an extension: not to nowhere").await;
+    chat.ask("/unlock", "unlocked").await;
+    chat.ask("/new", "Started a new conversation").await;
+    chat.wait_for("changed: new").await;
+}

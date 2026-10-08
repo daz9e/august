@@ -205,6 +205,17 @@ impl Gateway {
             "sessions" => json!(self.db.sessions(thread(p).ok().map(|t| t.key()).as_deref())?),
             "session_new" | "session_switch" => {
                 let t = thread(p)?;
+                let event = if name == "session_new" { "session_before_new" } else { "session_before_switch" };
+                if self.ext.listens(event) {
+                    let current = self.db.current_session(&t.key())?;
+                    let data = json!({"session": current, "to": p["session"], "by": caller.label()});
+                    let data = self.ext.emit(event, data, &Origin::thread(t.clone())).await;
+                    match &data["block"] {
+                        Value::String(why) if !why.is_empty() => bail!("blocked by an extension: {why}"),
+                        Value::Bool(true) => bail!("blocked by an extension"),
+                        _ => {}
+                    }
+                }
                 self.waits.cancel(&t, "new");
                 self.turns.cancel_thread(&t);
                 let chat = self.chat(&t).await?;

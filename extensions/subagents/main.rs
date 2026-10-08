@@ -82,7 +82,7 @@ async fn main() {
 
     // The core cancels the thread's turns, sub-agents included; dropping the report jobs keeps
     // their "cancelled" reports from starting a turn.
-    for event in ["stop", "session_start"] {
+    for event in ["stop", "session_changed"] {
         let running = running.clone();
         august.on(event, move |_, ctx| {
             let jobs = running.lock().unwrap().remove(&ctx.key()).unwrap_or_default();

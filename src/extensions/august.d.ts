@@ -229,8 +229,14 @@ declare module "august" {
     context: { step: number; messages: Message[] };
     /** After each model call (observe only; background). */
     llm_result: { step: number; text: string; toolCalls: { name: string; input: any }[]; usage: Usage };
-    /** The thread started a new conversation, e.g. with /new (observe only; background). */
-    session_start: { previous: string; session: string };
+    /** Before a conversation's first turn (`start`: the thread's first; `new`: after /new). */
+    session_start: { session: string; previous: string | null; reason: "start" | "new"; chat: string };
+    /** The thread's conversation was replaced (/new, a switch), right away. Observe only. */
+    session_changed: { reason: "new" | "switch"; previous: string; session: string };
+    /** /new or `sessions.new` is about to start a conversation in `ctx.thread`. */
+    session_before_new: { session: string | null; to: null; by: string };
+    /** `sessions.switch` is about to continue conversation `to` in `ctx.thread`. */
+    session_before_switch: { session: string | null; to: string; by: string };
     /** Older history was summarised; estimated tokens (observe only; background). */
     compaction: { before: number; after: number };
   }
@@ -261,7 +267,11 @@ declare module "august" {
      *  history is unchanged (keep tool_use / tool_result pairs intact). */
     context: { messages?: Message[] };
     llm_result: void;
-    session_start: void;
+    /** The conversation's own settings, kept with it. */
+    session_start: SessionSettings;
+    session_changed: void;
+    session_before_new: { block?: string };
+    session_before_switch: { block?: string };
     compaction: void;
   }
 

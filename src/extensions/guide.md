@@ -82,13 +82,20 @@ leave it unchanged.
   may continue.
 - `stop` `{ turns }`: the user sent /stop; `turns` are the ids of the turns it cancels. Stop
   any loop of yours in that thread.
-- `session_start` `{ previous, session }`: the thread started a new conversation (`/new`).
+- `session_start` `{ session, previous, reason: start|new, chat }`: before a
+  conversation's first turn (`start`: the thread's first, or after a restart with none;
+  `new`: after `/new`). Return `{ model, system, tools }` to set the conversation's own
+  settings, e.g. another model for one messenger's threads (`ctx.thread.messenger`).
+- `session_changed` `{ reason: new|switch, previous, session }`: the thread's conversation
+  was replaced, right away (drop per-conversation state here).
+- `session_before_new` / `session_before_switch` `{ session, to, by }`: `/new` or a switch
+  is about to happen (`by`: `user` or `ext:<name>`). Return `{ block: "reason" }` to refuse.
 - `compaction` `{ before, after }`: older history was summarised (estimated tokens).
 
 Hooks that may change data form a chain: extensions in the user's order (`hooks.order` in
 `august.json`, then the rest by name), each returning only the fields it changes; the next
 one sees the merged result, and `block` / `handled` ends the chain. `turn_end`,
-`turn_event`, `turn_settled`, `llm_result`, `session_start`, `compaction`, `reaction`, `extension_state`,
+`turn_event`, `turn_settled`, `llm_result`, `session_changed`, `compaction`, `reaction`, `extension_state`,
 `config_changed` and `stop` only observe: every handler gets them at once, the results are
 ignored, and all but `stop` run in the background.
 

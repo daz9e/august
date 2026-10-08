@@ -94,6 +94,9 @@ pub struct Agent {
     settings: Value,
     /// The provider for the session's own `model`, if it has one.
     session_provider: Option<Arc<dyn LlmProvider>>,
+    /// A session that hasn't had its first turn: why it started and the one before it, for
+    /// `session_start`.
+    starting: Option<(&'static str, Option<String>)>,
 }
 
 impl Agent {
@@ -126,6 +129,7 @@ impl Agent {
             turn_tool_calls: 0,
             settings: json!({}),
             session_provider: None,
+            starting: (stored == 0).then_some(("start", None)),
         })
     }
 
@@ -150,7 +154,8 @@ impl Agent {
     pub fn reset(&mut self) -> Result<()> {
         let previous = std::mem::replace(&mut self.session, self.db.new_session(&self.chat_key)?);
         self.log("session", json!({"reason": "new", "previous": previous}), None);
-        self.notify_ext("session_start", json!({"previous": previous, "session": self.session}), self.chat_ref());
+        self.notify_ext("session_changed", json!({"reason": "new", "previous": previous, "session": self.session}), self.chat_ref());
+        self.starting = Some(("new", Some(previous)));
         self.history.clear();
         self.snapshot = None;
         self.stored = 0;
@@ -175,6 +180,7 @@ impl Agent {
         self.db.bind(&self.chat_key, session)?;
         let previous = std::mem::replace(&mut self.session, session.to_string());
         self.log("session", json!({"reason": "switch", "previous": previous}), None);
+        self.notify_ext("session_changed", json!({"reason": "switch", "previous": previous, "session": session}), self.chat_ref());
         self.stored = history.len();
         self.turn_start = history.len();
         self.history = history;
@@ -186,6 +192,25 @@ impl Agent {
 
     pub fn session(&self) -> &str {
         &self.session
+    }
+
+    /// Before a session's first turn: `session_start` may set its settings (`{model, system,
+    /// tools}`), e.g. pick a model for conversations from one messenger.
+    async fn session_start(&mut self, ctx: &ToolCtx) -> Result<()> {
+        let Some((reason, previous)) = self.starting.take() else {
+            return Ok(());
+        };
+        let Some(ext) = self.tools.extensions().filter(|e| e.listens("session_start")).cloned() else {
+            return Ok(());
+        };
+        let data = json!({"session": self.session, "previous": previous, "reason": reason, "chat": self.chat_key});
+        let data = ext.emit("session_start", data, &ctx.origin).await;
+        let change: serde_json::Map<String, Value> =
+            ["model", "system", "tools"].into_iter().filter_map(|k| data.get(k).filter(|v| !v.is_null()).map(|v| (k.to_string(), v.clone()))).collect();
+        if !change.is_empty() {
+            self.db.update_session_settings(&self.session, &Value::Object(change))?;
+        }
+        Ok(())
     }
 
     /// Picks up the session's settings; a change takes effect from this turn.
@@ -339,6 +364,7 @@ impl Agent {
         ctx: &ToolCtx,
         on_event: &mut (dyn FnMut(Event) + Send),
     ) -> Result<String> {
+        self.session_start(ctx).await?;
         self.load_settings().await?;
         self.turn_start = self.history.len();
         self.turn_system = None;

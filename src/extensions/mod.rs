@@ -36,7 +36,7 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Restarts after a crash before an extension stays down until `/reload`.
 const MAX_RESTARTS: u32 = 3;
 /// Events whose handlers only observe: what they return is ignored.
-const OBSERVERS: &[&str] = &["turn_end", "turn_settled", "turn_event", "llm_result", "session_start", "compaction", "reaction", "extension_state", "config_changed", "stop"];
+const OBSERVERS: &[&str] = &["turn_end", "turn_settled", "turn_event", "llm_result", "session_changed", "compaction", "reaction", "extension_state", "config_changed", "stop"];
 const ENTRIES: [&str; 3] = ["index.ts", "index.js", "index.mjs"];
 
 /// What extensions can ask of August: the operations of the core's table.

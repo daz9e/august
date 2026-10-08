@@ -526,6 +526,9 @@ impl crate::agent::SessionStore for Db {
     fn session_settings(&self, session: &str) -> Result<serde_json::Value> {
         Db::session_settings(self, session)
     }
+    fn update_session_settings(&self, session: &str, change: &serde_json::Value) -> Result<()> {
+        Db::update_session(self, session, None, change)
+    }
     fn append(&self, session: &str, msgs: &[Message], index: bool) -> Result<()> {
         Db::append(self, session, msgs, index)
     }

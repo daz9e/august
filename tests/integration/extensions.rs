@@ -176,9 +176,6 @@ export default function (august: August) {
   august.on("llm_result", async ({ step, text, toolCalls, usage }, ctx) => {
     await ctx.send(`llm_result ${step}: ${toolCalls.map((c) => c.name).join(",")}|${text}|${typeof usage.inputTokens}`);
   });
-  august.on("session_start", async ({ previous, session }, ctx) => {
-    await ctx.send(`session_start ${previous !== session ? "fresh" : "same"}`);
-  });
   august.registerCommand("peek", async (args, ctx) => {
     const { output, isError } = await ctx.callTool("read_file", { path: "note.txt" });
     return `peek ${args}: ${output} (error: ${isError})`;
@@ -215,8 +212,6 @@ async fn extensions_hook_model_calls_call_into_august_and_can_be_disabled() {
     let second = reqs.iter().find(|r| messages(r).last().unwrap()["role"] == "tool").unwrap();
     assert!(system(second).ends_with("\nSTEP-ONE"));
     assert_eq!(reqs.iter().filter(|r| system(r).contains("STEP-ONE")).count(), 1);
-
-    chat.ask("/new", "session_start fresh").await;
 
     // ctx.callTool runs a built-in tool in the chat; ctx.llm asks the model without tools.
     chat.ask("/peek one", "peek one: note body (error: false)").await;

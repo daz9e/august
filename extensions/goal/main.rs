@@ -132,7 +132,7 @@ async fn main() {
         }
     });
     let g = goals.clone();
-    august.on("session_start", move |_, ctx| {
+    august.on("session_changed", move |_, ctx| {
         let goals = g.clone();
         async move {
             goals.lock().unwrap().by_chat.remove(&ctx.key());

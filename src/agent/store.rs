@@ -12,6 +12,8 @@ pub trait SessionStore: Send + Sync {
     fn live(&self, session: &str) -> Result<Vec<Message>>;
     /// Makes `session` the conversation of `chat_key`.
     fn bind(&self, chat_key: &str, session: &str) -> Result<()>;
+    /// Merges `change` into a session's settings (a null field deletes it).
+    fn update_session_settings(&self, session: &str, change: &serde_json::Value) -> Result<()>;
     /// A session's settings: `{model, system, tools}`, each optional.
     fn session_settings(&self, session: &str) -> Result<serde_json::Value>;
     fn append(&self, session: &str, msgs: &[Message], index: bool) -> Result<()>;
