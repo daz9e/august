@@ -260,3 +260,38 @@ async fn model_select_can_redirect_or_refuse_a_model_switch() {
     chat.ask("hi", "ok").await;
     assert_eq!(fake.llm_requests().last().unwrap()["model"], "fast-model-v2");
 }
+
+const EVENTS: &str = r#"
+export default function (august) {
+  const seen = [];
+  august.on("turn_event", ({ kind, text, tool }) => { seen.push(kind === "text" ? `text:${text}` : kind === "tool" ? `tool:${tool}` : kind); });
+  august.registerCommand("events", () => seen.join(",") || "none");
+}
+"#;
+
+#[tokio::test]
+async fn turn_event_streams_what_a_visible_turn_does_in_order() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|req| {
+        let last = req["messages"].as_array().unwrap().last().unwrap();
+        match last["role"].as_str() {
+            Some("tool") => reply_text("done"),
+            _ => reply_tool("read_file", serde_json::json!({"path": "note.txt"})),
+        }
+    }))
+    .await;
+    let seed: &[(&str, &[u8])] = &[("note.txt", b"hello")];
+    let gw = august(&fake, Setup { home: &[("extensions/events/index.ts", EVENTS)], seed, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("read the note", "done").await;
+    // Events reach the hook in the background: ask until the last one is in.
+    for _ in 0..50 {
+        if chat.ask("/events", "").await.contains("text:done") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(chat.texts().iter().any(|t| t == "tool:read_file,step,text:done"), "{:?}", chat.texts());
+}

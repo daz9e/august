@@ -7,6 +7,7 @@ use crate::messengers::{Messenger, Thread};
 use crate::llm::Block;
 use crate::tools::{FileSink, ToolCtx};
 use anyhow::Result;
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
@@ -102,7 +103,17 @@ impl Gateway {
         let streamed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let streamed2 = streamed.clone();
         let tx2 = tx.clone();
+        let hooked = self.ext.listens("turn_event").then(|| turn_events(self.ext.clone(), ctx.origin.clone()));
         let mut on_event = move |e: Event| {
+            if let Some(hooked) = &hooked {
+                hooked.send(match &e {
+                    Event::Text(t) => json!({"kind": "text", "text": t}),
+                    Event::Step => json!({"kind": "step"}),
+                    Event::ToolCall { name, input } => json!({"kind": "tool", "tool": name, "input": input}),
+                    Event::Compacted => json!({"kind": "compacted"}),
+                })
+                .ok();
+            }
             let ui = match e {
                 Event::Text(t) => {
                     streamed2.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -148,4 +159,27 @@ impl Gateway {
         renderer.await.ok();
         Ok(result)
     }
+}
+
+/// Feeds a visible turn's events to the `turn_event` hook in order; text fragments that pile
+/// up while a handler runs go out as one.
+fn turn_events(ext: Arc<crate::extensions::Extensions>, origin: crate::extensions::Origin) -> mpsc::UnboundedSender<Value> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
+    tokio::spawn(async move {
+        while let Some(first) = rx.recv().await {
+            let mut batch: Vec<Value> = vec![first];
+            while let Ok(e) = rx.try_recv() {
+                match (batch.last_mut(), e["text"].as_str()) {
+                    (Some(last), Some(more)) if last["kind"] == "text" && e["kind"] == "text" => {
+                        last["text"] = format!("{}{more}", last["text"].as_str().unwrap_or_default()).into();
+                    }
+                    _ => batch.push(e),
+                }
+            }
+            for e in batch {
+                ext.emit("turn_event", e, &origin).await;
+            }
+        }
+    });
+    tx
 }

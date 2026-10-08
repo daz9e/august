@@ -164,6 +164,14 @@ declare module "august" {
       /** Not the user's visible conversation (`ctx.turn.mode` says which). */
       unattended: boolean;
     };
+    /** What a visible turn does, in order, as it happens: `text` (reply fragments; ones that
+     *  arrive while handlers run come merged), `step` (a new model call after tool results),
+     *  `tool` (a call starts), `compacted`. Observe only; background. */
+    turn_event:
+      | { kind: "text"; text: string }
+      | { kind: "step" }
+      | { kind: "tool"; tool: string; input: any }
+      | { kind: "compacted" };
     /** Nothing runs in `ctx.thread` any more and nothing is about to: every turn ended, no
      *  message waits, and the `turn_end` handlers (which may start the next turn) are done.
      *  Once per quiet period. Observe only; background. */
@@ -206,6 +214,7 @@ declare module "august" {
     tool_result: { output?: string; isError?: boolean };
     turn_end: void;
     turn_settled: void;
+    turn_event: void;
     extension_state: void;
     config_changed: void;
     stop: void;

@@ -73,6 +73,9 @@ leave it unchanged.
   about to see. Return `{ messages }` to change it for that call only (inject recalled notes,
   drop noise); the stored history stays as is. Keep tool_use/tool_result pairs intact.
 - `llm_result` `{ step, text, toolCalls: [{ name, input }], usage }`: after every model call.
+- `turn_event` `{ kind: text|step|tool|compacted, text?, tool?, input? }`: what a visible
+  turn does, in order, as it happens (reply fragments, a new model call, a tool call, a
+  compaction): the stream a renderer draws from.
 - `turn_settled` `{}`: nothing runs in the thread any more and nothing is about to (every
   turn ended, no message waits, `turn_end` handlers are done); once per quiet period. Use it
   for "August is free" rather than `turn_end`, after which a queued message or an extension
@@ -85,7 +88,7 @@ leave it unchanged.
 Hooks that may change data form a chain: extensions in the user's order (`hooks.order` in
 `august.json`, then the rest by name), each returning only the fields it changes; the next
 one sees the merged result, and `block` / `handled` ends the chain. `turn_end`,
-`turn_settled`, `llm_result`, `session_start`, `compaction`, `reaction`, `extension_state`,
+`turn_event`, `turn_settled`, `llm_result`, `session_start`, `compaction`, `reaction`, `extension_state`,
 `config_changed` and `stop` only observe: every handler gets them at once, the results are
 ignored, and all but `stop` run in the background.
 
