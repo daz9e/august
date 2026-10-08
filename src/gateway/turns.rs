@@ -65,9 +65,9 @@ pub struct Turns {
 
 impl Turns {
     /// Registers a turn; the returned `Notify` fires when it is cancelled.
-    pub fn begin(&self, thread: &Thread, mode: TurnMode, source: Option<String>, parent: Option<u64>) -> (TurnTag, Arc<Notify>) {
+    pub fn begin(&self, thread: &Thread, mode: TurnMode, source: Option<String>, parent: Option<u64>, meta: Value) -> (TurnTag, Arc<Notify>) {
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        let tag = TurnTag { id, mode, source, parent };
+        let tag = TurnTag { id, mode, source, parent, meta };
         let cancel = Arc::new(Notify::new());
         let running = Running { thread: thread.clone(), tag: tag.clone(), cancel: cancel.clone() };
         self.running.lock().unwrap().insert(id, running);
@@ -136,6 +136,9 @@ pub struct TurnRequest {
     /// `fork`: run approvals without asking (nobody may be there to ask).
     #[serde(default)]
     pub approve_all: bool,
+    /// Whatever the starter wants hooks to know about the turn (`ctx.turn.meta`).
+    #[serde(default)]
+    pub meta: Value,
 }
 
 /// Lets everything through (a fork that may write in the background).
@@ -159,7 +162,7 @@ impl Gateway {
         if mode == TurnMode::Visible {
             bail!("an extension starts quiet, fork or fresh turns; to hand the thread a message, use prompt");
         }
-        let (tag, cancel) = self.turns.begin(&thread, mode, req.source.clone(), req.parent);
+        let (tag, cancel) = self.turns.begin(&thread, mode, req.source.clone(), req.parent, req.meta.clone());
         self.journal_turn(&thread, &tag, "turn_start", json!({"mode": tag.mode, "parent": tag.parent, "text": req.text}));
         let (tx, rx) = oneshot::channel();
         self.turns.outcomes.lock().unwrap().insert(tag.id, rx);

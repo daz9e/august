@@ -42,7 +42,7 @@ declare module "august" {
    *  after the current one; `nextTurn` waits for the next turn without starting one. */
   export type PromptOpts = { source?: string; deliver?: "steer" | "followUp" | "nextTurn" };
   export type TurnMode = "visible" | "quiet" | "fork" | "fresh";
-  export type Turn = { id: number; mode: TurnMode; source?: string; parent?: number };
+  export type Turn = { id: number; mode: TurnMode; source?: string; parent?: number; meta?: unknown };
   export type TurnRequest = {
     text: string;
     mode: "quiet" | "fork" | "fresh";
@@ -58,6 +58,8 @@ declare module "august" {
     exclude?: string[];
     /** fork: run approvals without asking (nobody may be there to ask). */
     approve_all?: boolean;
+    /** Anything for hooks to read as `ctx.turn.meta`; the core doesn't look inside. */
+    meta?: unknown;
   };
   export type TurnOutcome = {
     status: "ok" | "error" | "cancelled" | "running";

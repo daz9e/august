@@ -121,6 +121,9 @@ pub struct Turn {
     pub mode: String,
     pub source: Option<String>,
     pub parent: Option<u64>,
+    /// What the turn's starter attached (`turn_start {meta}`).
+    #[serde(default)]
+    pub meta: Value,
 }
 
 /// What a tool, command or hook runs for, and the calls back into August.
@@ -335,7 +338,7 @@ impl August {
     }
 
     /// Starts a turn in `thread` (`{text, mode: quiet|fork|fresh, source, parent, system,
-    /// tools, exclude, approve_all}`); returns its id.
+    /// tools, exclude, approve_all, meta}`); returns its id.
     pub async fn start_turn(&self, thread: &Thread, turn: Value) -> Result<u64> {
         let v = self.0.link.call("turn_start", json!({"thread": thread, "turn": turn})).await?;
         v.as_u64().ok_or_else(|| anyhow!("bad turn id"))

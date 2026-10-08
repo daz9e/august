@@ -83,7 +83,7 @@ impl Gateway {
         text: &str,
         images: Vec<Block>,
     ) -> Result<Option<String>> {
-        let (tag, cancel) = self.turns.begin(id, crate::agent::TurnMode::Visible, None, None);
+        let (tag, cancel) = self.turns.begin(id, crate::agent::TurnMode::Visible, None, None, Value::Null);
         self.journal_turn(id, &tag, "turn_start", json!({"mode": tag.mode, "text": text}));
         agent.set_provider(self.provider.read().unwrap().clone());
 

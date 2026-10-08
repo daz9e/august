@@ -53,6 +53,9 @@ pub struct TurnTag {
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<u64>,
+    /// What the starter attached for hooks to read; the core doesn't look inside.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub meta: Value,
 }
 
 pub enum Event<'a> {
