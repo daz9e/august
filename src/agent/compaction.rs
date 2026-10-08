@@ -41,17 +41,20 @@ impl Agent {
         estimate.max(self.last_input_tokens)
     }
 
-    /// Frees up context when the history has grown past the limit (or `force`):
-    /// first trims old tool output and images, then summarises older messages.
+    /// Frees up context when the history has grown past the limit (`reason`: `threshold`),
+    /// or always (`manual`, or `overflow`: the model refused a too-long context): first trims
+    /// old tool output and images, then summarises older messages, unless the
+    /// `session_before_compact` hook cancels that or writes the summary itself.
     /// Returns the estimated token count before and after, if anything changed.
-    pub async fn compact(&mut self, force: bool) -> Result<Option<(usize, usize)>> {
+    pub async fn compact(&mut self, reason: &'static str) -> Result<Option<(usize, usize)>> {
+        let force = reason != "threshold";
         let before = self.estimate_tokens();
         if !force && before < self.context_limit {
             return Ok(None);
         }
         let mut changed = self.prune_old_blocks();
         if force || self.estimate_tokens() >= self.context_limit {
-            changed |= self.summarise_old().await?;
+            changed |= self.summarise_old(reason).await?;
         }
         if !changed {
             return Ok(None);
@@ -61,8 +64,9 @@ impl Agent {
         self.last_input_tokens = 0;
         self.snapshot = None; // the cached prefix is gone anyway; pick up new facts
         let after = self.estimate_tokens();
-        self.log("compaction", serde_json::json!({"before": before, "after": after}), None);
-        self.notify_ext("compaction", serde_json::json!({"before": before, "after": after}), self.chat_ref());
+        let data = serde_json::json!({"before": before, "after": after, "reason": reason, "fromExtension": self.summary_from_ext.take()});
+        self.log("compaction", data.clone(), None);
+        self.notify_ext("compaction", data, self.chat_ref());
         Ok(Some((before, after)))
     }
 
@@ -106,7 +110,7 @@ impl Agent {
         None
     }
 
-    async fn summarise_old(&mut self) -> Result<bool> {
+    async fn summarise_old(&mut self, reason: &str) -> Result<bool> {
         let Some(cut) = self.cut_point() else {
             return Ok(false);
         };
@@ -122,13 +126,31 @@ impl Agent {
                 t.clear();
             }
         }
+        // An extension may cancel the summary or write it (another template, a cheaper model).
+        if let Some(ext) = self.tools.extensions().filter(|e| e.listens("session_before_compact")).cloned() {
+            let messages: Vec<serde_json::Value> = old.iter().map(Message::to_json).collect();
+            let data = serde_json::json!({
+                "reason": reason, "tokens": self.estimate_tokens(), "messages": messages,
+                "previousSummary": previous, "kept": self.history.len() - cut,
+            });
+            let data = ext.emit("session_before_compact", data, &self.chat_ref()).await;
+            if data["cancel"] == true {
+                return Ok(false);
+            }
+            if let Some(s) = data["summary"].as_str().filter(|s| !s.trim().is_empty()) {
+                let summary = s.to_string();
+                self.summary_from_ext = Some(true);
+                self.replace_with_summary(cut, &summary);
+                return Ok(true);
+            }
+        }
         let transcript = transcript(&old);
         let ask = match previous {
             Some(p) => format!("Current summary:\n\n{p}\n\nNew transcript to fold into it:\n\n{transcript}"),
             None => format!("Transcript to summarise:\n\n{transcript}"),
         };
         let ask = vec![Message::user_text(ask)];
-        let reply = self.provider.complete(&self.session, SUMMARY_SYSTEM, &ask, &[]).await;
+        let reply = self.provider().complete(&self.session, SUMMARY_SYSTEM, &ask, &[]).await;
         if let Ok(c) = &reply {
             self.record_usage(&c.usage);
         }
@@ -140,6 +162,13 @@ impl Agent {
                 return Err(e);
             }
         };
+        self.summary_from_ext = Some(false);
+        self.replace_with_summary(cut, &summary);
+        Ok(true)
+    }
+
+    /// Replaces the history before `cut` with `summary`.
+    fn replace_with_summary(&mut self, cut: usize, summary: &str) {
         let note = format!("{SUMMARY_MARK}\n{}", summary.trim());
         let mut tail = self.history.split_off(cut);
         let separate = tail[0].role != Role::User;
@@ -158,7 +187,6 @@ impl Agent {
             // The kept tail alone is too big; don't pay for a summary on every step.
             self.compact_retry_at = self.history.len() + 4;
         }
-        Ok(true)
     }
 }
 

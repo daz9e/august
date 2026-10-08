@@ -90,7 +90,14 @@ leave it unchanged.
   was replaced, right away (drop per-conversation state here).
 - `session_before_new` / `session_before_switch` `{ session, to, by }`: `/new` or a switch
   is about to happen (`by`: `user` or `ext:<name>`). Return `{ block: "reason" }` to refuse.
-- `compaction` `{ before, after }`: older history was summarised (estimated tokens).
+- `session_before_compact` `{ reason: threshold|manual|overflow, tokens, messages,
+  previousSummary, kept }`: older history (`messages`; the last `kept` stay as they are) is
+  about to be summarised (`overflow`: the model refused a too-long context). Return
+  `{ cancel: true }` to skip the summary, or `{ summary }` to write it yourself (another
+  template, a cheaper model, saving facts on the way); a previous summary should be folded
+  in.
+- `compaction` `{ before, after, reason, fromExtension }`: older history was summarised
+  (estimated tokens).
 
 Hooks that may change data form a chain: extensions in the user's order (`hooks.order` in
 `august.json`, then the rest by name), each returning only the fields it changes; the next

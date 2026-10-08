@@ -238,7 +238,15 @@ declare module "august" {
     /** `sessions.switch` is about to continue conversation `to` in `ctx.thread`. */
     session_before_switch: { session: string | null; to: string; by: string };
     /** Older history was summarised; estimated tokens (observe only; background). */
-    compaction: { before: number; after: number };
+    compaction: { before: number; after: number; reason: "threshold" | "manual" | "overflow"; fromExtension: boolean | null };
+    /** Older history (`messages`) is about to be summarised; the last `kept` stay as they are. */
+    session_before_compact: {
+      reason: "threshold" | "manual" | "overflow";
+      tokens: number;
+      messages: Message[];
+      previousSummary: string | null;
+      kept: number;
+    };
   }
 
   /** What a handler may return; returned fields replace the event's data. */
@@ -273,6 +281,8 @@ declare module "august" {
     session_before_new: { block?: string };
     session_before_switch: { block?: string };
     compaction: void;
+    /** `cancel` skips the summary; `summary` is used instead of asking the model. */
+    session_before_compact: { cancel?: boolean; summary?: string };
   }
 
   export interface Tool<P = any> {

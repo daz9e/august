@@ -97,6 +97,8 @@ pub struct Agent {
     /// A session that hasn't had its first turn: why it started and the one before it, for
     /// `session_start`.
     starting: Option<(&'static str, Option<String>)>,
+    /// Whether the latest summary came from an extension (for the `compaction` event).
+    summary_from_ext: Option<bool>,
 }
 
 impl Agent {
@@ -130,6 +132,7 @@ impl Agent {
             settings: json!({}),
             session_provider: None,
             starting: (stored == 0).then_some(("start", None)),
+            summary_from_ext: None,
         })
     }
 
@@ -421,7 +424,7 @@ impl Agent {
                     }
                 }
             }
-            match self.compact(false).await {
+            match self.compact("threshold").await {
                 Ok(Some(_)) => on_event(Event::Compacted),
                 Ok(None) => {}
                 Err(e) => eprintln!("context compaction failed: {e:#}"),
@@ -430,7 +433,7 @@ impl Agent {
                 // Too long for the model after all: summarise older history and try once more.
                 Err(e) if crate::llm::error::ErrorKind::of(&e) == crate::llm::error::ErrorKind::ContextTooLong => {
                     eprintln!("context too long for the model; compacting and retrying");
-                    if self.compact(true).await?.is_some() {
+                    if self.compact("overflow").await?.is_some() {
                         on_event(Event::Compacted);
                     }
                     self.call_model(step, &specs, ctx, on_event).await?
@@ -527,7 +530,7 @@ mod tests {
         a.context_limit = 1_000;
         big_history(&mut a);
         let before = a.history.len();
-        let (b, after) = a.compact(false).await.unwrap().expect("compacted");
+        let (b, after) = a.compact("threshold").await.unwrap().expect("compacted");
         assert!(after < b);
         assert!(a.history.len() < before);
         assert_eq!(a.history[0].role, Role::User);
@@ -543,7 +546,7 @@ mod tests {
     async fn small_histories_are_left_alone() {
         let mut a = agent(Db::in_memory());
         a.history.push(Message::user_text("hi"));
-        assert!(a.compact(false).await.unwrap().is_none());
+        assert!(a.compact("threshold").await.unwrap().is_none());
     }
 
     #[test]

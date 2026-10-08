@@ -167,3 +167,33 @@ async fn extensions_can_refuse_a_new_or_switched_conversation() {
     chat.ask("/new", "Started a new conversation").await;
     chat.wait_for("changed: new").await;
 }
+
+const SUMMARIZER: &str = r#"
+export default function (august) {
+  let calls = 0;
+  august.on("session_before_compact", ({ reason, messages, kept }) =>
+    ++calls === 1 ? { cancel: true } : { summary: `EXT SUMMARY of ${messages.length} (${reason}, kept ${kept})` });
+  august.on("compaction", ({ reason, fromExtension }, ctx) => ctx.send(`compaction ${reason} by extension: ${fromExtension}`));
+}
+"#;
+
+#[tokio::test]
+async fn an_extension_can_cancel_or_write_the_summary() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("ok"))).await;
+    let gw = august(&fake, Setup { home: &[("extensions/summarizer/index.ts", SUMMARIZER)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    for i in 0..6 {
+        chat.ask(&format!("message {i}"), "ok").await;
+    }
+    chat.ask("/compact", "Nothing to compact").await;
+    chat.ask("/compact", "Compacted").await;
+    chat.wait_for("compaction manual by extension: true").await;
+    chat.ask("go on", "ok").await;
+    let req = fake.llm_requests().last().unwrap().to_string();
+    assert!(req.contains("EXT SUMMARY of 4 (manual, kept 8)") && !req.contains("message 0"), "{req}");
+    // The summariser model was never asked.
+    assert!(fake.llm_requests().iter().all(|r| !r.to_string().contains("Transcript to summarise")));
+}

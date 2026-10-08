@@ -254,7 +254,7 @@ impl Gateway {
                 self.db.update_session(arg("session")?, p["name"].as_str(), &p["settings"])?;
                 Value::Null
             }
-            "compact" => match self.chat(&thread(p)?).await?.agent.lock().await.compact(true).await? {
+            "compact" => match self.chat(&thread(p)?).await?.agent.lock().await.compact("manual").await? {
                 Some((before, after)) => json!({"before": before, "after": after}),
                 None => Value::Null,
             },
