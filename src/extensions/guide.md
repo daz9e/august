@@ -85,13 +85,24 @@ leave it unchanged.
   `before_turn`.
 - `model_select` `{ model, previous }`: the model is being switched (`/model`,
   `model_set`). Return `{ model }` to switch to another one, `{ block: "reason" }` to refuse.
-- `context` `{ step, messages }`: before every model call, the conversation the model is
-  about to see. Return `{ messages }` to change it for that call only (inject recalled notes,
-  drop noise); the stored history stays as is. Keep tool_use/tool_result pairs intact.
+- `context` `{ step, messages, system, tokens, window, error }`: before every model call,
+  the conversation the model is about to see, the input tokens the provider reported last
+  (`tokens`, 0 before the first call) and the model's context `window` (null if unknown).
+  Return `{ messages }` to change it for that call only (inject recalled notes, drop
+  noise), or `{ history, note }` to replace the conversation itself from then on (stored;
+  older messages stay searchable) and show `note` in the turn — the default `compaction`
+  extension summarises older messages this way. Keep tool_use/tool_result pairs intact.
+  `error` `{ kind, message }`: the previous try of this call failed and an `llm_error`
+  handler asked for another.
+- `llm_error` `{ step, attempt, model, error: { kind, message } }`: a model call failed
+  (`kind`: `rate_limit`, `overloaded`, `network`, `auth`, `quota`, `context_too_long`,
+  `refused`, `bad_request`, `other`). Return `{ retry: true }` to try again, with
+  `delayMs` to wait first and `model` to use another one for the rest of the turn; at most
+  8 tries.
 - `llm_result` `{ step, text, toolCalls: [{ name, input }], usage }`: after every model call.
-- `turn_event` `{ kind: text|step|tool|compacted, text?, tool?, input? }`: what a visible
+- `turn_event` `{ kind: text|step|tool|note, text?, tool?, input? }`: what a visible
   turn does, in order, as it happens (reply fragments, a new model call, a tool call, a
-  compaction): the stream a renderer draws from.
+  `note` a `context` handler asked to show): the stream a renderer draws from.
 - `turn_settled` `{}`: nothing runs in the thread any more and nothing is about to (every
   turn ended, no message waits, `turn_end` handlers are done); once per quiet period. Use it
   for "August is free" rather than `turn_end`, after which a queued message or an extension
@@ -106,19 +117,17 @@ leave it unchanged.
   was replaced, right away (drop per-conversation state here).
 - `session_before_new` / `session_before_switch` `{ session, to, by }`: `/new` or a switch
   is about to happen (`by`: `user` or `ext:<name>`). Return `{ block: "reason" }` to refuse.
-- `session_before_compact` `{ reason: threshold|manual|overflow, tokens, messages,
-  previousSummary, kept }`: older history (`messages`; the last `kept` stay as they are) is
-  about to be summarised (`overflow`: the model refused a too-long context). Return
-  `{ cancel: true }` to skip the summary, or `{ summary }` to write it yourself (another
-  template, a cheaper model, saving facts on the way); a previous summary should be folded
-  in.
-- `compaction` `{ before, after, reason, fromExtension }`: older history was summarised
-  (estimated tokens).
+- The default `compaction` extension emits `compaction:before` `{ reason:
+  threshold|manual|overflow, tokens, messages, previousSummary, kept }` before it summarises
+  older history (`messages`; the last `kept` stay as they are). Return `{ cancel: true }` to
+  skip the summary, or `{ summary }` to write it yourself (another template, a cheaper model,
+  saving facts on the way); fold a previous summary in. Then `compaction:after` `{ before,
+  after, reason, fromExtension }` (estimated tokens; observe only).
 
 Hooks that may change data form a chain: extensions in the user's order (`hooks.order` in
 `august.json`, then the rest by name), each returning only the fields it changes; the next
 one sees the merged result, and `block` / `handled` ends the chain. `turn_end`,
-`turn_event`, `turn_settled`, `llm_result`, `session_changed`, `compaction`, `reaction`, `extension_state`,
+`turn_event`, `turn_settled`, `llm_result`, `session_changed`, `reaction`, `extension_state`,
 `config_changed` and `stop` only observe: every handler gets them at once, the results are
 ignored, and all but `stop` run in the background.
 
@@ -140,7 +149,7 @@ Jobs of the core: some things the core does only while no extension does them in
 events one at a time, in order (the next waits for the handler; text arriving meanwhile
 comes merged) and sends or edits messages in `ctx.thread` itself. `start` carries the
 messenger's `capabilities` (`edit`, `edit_interval_ms`, `max_len`, ...); `text`, `step`,
-`tool`, `compacted` are as in `turn_event`; `break` means a message (a file, a question) was
+`tool`, `note` are as in `turn_event`; `break` means a message (a file, a question) was
 sent in the reply's place, so finish what is shown and continue in a new message below;
 `end` `{ status, reply, error }` is the outcome. The default `render` extension streams the
 reply by editing messages and shows a line per tool call; take `render` yourself to draw
@@ -181,8 +190,9 @@ Calling into August:
 - `await ctx.callTool("read", { path: "notes.md" })` runs any agent tool (built-in,
   MCP or another extension's) for that thread, through the `tool_call`/`tool_result` hooks
   returns `{ output, isError }`.
-- `await ctx.llm(prompt, { system })` is one completion on the current model, without tools;
-  returns the text.
+- `await ctx.llm(prompt, { system })` is one completion without tools on the thread's
+  conversation's model (counted in its usage); `prompt` may be a list of messages as
+  `context` has them. Returns the text.
 - `await ctx.agent(task, { system, tools, exclude })` runs a sub-agent with a fresh
   conversation and returns its final reply (`tools` limits it, `exclude` hides some).
 - Turns: `const id = await august.turns.start(thread, { text, mode })` starts a `visible`
@@ -228,12 +238,14 @@ helpers for the common ones:
   `owner` (`august` or the extension).
 - `august.status(thread?)`: `{ provider, model, workspace, busy }`.
 - `august.model.set(id)`: switch the model, like `/model id`.
-- `august.sessions.new(thread, { name, settings })`, `.compact(thread)`, `.usage(thread)`:
-  like `/new`, `/compact`, `/usage`.
+- `august.sessions.new(thread, { name, settings })`, `.usage(thread)`: like `/new`, `/usage`.
+  `.messages(thread)` is the live conversation (what the model sees next, with `tokens` and
+  `window`); `.setMessages(thread, messages)` replaces it (outside the thread's running turn;
+  inside one, return `history` from `context`).
 - Conversations are stored and addressable: `august.sessions.list(thread?)`,
   `.switch(thread, id)` continues one in a thread, `.update(id, { name, settings })`. A
   conversation's journal — turns, messages, model replies, every tool call (also the ones
-  extensions make with `callTool`, with their `caller`), compactions, session and model
+  extensions make with `callTool`, with their `caller`), session and model
   changes — is `august.sessions.history({ thread } | { session }, { kinds, since, limit })`;
   `august.journal.append({ thread }, type, data)` adds an entry of your own (kind
   `custom`). A conversation's `settings` — `model` (`provider:model` or a model of the active provider),

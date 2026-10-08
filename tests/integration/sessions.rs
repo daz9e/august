@@ -171,9 +171,9 @@ async fn extensions_can_refuse_a_new_or_switched_conversation() {
 const SUMMARIZER: &str = r#"
 export default function (august) {
   let calls = 0;
-  august.on("session_before_compact", ({ reason, messages, kept }) =>
+  august.on("compaction:before", ({ reason, messages, kept }) =>
     ++calls === 1 ? { cancel: true } : { summary: `EXT SUMMARY of ${messages.length} (${reason}, kept ${kept})` });
-  august.on("compaction", ({ reason, fromExtension }, ctx) => ctx.send(`compaction ${reason} by extension: ${fromExtension}`));
+  august.on("compaction:after", ({ reason, fromExtension }, ctx) => ctx.send(`compaction ${reason} by extension: ${fromExtension}`));
 }
 "#;
 

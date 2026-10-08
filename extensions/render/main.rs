@@ -110,7 +110,7 @@ async fn main() {
                 }
                 "step" => d.sep(),
                 "tool" => d.line(&tool_line(e["tool"].as_str().unwrap_or_default(), &e["input"])),
-                "compacted" => d.line("🗜 Older messages summarised to free up context"),
+                "note" => d.line(e["text"].as_str().unwrap_or_default()),
                 "break" => {
                     d.flush(&ctx).await;
                     d.buf.clear();

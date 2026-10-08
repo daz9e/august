@@ -258,9 +258,18 @@ impl Ctx {
         Ok((v["output"].as_str().unwrap_or_default().to_string(), v["isError"] == true))
     }
 
-    /// One completion on the configured model, without tools.
+    /// One completion without tools, on the thread's conversation's model (counted in its
+    /// usage), or the configured one.
     pub async fn llm(&self, prompt: &str, system: Option<&str>) -> Result<String> {
-        let v = self.link.call("llm", json!({"prompt": prompt, "system": system})).await?;
+        self.llm_with(json!({"prompt": prompt, "system": system})).await
+    }
+
+    /// `llm` with `{prompt}` or `{messages}` (as the `context` hook has them) and `{system}`.
+    pub async fn llm_with(&self, params: Value) -> Result<String> {
+        let v = match self.thread {
+            Some(_) => self.in_thread("llm", params).await?,
+            None => self.link.call("llm", params).await?,
+        };
         Ok(v.as_str().unwrap_or_default().to_string())
     }
 }

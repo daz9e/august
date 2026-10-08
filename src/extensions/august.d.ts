@@ -93,9 +93,9 @@ declare module "august" {
    *  `caller`: who acted (`model`, `ext:<name>`, `user`). `data` by kind:
    *  `turn_start` {mode, parent, text}, `turn_end` {status, error}, `user_message` {text},
    *  `assistant` {step, text, toolCalls, usage}, `tool` {tool, id, input, output, isError},
-   *  `compaction` {before, after}, `session` {reason: new|switch, previous},
+   *  `session` {reason: new|switch, previous},
    *  `model_change` {model, previous}, `custom` {type, data} (an extension's own). */
-  export type JournalKind = "turn_start" | "turn_end" | "user_message" | "assistant" | "tool" | "compaction" | "session" | "model_change" | "custom";
+  export type JournalKind = "turn_start" | "turn_end" | "user_message" | "assistant" | "tool" | "session" | "model_change" | "custom";
   export type JournalEntry = {
     id: number;
     /** Unix milliseconds. */
@@ -144,8 +144,9 @@ declare module "august" {
     ask(question: string, options: string[], opts?: { timeout?: number }): Promise<string | null>;
     /** Runs any agent tool (built-in, MCP or extension) for this thread, with its hooks. */
     callTool(name: string, input?: object): Promise<{ output: string; isError: boolean }>;
-    /** One completion on the configured model, without tools; returns the text. */
-    llm(prompt: string, opts?: { system?: string }): Promise<string>;
+    /** One completion without tools on this thread's conversation's model (counted in its
+     *  usage); a prompt, or messages as the `context` hook has them. Returns the text. */
+    llm(prompt: string | Message[], opts?: { system?: string }): Promise<string>;
     /** `august.emit` for this thread and turn (their handlers see both). */
     emit<T extends object = any>(event: string, data?: object): Promise<T>;
   }
@@ -157,6 +158,9 @@ declare module "august" {
     | { type: "image"; media_type: string; path: string }
     | { type: "opaque"; value: any };
   export type Message = { role: "user" | "assistant"; content: Block[] };
+
+  /** How a model call failed. */
+  export type LlmErrorKind = "rate_limit" | "overloaded" | "network" | "auth" | "quota" | "context_too_long" | "refused" | "bad_request" | "other";
 
   export type Usage = { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
 
@@ -203,12 +207,13 @@ declare module "august" {
     };
     /** What a visible turn does, in order, as it happens: `text` (reply fragments; ones that
      *  arrive while handlers run come merged), `step` (a new model call after tool results),
-     *  `tool` (a call starts), `compacted`. Observe only; background. */
+     *  `tool` (a call starts), `note` (a line a `context` handler asked to show). Observe
+     *  only; background. */
     turn_event:
       | { kind: "text"; text: string }
       | { kind: "step" }
       | { kind: "tool"; tool: string; input: any }
-      | { kind: "compacted" };
+      | { kind: "note"; text: string };
     /** Only for the extension that `takes("render")`: a visible turn to draw, one event at a
      *  time (the next waits for the handler; text arriving meanwhile comes merged). `start`
      *  carries the messenger's capabilities (`edit`, `edit_interval_ms`, `max_len`, ...);
@@ -219,7 +224,7 @@ declare module "august" {
       | { kind: "text"; text: string }
       | { kind: "step" }
       | { kind: "tool"; tool: string; input: any }
-      | { kind: "compacted" }
+      | { kind: "note"; text: string }
       | { kind: "break" }
       | { kind: "end"; status: "ok" | "error" | "cancelled"; reply: string; error: string | null };
     /** Nothing runs in `ctx.thread` any more and nothing is about to: every turn ended, no
@@ -242,8 +247,20 @@ declare module "august" {
     model_select: { model: string; previous: string };
     /** Before each model call of a turn; `step` counts from 0, `system` is the full prompt. */
     llm_call: { step: number; system: string; model: string; tools: string[] };
-    /** Before each model call, after `llm_call`: the conversation the model is about to see. */
-    context: { step: number; messages: Message[] };
+    /** Before each model call, after `llm_call`: the conversation the model is about to see,
+     *  with `system`, the input tokens the provider reported last (`tokens`, 0: not yet) and
+     *  the model's context `window` (null: unknown). `error`: why the previous try of this
+     *  call failed, when an `llm_error` handler asked for another. */
+    context: {
+      step: number;
+      messages: Message[];
+      system: string;
+      tokens: number;
+      window: number | null;
+      error: { kind: LlmErrorKind; message: string } | null;
+    };
+    /** A model call failed; `attempt` counts from 1. Return `retry: true` to try again. */
+    llm_error: { step: number; attempt: number; model: string; error: { kind: LlmErrorKind; message: string } };
     /** After each model call (observe only; background). */
     llm_result: { step: number; text: string; toolCalls: { name: string; input: any }[]; usage: Usage };
     /** Before a conversation's first turn (`start`: the thread's first; `new`: after /new). */
@@ -254,16 +271,6 @@ declare module "august" {
     session_before_new: { session: string | null; to: null; by: string };
     /** `sessions.switch` is about to continue conversation `to` in `ctx.thread`. */
     session_before_switch: { session: string | null; to: string; by: string };
-    /** Older history was summarised; estimated tokens (observe only; background). */
-    compaction: { before: number; after: number; reason: "threshold" | "manual" | "overflow"; fromExtension: boolean | null };
-    /** Older history (`messages`) is about to be summarised; the last `kept` stay as they are. */
-    session_before_compact: {
-      reason: "threshold" | "manual" | "overflow";
-      tokens: number;
-      messages: Message[];
-      previousSummary: string | null;
-      kept: number;
-    };
   }
 
   /** What a handler may return; returned fields replace the event's data. */
@@ -289,18 +296,19 @@ declare module "august" {
     model_select: { model?: string; block?: string };
     /** `system` replaces the system prompt for this one call (breaks the prompt cache). */
     llm_call: { system?: string; model?: string; tools?: string[] };
-    /** Returned `messages` replace what the model sees for this one call; the stored
-     *  history is unchanged (keep tool_use / tool_result pairs intact). */
-    context: { messages?: Message[] };
+    /** Returned `messages` replace what the model sees for this one call; `history` replaces
+     *  the conversation itself, stored and kept from then on (e.g. older messages summarised),
+     *  with `note` shown in the turn. Keep tool_use / tool_result pairs intact. */
+    context: { messages?: Message[]; history?: Message[]; note?: string };
+    /** `retry: true` tries the call again (after `delayMs`, on `model` for the rest of the
+     *  turn); the `context` handlers see the `error` first. At most 8 tries. */
+    llm_error: { retry?: boolean; delayMs?: number; model?: string };
     llm_result: void;
     /** The conversation's own settings, kept with it. */
     session_start: SessionSettings;
     session_changed: void;
     session_before_new: { block?: string };
     session_before_switch: { block?: string };
-    compaction: void;
-    /** `cancel` skips the summary; `summary` is used instead of asking the model. */
-    session_before_compact: { cancel?: boolean; summary?: string };
   }
 
   export interface Tool<P = any> {
@@ -464,8 +472,11 @@ declare module "august" {
        *  entries after `since` (an entry id), of `kinds`, at most `limit` (default 100, the
        *  newest), oldest first. */
       history(where: { session?: string; thread?: Thread }, opts?: { kinds?: JournalKind[]; since?: number; limit?: number }): Promise<JournalEntry[]>;
-      /** Summarises older messages; estimated tokens, or null if there was nothing to do. */
-      compact(thread: Thread): Promise<{ before: number; after: number } | null>;
+      /** The live conversation of `thread` (what the model sees next), with the input tokens
+       *  last reported and the model's context window. */
+      messages(thread: Thread): Promise<{ session: string; messages: Message[]; tokens: number; window: number | null }>;
+      /** Replaces the live conversation of `thread` (earlier messages stay searchable). */
+      setMessages(thread: Thread, messages: Message[]): Promise<void>;
       /** Token usage of its current conversation, and of today across all threads. */
       usage(thread: Thread): Promise<{ session: UsageTotal; today: UsageTotal }>;
     };

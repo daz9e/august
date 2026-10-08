@@ -125,7 +125,8 @@ function context(thread: Thread | null, turn: Turn | null = null, depth = 0) {
     agent: (task: string, opts: object = {}) => runTurn(need(), { ...opts, text: task, mode: "fresh", parent: turn?.id }),
     ask: async (question: string, options: string[], opts: { timeout?: number } = {}) => ask(need(), question, options, opts.timeout),
     callTool: (name: string, input: unknown = {}) => inThread("callTool", { name, input }),
-    llm: (prompt: string, opts: { system?: string } = {}) => call("llm", { prompt, system: opts.system }),
+    llm: (prompt: string | object[], opts: { system?: string } = {}) =>
+      call("llm", { ...(typeof prompt === "string" ? { prompt } : { messages: prompt }), system: opts.system, thread, from_turn: turn?.id }),
     emit: (event: string, data: object = {}) => call("emit", { event, data, thread, from_turn: turn?.id, depth }),
   };
 }
@@ -236,7 +237,8 @@ const api = {
     switch: (thread: Thread, session: string) => call("session_switch", { thread, session }),
     history: (where: { session?: string; thread?: Thread }, opts: { kinds?: string[]; since?: number; limit?: number } = {}) =>
       call("history", { ...where, ...opts }),
-    compact: (thread: Thread) => call("compact", { thread }),
+    messages: (thread: Thread) => call("messages", { thread }),
+    setMessages: (thread: Thread, messages: object[]) => call("messages_set", { thread, messages }),
     usage: (thread: Thread) => call("usage", { thread }),
   },
   extensions: {

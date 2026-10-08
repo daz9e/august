@@ -240,7 +240,7 @@ async fn extensions_hook_model_calls_call_into_august_and_can_be_disabled() {
 }
 
 const WATCHER: &str = r#"export default function (august) {
-  august.on("compaction", async ({ before, after }, ctx) => {
+  august.on("compaction:after", async ({ before, after }, ctx) => {
     await ctx.send(`compaction event: ${before > after ? "smaller" : "not smaller"}`);
   });
 }"#;

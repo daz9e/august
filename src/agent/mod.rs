@@ -1,6 +1,5 @@
 //! The agent loop: model -> tools -> model ... until the model stops calling tools.
 
-mod compaction;
 mod fork;
 mod inbox;
 mod prompt;
@@ -9,7 +8,6 @@ mod store;
 pub use inbox::Inbox;
 pub use prompt::system_prompt;
 pub use store::SessionStore;
-use compaction::DEFAULT_CONTEXT_TOKENS;
 
 use crate::extensions::Origin;
 use crate::llm::{Block, Completion, LlmProvider, Message, Role, StopReason, ToolSpec, Usage};
@@ -24,12 +22,8 @@ const MAX_STEPS: usize = 150;
 fn max_steps() -> usize {
     std::env::var("AUGUST_MAX_STEPS").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(MAX_STEPS)
 }
-/// History size (tokens) at which older messages are summarised: `AUGUST_CONTEXT_TOKENS`,
-/// else 80% of the model's context window, else a default.
-fn context_limit(provider: &dyn LlmProvider) -> usize {
-    let set = std::env::var("AUGUST_CONTEXT_TOKENS").ok().and_then(|v| v.parse().ok());
-    set.or(provider.context_window().map(|w| w * 4 / 5)).unwrap_or(DEFAULT_CONTEXT_TOKENS)
-}
+/// Tries of one model call when `llm_error` handlers keep asking for another.
+const MAX_ATTEMPTS: usize = 8;
 
 /// How a turn runs. `Visible`: the user's conversation, streamed to the thread. `Quiet`:
 /// in the thread's conversation, nothing shown, the reply returned. `Fork`: on a copy of
@@ -64,8 +58,8 @@ pub enum Event<'a> {
     /// A new model call starts after tool results (text from before it is complete).
     Step,
     ToolCall { name: &'a str, input: &'a Value },
-    /// Older history was summarised to free up context.
-    Compacted,
+    /// A line an extension asked to show (e.g. after it rewrote the history).
+    Note(&'a str),
 }
 
 pub struct Agent {
@@ -86,22 +80,19 @@ pub struct Agent {
     stored: usize,
     /// Where the running turn began; a failed or cancelled turn is cut back to it.
     turn_start: usize,
-    context_limit: usize,
     /// Input tokens the provider reported for the latest call.
     last_input_tokens: usize,
-    /// After a failed summary, don't retry until the history has grown to this length.
-    compact_retry_at: usize,
     /// Tool calls the running turn made.
     turn_tool_calls: usize,
     /// The session's settings as of the running turn: `{model, system, tools}`.
     settings: Value,
     /// The provider for the session's own `model`, if it has one.
     session_provider: Option<Arc<dyn LlmProvider>>,
+    /// The one an `llm_error` handler switched the running turn to.
+    turn_provider: Option<Arc<dyn LlmProvider>>,
     /// A session that hasn't had its first turn: why it started and the one before it, for
     /// `session_start`.
     starting: Option<(&'static str, Option<String>)>,
-    /// Whether the latest summary came from an extension (for the `compaction` event).
-    summary_from_ext: Option<bool>,
 }
 
 impl Agent {
@@ -115,7 +106,6 @@ impl Agent {
     ) -> Result<Self> {
         let (session, history) = db.resume_session(chat_key)?;
         let stored = history.len();
-        let context_limit = context_limit(&*provider);
         Ok(Self {
             provider,
             tools,
@@ -128,14 +118,12 @@ impl Agent {
             session,
             stored,
             turn_start: stored,
-            context_limit,
             last_input_tokens: 0,
-            compact_retry_at: 0,
             turn_tool_calls: 0,
             settings: json!({}),
             session_provider: None,
+            turn_provider: None,
             starting: (stored == 0).then_some(("start", None)),
-            summary_from_ext: None,
         })
     }
 
@@ -153,7 +141,6 @@ impl Agent {
 
     pub fn set_provider(&mut self, provider: Arc<dyn LlmProvider>) {
         self.provider = provider;
-        self.context_limit = context_limit(&*self.provider);
     }
 
     /// Starts a new conversation; the old one stays searchable.
@@ -167,7 +154,6 @@ impl Agent {
         self.stored = 0;
         self.turn_start = 0;
         self.last_input_tokens = 0;
-        self.compact_retry_at = 0;
         Ok(())
     }
 
@@ -192,7 +178,6 @@ impl Agent {
         self.history = history;
         self.snapshot = None;
         self.last_input_tokens = 0;
-        self.compact_retry_at = 0;
         Ok(())
     }
 
@@ -236,7 +221,7 @@ impl Agent {
 
     /// The model this session talks to.
     fn provider(&self) -> Arc<dyn LlmProvider> {
-        self.session_provider.clone().unwrap_or_else(|| self.provider.clone())
+        self.turn_provider.clone().or_else(|| self.session_provider.clone()).unwrap_or_else(|| self.provider.clone())
     }
 
     /// The tools offered in this session (all, or the ones its settings name).
@@ -261,12 +246,33 @@ impl Agent {
         }
     }
 
-    /// One model call with the `llm_call` / `llm_result` hooks; `step` counts from 0.
+    /// The live history (what the next model call sees), and the context it takes: input
+    /// tokens the provider last reported (0: not yet) and the model's window, if known.
+    pub fn conversation(&self) -> (&[Message], usize, Option<usize>) {
+        (&self.history, self.last_input_tokens, self.provider().context_window())
+    }
+
+    /// Replaces the live history (stored too; earlier messages stay searchable). The running
+    /// turn's rollback point stays on the same message counted from the end.
+    pub fn set_history(&mut self, history: Vec<Message>) -> Result<()> {
+        let since_turn = self.history.len().saturating_sub(self.turn_start);
+        self.turn_start = history.len().saturating_sub(since_turn);
+        self.history = history;
+        self.db.replace_live(&self.session, &self.history)?;
+        self.stored = self.history.len();
+        self.last_input_tokens = 0;
+        self.snapshot = None; // the cached prefix is gone anyway; pick up what changed
+        Ok(())
+    }
+
+    /// One model call with the `llm_call` / `context` / `llm_result` hooks; `step` counts
+    /// from 0, `error`: why the previous try of this step failed.
     async fn call_model(
         &mut self,
         step: usize,
         specs: &[ToolSpec],
         ctx: &ToolCtx,
+        error: Option<&Value>,
         on_event: &mut (dyn FnMut(Event) + Send),
     ) -> Result<Completion> {
         let mut system = self.system_now();
@@ -288,19 +294,31 @@ impl Agent {
                 provider = crate::llm::providers::build_spec(m).await?;
             }
         }
-        // A `context` hook may change what the model sees for this one call (not the history).
+        // A `context` hook may change what the model sees for this one call (`messages`), or
+        // the history itself (`history`, kept from then on), with a `note` to show.
         let mut rewritten = None;
-        if let Some(ext) = self.tools.extensions().filter(|e| e.listens("context")) {
+        if let Some(ext) = self.tools.extensions().filter(|e| e.listens("context")).cloned() {
             let messages: Vec<Value> = self.history.iter().map(Message::to_json).collect();
-            let data = ext.emit("context", json!({"step": step, "messages": messages}), &ctx.origin).await;
-            if let Some(list) = data["messages"].as_array() {
+            let data = json!({
+                "step": step, "messages": messages, "system": system, "tokens": self.last_input_tokens,
+                "window": provider.context_window(), "error": error,
+            });
+            let data = ext.emit("context", data, &ctx.origin).await;
+            let parse = |key: &str| -> Option<Vec<Message>> {
+                let list = data[key].as_array()?;
                 let parsed: Option<Vec<Message>> = list.iter().map(Message::from_json).collect();
-                match parsed {
-                    Some(m) if m.len() != self.history.len() || list != &messages => rewritten = Some(m),
-                    Some(_) => {}
-                    None => eprintln!("context hook returned malformed messages; ignored"),
+                if parsed.is_none() {
+                    eprintln!("context hook returned malformed `{key}`; ignored");
+                }
+                parsed.filter(|_| list != &messages)
+            };
+            if let Some(history) = parse("history") {
+                self.set_history(history)?;
+                if let Some(note) = data["note"].as_str() {
+                    on_event(Event::Note(note));
                 }
             }
+            rewritten = parse("messages");
         }
         let messages = rewritten.as_deref().unwrap_or(&self.history);
         let completion = {
@@ -322,6 +340,43 @@ impl Agent {
         self.log("assistant", data.clone(), ctx.origin.turn.as_ref());
         self.notify_ext("llm_result", data, ctx.origin.clone());
         Ok(completion)
+    }
+
+    /// A model call; when it fails, `llm_error` handlers may have it tried again (after
+    /// `delayMs`, on another `model`), e.g. once they freed up context or the service is back.
+    async fn call_with_retries(
+        &mut self,
+        step: usize,
+        specs: &[ToolSpec],
+        ctx: &ToolCtx,
+        on_event: &mut (dyn FnMut(Event) + Send),
+    ) -> Result<Completion> {
+        let mut error: Option<Value> = None;
+        for attempt in 1.. {
+            let e = match self.call_model(step, specs, ctx, error.as_ref(), on_event).await {
+                Ok(c) => return Ok(c),
+                Err(e) => e,
+            };
+            let Some(ext) = self.tools.extensions().filter(|x| x.listens("llm_error")).cloned() else { return Err(e) };
+            if attempt >= MAX_ATTEMPTS {
+                return Err(e);
+            }
+            let kind = crate::llm::error::ErrorKind::of(&e).as_str();
+            let failed = json!({"kind": kind, "message": format!("{e:#}")});
+            let data = json!({"step": step, "attempt": attempt, "model": self.provider().name(), "error": failed});
+            let data = ext.emit("llm_error", data, &ctx.origin).await;
+            if data["retry"] != true {
+                return Err(e);
+            }
+            if let Some(ms) = data["delayMs"].as_u64() {
+                tokio::time::sleep(std::time::Duration::from_millis(ms.min(600_000))).await;
+            }
+            if let Some(m) = data["model"].as_str().filter(|m| *m != self.provider().name()) {
+                self.turn_provider = Some(crate::llm::providers::build_spec(m).await?);
+            }
+            error = Some(failed);
+        }
+        unreachable!("the loop returns")
     }
 
     /// Drops what a failed or cancelled turn added, so the history stays consistent.
@@ -374,6 +429,7 @@ impl Agent {
         self.load_settings().await?;
         self.turn_start = self.history.len();
         self.turn_system = None;
+        self.turn_provider = None;
         self.turn_tool_calls = 0;
         let ext = self.tools.extensions().cloned();
         let mut text = user_text.to_string();
@@ -429,22 +485,7 @@ impl Agent {
                     }
                 }
             }
-            match self.compact("threshold").await {
-                Ok(Some(_)) => on_event(Event::Compacted),
-                Ok(None) => {}
-                Err(e) => eprintln!("context compaction failed: {e:#}"),
-            }
-            let completion = match self.call_model(step, &specs, ctx, on_event).await {
-                // Too long for the model after all: summarise older history and try once more.
-                Err(e) if crate::llm::error::ErrorKind::of(&e) == crate::llm::error::ErrorKind::ContextTooLong => {
-                    eprintln!("context too long for the model; compacting and retrying");
-                    if self.compact("overflow").await?.is_some() {
-                        on_event(Event::Compacted);
-                    }
-                    self.call_model(step, &specs, ctx, on_event).await?
-                }
-                r => r?,
-            };
+            let completion = self.call_with_retries(step, &specs, ctx, on_event).await?;
             let reply = completion.message;
             self.history.push(reply.clone());
 
@@ -487,7 +528,7 @@ impl Agent {
         if let Some(last) = self.history.last_mut() {
             last.content.push(Block::Text(note));
         }
-        let completion = self.call_model(limit, &[], ctx, on_event).await?;
+        let completion = self.call_with_retries(limit, &[], ctx, on_event).await?;
         self.history.push(completion.message.clone());
         Ok(completion.message.text())
     }
@@ -519,39 +560,6 @@ mod tests {
 
     fn agent(db: Arc<Db>) -> Agent {
         Agent::new(Arc::new(Fake), ToolRegistry::with_defaults(), "sys".into(), db, "test").unwrap()
-    }
-
-    fn big_history(a: &mut Agent) {
-        for i in 0..10 {
-            a.history.push(Message::user_text(format!("question {i} {}", "x".repeat(2_000))));
-            a.history.push(Message { role: Role::Assistant, content: vec![Block::Text(format!("answer {i}"))] });
-        }
-    }
-
-    #[tokio::test]
-    async fn compaction_keeps_a_valid_tail_and_persists() {
-        let db = Db::in_memory();
-        let mut a = agent(db.clone());
-        a.context_limit = 1_000;
-        big_history(&mut a);
-        let before = a.history.len();
-        let (b, after) = a.compact("threshold").await.unwrap().expect("compacted");
-        assert!(after < b);
-        assert!(a.history.len() < before);
-        assert_eq!(a.history[0].role, Role::User);
-        assert!(a.history[0].text().contains("[Summary of the earlier conversation]"));
-        // roles still alternate
-        assert!(a.history.windows(2).all(|w| w[0].role != w[1].role));
-        // the stored live history matches memory, so a restart resumes it
-        let resumed = agent(db);
-        assert_eq!(resumed.history.len(), a.history.len());
-    }
-
-    #[tokio::test]
-    async fn small_histories_are_left_alone() {
-        let mut a = agent(Db::in_memory());
-        a.history.push(Message::user_text("hi"));
-        assert!(a.compact("threshold").await.unwrap().is_none());
     }
 
     #[test]

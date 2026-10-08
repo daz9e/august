@@ -46,7 +46,7 @@ pub const OPS: &[Op] = &[
     op("turns", TURNS, "Running turns, of {thread} or all"),
     op("stop", TURNS, "Stop everything running in {thread}, like /stop"),
     op("callTool", Some("tools"), "Run an agent tool {thread, name, input}"),
-    op("llm", Some("llm"), "One completion {prompt, system} without tools"),
+    op("llm", Some("llm"), "One completion without tools: {prompt} or {messages}, {system}; in {thread}'s conversation's model, counted in its usage"),
     op("model_set", Some("models"), "Switch to {model} of the current provider"),
     op("sessions", SESSIONS, "Stored conversations, newest first, of {thread} or all: {id, chat, name, settings, messages, bound}"),
     op("session_new", SESSIONS, "Start a new conversation in {thread}, optionally with {name, settings}; returns its id"),
@@ -54,7 +54,8 @@ pub const OPS: &[Op] = &[
     op("session_switch", SESSIONS, "Continue stored {session} in {thread}"),
     op("history", SESSIONS, "The journal of {session} (or {thread}'s, or all): entries after {since} of {kinds}, at most {limit} (default 100)"),
     op("journal_append", None, "Record {type, data} in the journal of {session} or {thread}'s (kind `custom`, caller you)"),
-    op("compact", SESSIONS, "Summarise older messages of {thread}: {before, after} or null"),
+    op("messages", SESSIONS, "The live conversation of {thread} (what the model sees next): {session, messages, tokens, window}"),
+    op("messages_set", SESSIONS, "Replace the live conversation of {thread} with {messages} (earlier ones stay searchable)"),
     op("search", SESSIONS, "Full-text search over everything said in any conversation: {query, limit} → [{at, role, text}]"),
     op("usage", SESSIONS, "Token usage of {thread}'s conversation and of today"),
     op("extensions", Some("admin"), "Every extension with its state and what it registers"),
@@ -175,8 +176,27 @@ impl Gateway {
             }
             "llm" => {
                 let system = p["system"].as_str().filter(|s| !s.is_empty()).unwrap_or("You are a helpful assistant.");
-                let provider = self.provider.read().unwrap().clone();
-                let c = provider.complete(&crate::util::new_uuid(), system, &[Message::user_text(arg("prompt")?)], &[]).await?;
+                let messages = match p["messages"].as_array() {
+                    Some(list) => list.iter().map(Message::from_json).collect::<Option<Vec<_>>>().ok_or_else(|| anyhow!("malformed `messages`"))?,
+                    None => vec![Message::user_text(arg("prompt")?)],
+                };
+                // In a thread: its conversation's model, and its usage counts the call.
+                let session = match thread(p) {
+                    Ok(t) => self.db.current_session(&t.key())?,
+                    Err(_) => None,
+                };
+                let model = match &session {
+                    Some(s) => self.db.session_settings(s)?["model"].as_str().map(String::from),
+                    None => None,
+                };
+                let provider = match model {
+                    Some(m) => providers::build_spec(&m).await?,
+                    None => self.provider.read().unwrap().clone(),
+                };
+                let c = provider.complete(&crate::util::new_uuid(), system, &messages, &[]).await?;
+                if let Some(s) = &session {
+                    self.db.record_usage(s, &c.usage)?;
+                }
                 json!(c.message.text())
             }
             "model_set" => {
@@ -235,10 +255,19 @@ impl Gateway {
                 self.db.update_session(arg("session")?, p["name"].as_str(), &p["settings"])?;
                 Value::Null
             }
-            "compact" => match self.chat(&thread(p)?).await?.agent.lock().await.compact("manual").await? {
-                Some((before, after)) => json!({"before": before, "after": after}),
-                None => Value::Null,
-            },
+            "messages" => {
+                let chat = self.chat(&thread(p)?).await?;
+                let agent = chat.agent.lock().await;
+                let (messages, tokens, window) = agent.conversation();
+                let messages: Vec<Value> = messages.iter().map(Message::to_json).collect();
+                json!({"session": agent.session(), "messages": messages, "tokens": tokens, "window": window})
+            }
+            "messages_set" => {
+                let list = p["messages"].as_array().ok_or_else(|| anyhow!("missing `messages`"))?;
+                let messages = list.iter().map(Message::from_json).collect::<Option<Vec<_>>>().ok_or_else(|| anyhow!("malformed `messages`"))?;
+                self.chat(&thread(p)?).await?.agent.lock().await.set_history(messages)?;
+                Value::Null
+            }
             "usage" => self.db.usage(&thread(p)?.key())?,
             "search" => {
                 let limit = p["limit"].as_u64().unwrap_or(8).clamp(1, 50) as usize;

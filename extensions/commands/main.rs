@@ -9,7 +9,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("new", "Start a fresh conversation"),
     ("stop", "Cancel the current task"),
     ("queue", "Run a message as its own turn after the current one"),
-    ("compact", "Summarise older messages to free up context"),
     ("usage", "Show token usage of this conversation and today"),
     ("model", "Show or change the model"),
     ("status", "Show provider, model and workspace"),
@@ -53,11 +52,6 @@ async fn command(august: &August, name: &str, args: &str, ctx: &Ctx) -> Result<S
             ctx.call("session_new", mine(json!({}))).await?;
             "Started a new conversation.".into()
         }
-        "compact" => match ctx.call("compact", mine(json!({}))).await {
-            Ok(v) if v.is_null() => "Nothing to compact yet.".into(),
-            Ok(v) => format!("Compacted: ~{} → ~{} tokens.", v["before"], v["after"]),
-            Err(e) => format!("Could not compact: {e:#}"),
-        },
         "usage" => {
             let u = ctx.call("usage", mine(json!({}))).await?;
             let line = |u: &Value| {

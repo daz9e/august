@@ -110,7 +110,7 @@ impl Gateway {
                 Event::Text(t) => json!({"kind": "text", "text": t}),
                 Event::Step => json!({"kind": "step"}),
                 Event::ToolCall { name, input } => json!({"kind": "tool", "tool": name, "input": input}),
-                Event::Compacted => json!({"kind": "compacted"}),
+                Event::Note(text) => json!({"kind": "note", "text": text}),
             };
             if let Some(live) = &live {
                 live.send(Live::Event(e.clone())).ok();

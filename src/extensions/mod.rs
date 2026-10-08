@@ -25,12 +25,12 @@ const HOST_TS: &str = include_str!("host.ts");
 const TYPES: &str = include_str!("august.d.ts");
 const GUIDE: &str = include_str!("guide.md");
 /// The extensions that ship with August, as binaries `august-ext-<name>` next to `august`.
-const DEFAULTS: &[&str] = &["approvals", "browser", "clarify", "commands", "extend", "goal", "mcp", "memory", "messaging", "openai", "render", "review", "scheduler", "skills", "subagents", "voice", "web"];
+const DEFAULTS: &[&str] = &["approvals", "browser", "clarify", "commands", "compaction", "extend", "goal", "mcp", "memory", "messaging", "openai", "render", "review", "scheduler", "skills", "subagents", "voice", "web"];
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message_in` may do real work on attachments (e.g. transcribe a voice note).
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(120);
-/// Long enough for `/compact` to summarise a big conversation.
+/// Long enough for a command to do real work (`/compact` summarising a big conversation).
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
 /// Observe-only hooks run in the background, so they may take long.
 const OBSERVER_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -39,7 +39,7 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Restarts after a crash before an extension stays down until `/reload`.
 const MAX_RESTARTS: u32 = 3;
 /// Events whose handlers only observe: what they return is ignored.
-const OBSERVERS: &[&str] = &["turn_end", "turn_settled", "turn_event", "llm_result", "session_changed", "compaction", "reaction", "extension_state", "config_changed", "stop"];
+const OBSERVERS: &[&str] = &["turn_end", "turn_settled", "turn_event", "llm_result", "session_changed", "reaction", "extension_state", "config_changed", "stop"];
 /// How deep events extensions emit may nest (a handler emitting another, ...).
 const MAX_DEPTH: u32 = 8;
 const ENTRIES: [&str; 3] = ["index.ts", "index.js", "index.mjs"];
