@@ -63,6 +63,7 @@ impl Gateway {
                 continue;
             }
             channel.presence(chat, false).await;
+            self.settle(&id).await;
             return r.map(|_| ());
         }
     }

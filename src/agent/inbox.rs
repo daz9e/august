@@ -28,6 +28,11 @@ impl Inbox {
         s.busy
     }
 
+    /// A turn of the chat runs, or is about to run what was sent meanwhile.
+    pub fn busy(&self) -> bool {
+        self.0.lock().unwrap().busy
+    }
+
     /// Messages that arrived since the last call.
     pub fn take(&self) -> Vec<String> {
         std::mem::take(&mut self.0.lock().unwrap().pending)

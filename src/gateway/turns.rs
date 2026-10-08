@@ -57,6 +57,10 @@ pub struct Turns {
     running: StdMutex<HashMap<u64, Running>>,
     /// Outcomes of turns extensions started, until they collect them.
     outcomes: StdMutex<HashMap<u64, oneshot::Receiver<Outcome>>>,
+    /// Threads extensions were told are settled, until a turn begins there.
+    settled: StdMutex<std::collections::HashSet<Thread>>,
+    /// `turn_end` handlers still running, by thread (they may start the next turn).
+    ending: StdMutex<HashMap<Thread, usize>>,
 }
 
 impl Turns {
@@ -67,6 +71,7 @@ impl Turns {
         let cancel = Arc::new(Notify::new());
         let running = Running { thread: thread.clone(), tag: tag.clone(), cancel: cancel.clone() };
         self.running.lock().unwrap().insert(id, running);
+        self.settled.lock().unwrap().remove(thread);
         (tag, cancel)
     }
 
@@ -159,8 +164,10 @@ impl Gateway {
         self.turns.outcomes.lock().unwrap().insert(tag.id, rx);
         let (me, id) = (self.clone(), tag.id);
         tokio::spawn(async move {
-            let outcome = me.run_turn(messenger, thread, tag, cancel, req).await;
+            let text = req.text.clone();
+            let outcome = me.run_turn(messenger, thread.clone(), tag.clone(), cancel, req).await;
             me.turns.end(id);
+            me.turn_ended(&thread, &tag, &text, &outcome);
             tx.send(outcome).ok();
             // Nobody collected it: drop it after a while.
             tokio::time::sleep(OUTCOME_TTL).await;
@@ -240,15 +247,25 @@ impl Gateway {
             }
             TurnMode::Visible => Outcome::of(Some(Err(anyhow::anyhow!("not here"))), Vec::new()),
         };
-        self.turn_ended(&thread, &tag, &req.text, &outcome);
         outcome
     }
 
-    /// Tells extensions a turn ended (in the background).
-    pub(super) fn turn_ended(&self, thread: &Thread, tag: &TurnTag, text: &str, outcome: &Outcome) {
-        if !self.ext.listens("turn_end") {
+    /// Tells extensions (`turn_settled`, once) when nothing runs in `thread` any more and
+    /// nothing is about to.
+    pub(super) async fn settle(&self, thread: &Thread) {
+        let chat = self.chats.lock().await.get(thread).cloned();
+        let ending = self.turns.ending.lock().unwrap().get(thread).is_some_and(|n| *n > 0);
+        if ending || self.turns.busy(thread) || chat.is_some_and(|c| c.inbox.busy()) || !self.ext.listens("turn_settled") {
             return;
         }
+        if self.turns.settled.lock().unwrap().insert(thread.clone()) {
+            self.ext.emit("turn_settled", json!({}), &Origin::thread(thread.clone())).await;
+        }
+    }
+
+    /// Tells extensions a turn ended (in the background), then, once their `turn_end`
+    /// handlers are done (they may start the next turn), whether the thread settled.
+    pub(super) fn turn_ended(self: &Arc<Self>, thread: &Thread, tag: &TurnTag, text: &str, outcome: &Outcome) {
         let data = json!({
             "text": text,
             "reply": outcome.reply,
@@ -258,7 +275,14 @@ impl Gateway {
             "unattended": tag.mode != TurnMode::Visible,
         });
         let origin = Origin { thread: Some(thread.clone()), turn: Some(tag.clone()) };
-        let ext = self.ext.clone();
-        tokio::spawn(async move { ext.emit("turn_end", data, &origin).await });
+        let (me, thread) = (self.clone(), thread.clone());
+        *self.turns.ending.lock().unwrap().entry(thread.clone()).or_default() += 1;
+        tokio::spawn(async move {
+            me.ext.emit("turn_end", data, &origin).await;
+            if let Some(n) = me.turns.ending.lock().unwrap().get_mut(&thread) {
+                *n -= 1;
+            }
+            me.settle(&thread).await;
+        });
     }
 }

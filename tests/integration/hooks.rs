@@ -172,3 +172,39 @@ async fn message_out_changes_or_drops_what_august_sends() {
     let all = chat.history().join("\n");
     assert!(!all.contains("sk-123") && !all.contains("DROP ME"), "{all}");
 }
+
+const SETTLE: &str = r#"
+export default function (august) {
+  august.needs("turns");
+  let started = false;
+  august.on("turn_end", async ({ unattended }, ctx) => {
+    if (unattended) return ctx.send("background turn ended");
+    if (!started) { started = true; await august.turns.start(ctx.thread, { text: "think more", mode: "fork" }); }
+  });
+  august.on("turn_settled", (_, ctx) => ctx.send("settled"));
+}
+"#;
+
+#[tokio::test]
+async fn turn_settled_comes_when_nothing_runs_in_the_thread() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|req| {
+        // The background turn is slow, so it outlives the visible one.
+        if last_user_text(req).contains("think more") {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+        reply_text("ok")
+    }))
+    .await;
+    let gw = august(&fake, Setup { home: &[("extensions/settle/index.ts", SETTLE)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.say("hello").await;
+    chat.wait_for("settled").await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let texts = chat.texts();
+    assert_eq!(texts.iter().filter(|t| *t == "settled").count(), 1, "{texts:?}");
+    let (bg, settled) = (texts.iter().position(|t| t == "background turn ended"), texts.iter().position(|t| t == "settled"));
+    assert!(bg.is_some() && bg < settled, "{texts:?}");
+}

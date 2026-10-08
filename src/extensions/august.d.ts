@@ -157,6 +157,10 @@ declare module "august" {
       /** Not the user's visible conversation (`ctx.turn.mode` says which). */
       unattended: boolean;
     };
+    /** Nothing runs in `ctx.thread` any more and nothing is about to: every turn ended, no
+     *  message waits, and the `turn_end` handlers (which may start the next turn) are done.
+     *  Once per quiet period. Observe only; background. */
+    turn_settled: {};
     /** The user reacted to `message` with `emoji` (empty: took it back). Observe only. */
     reaction: { message: string; emoji: string };
     /** An extension started, failed, crashed or was turned off (observe only; background).
@@ -192,6 +196,7 @@ declare module "august" {
     tool_call: { input?: any; block?: string; approve?: boolean; ask?: string };
     tool_result: { output?: string; isError?: boolean };
     turn_end: void;
+    turn_settled: void;
     extension_state: void;
     config_changed: void;
     stop: void;
