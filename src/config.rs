@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! config/august.json               provider, model, effort, fallback, home thread
-//! config/providers/<id>.json       key, base_url; a provider of the user's own adds format, ...
+//! config/providers/<id>.json       key of a built-in provider not yet an extension
 //! config/messengers/<id>.json      e.g. telegram: token, allowed
 //! config/extensions/<name>.json    enabled, origin, settings
 //! ```
@@ -106,7 +106,7 @@ pub const MASK: &str = "••••";
 fn config_dir() -> PathBuf {
     static MIGRATED: std::sync::Once = std::sync::Once::new();
     MIGRATED.call_once(|| {
-        if let Err(e) = migrate() {
+        if let Err(e) = migrate().and_then(|_| migrate_providers()) {
             eprintln!("could not move old settings into {}: {e:#}", home().join("config").display());
         }
     });
@@ -350,6 +350,37 @@ fn migrate() -> Result<()> {
         if old(name).exists() {
             std::fs::rename(old(name), keep.join(name))?;
         }
+    }
+    Ok(())
+}
+
+/// Moves `config/providers/<id>.json` of providers that became extensions into those
+/// extensions' settings (`anthropic`: key, base_url; a provider of the user's own with a
+/// `format` becomes an endpoint of the extension speaking it). The old file goes to
+/// `config/.migrated/providers/`.
+fn migrate_providers() -> Result<()> {
+    let dir = home().join("config");
+    for e in std::fs::read_dir(dir.join("providers")).into_iter().flatten().filter_map(|e| e.ok()) {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(id) = name.strip_suffix(".json") else { continue };
+        let v = read_json(&e.path())?;
+        let (ext, patch) = match (id, v["format"].as_str()) {
+            ("anthropic", _) => ("anthropic", serde_json::json!({"key": v["key"], "base_url": v["base_url"]})),
+            (_, Some(f @ ("openai" | "anthropic"))) => (f, serde_json::json!({"endpoints": {id: v}})),
+            _ => continue,
+        };
+        let path = dir.join("extensions").join(format!("{ext}.json"));
+        let mut unit = read_json(&path)?;
+        for (k, val) in patch.as_object().into_iter().flatten().filter(|(_, v)| !v.is_null()) {
+            match (unit["settings"][k].as_object_mut(), val.as_object()) {
+                (Some(have), Some(more)) => have.extend(more.clone()),
+                _ => unit["settings"][k] = val.clone(),
+            }
+        }
+        write_json(&path, &unit)?;
+        let keep = dir.join(".migrated/providers");
+        std::fs::create_dir_all(&keep)?;
+        std::fs::rename(e.path(), keep.join(&name))?;
     }
     Ok(())
 }

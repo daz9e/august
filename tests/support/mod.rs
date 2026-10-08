@@ -28,6 +28,8 @@ pub const TRANSCRIPT: &str = "Remind me to water the plants at six.";
 pub struct Req {
     pub path: String,
     pub body: Vec<u8>,
+    /// The API key it carried (`x-api-key`, or a bearer token).
+    pub key: String,
 }
 
 impl Req {
@@ -126,9 +128,30 @@ fn ok(result: Value) -> Response {
     axum::Json(json!({"ok": true, "result": result})).into_response()
 }
 
-async fn handle(State(s): State<Arc<Inner>>, method: Method, uri: Uri, body: Bytes) -> Response {
+async fn handle(State(s): State<Arc<Inner>>, method: Method, uri: Uri, headers: axum::http::HeaderMap, body: Bytes) -> Response {
     let path = uri.path().to_string();
-    s.log.lock().unwrap().push(Req { path: path.clone(), body: body.to_vec() });
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+    let key = Some(header("x-api-key")).filter(|k| !k.is_empty()).unwrap_or_else(|| header("authorization").trim_start_matches("Bearer ").to_string());
+    s.log.lock().unwrap().push(Req { path: path.clone(), body: body.to_vec(), key });
+
+    // The Anthropic Messages API, streamed: the fake LLM's text answer as one delta.
+    if path.ends_with("/messages") {
+        assert!(s.llm.is_some(), "no fake LLM configured");
+        let req: Value = serde_json::from_slice(&body).unwrap();
+        let fake = s.clone();
+        let reply = tokio::task::spawn_blocking(move || (fake.llm.as_ref().unwrap())(&req)).await.unwrap();
+        let text = reply["choices"][0]["message"]["content"].as_str().unwrap_or_default();
+        let events = [
+            json!({"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}}),
+            json!({"type": "message_stop"}),
+        ];
+        let sse: String = events.iter().map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap())).collect();
+        return ([("content-type", "text/event-stream")], sse).into_response();
+    }
 
     if path.ends_with("/chat/completions") {
         assert!(s.llm.is_some(), "no fake LLM configured");

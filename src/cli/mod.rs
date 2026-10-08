@@ -85,10 +85,6 @@ async fn login() -> Result<()> {
                     .interact()?;
             if !keep {
                 let cred = ask_credential(p, existing.as_ref())?;
-                // Fail before saving if the key is rejected (where the API can tell).
-                if p.id() == "anthropic" {
-                    providers::list_models(p, Some(&cred)).await?;
-                }
                 config::save_credential(p.id(), Some(&cred))?;
                 println!("saved to {}", config::home().join(format!("config/providers/{}.json", p.id())).display());
             }
