@@ -13,12 +13,6 @@ pub struct Db {
 }
 
 #[derive(Debug, Clone)]
-pub struct Fact {
-    pub id: i64,
-    pub text: String,
-}
-
-#[derive(Debug, Clone)]
 pub struct Hit {
     pub role: String,
     pub text: String,
@@ -89,11 +83,6 @@ CREATE TABLE IF NOT EXISTS usage (
 );
 CREATE INDEX IF NOT EXISTS usage_session ON usage(session_id);
 CREATE INDEX IF NOT EXISTS usage_time ON usage(created_at);
-CREATE TABLE IF NOT EXISTS facts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    text TEXT NOT NULL,
-    created_at INTEGER NOT NULL
-);
 CREATE TABLE IF NOT EXISTS journal (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts INTEGER NOT NULL,
@@ -140,6 +129,19 @@ impl Db {
             if !has {
                 conn.execute_batch(ddl)?;
             }
+        }
+        // Facts the core kept before memory became the `memory` extension move to its store.
+        let has_facts: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'facts'", [], |r| r.get::<_, i64>(0))? > 0;
+        if has_facts {
+            let facts: Vec<serde_json::Value> = conn
+                .prepare("SELECT id, text FROM facts ORDER BY id")?
+                .query_map([], |r| Ok(serde_json::json!({"id": r.get::<_, i64>(0)?, "text": r.get::<_, String>(1)?})))?
+                .collect::<rusqlite::Result<_>>()?;
+            if !facts.is_empty() {
+                let value = serde_json::Value::Array(facts).to_string();
+                conn.execute("INSERT OR IGNORE INTO kv (scope, key, value) VALUES ('memory', 'facts', ?1)", [value])?;
+            }
+            conn.execute_batch("DROP TABLE facts")?;
         }
         Ok(Arc::new(Self { conn: Mutex::new(conn) }))
     }
@@ -406,37 +408,6 @@ impl Db {
         Ok(serde_json::json!({"session": json(self.usage_total(Some(&session), 0)?), "today": json(self.usage_total(None, midnight)?)}))
     }
 
-    // ---- facts ---------------------------------------------------------
-
-    /// Deletes the facts `remove` and adds `text`, in one transaction. Fails, changing
-    /// nothing, if one of the ids doesn't exist.
-    pub fn replace_facts(&self, remove: &[i64], text: &str) -> Result<i64> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        for id in remove {
-            if tx.execute("DELETE FROM facts WHERE id = ?1", [id])? == 0 {
-                anyhow::bail!("no fact #{id}");
-            }
-        }
-        tx.execute("INSERT INTO facts (text, created_at) VALUES (?1, ?2)", params![text, now()])?;
-        let id = tx.last_insert_rowid();
-        tx.commit()?;
-        Ok(id)
-    }
-
-    pub fn delete_fact(&self, id: i64) -> Result<bool> {
-        Ok(self.conn().execute("DELETE FROM facts WHERE id = ?1", [id])? > 0)
-    }
-
-    pub fn facts(&self) -> Result<Vec<Fact>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT id, text FROM facts ORDER BY id")?;
-        let facts = stmt
-            .query_map([], |r| Ok(Fact { id: r.get(0)?, text: r.get(1)? }))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(facts)
-    }
-
     // ---- key-value storage (extensions keep their state here) -----------
 
     pub fn kv_get(&self, scope: &str, key: &str) -> Result<Option<String>> {
@@ -535,9 +506,6 @@ impl crate::agent::SessionStore for Db {
     fn replace_live(&self, session: &str, msgs: &[Message]) -> Result<()> {
         Db::replace_live(self, session, msgs)
     }
-    fn facts(&self) -> Result<Vec<Fact>> {
-        Db::facts(self)
-    }
     fn record_usage(&self, session: &str, usage: &Usage) -> Result<()> {
         Db::record_usage(self, session, usage)
     }
@@ -577,14 +545,5 @@ mod tests {
         db.append(&s, &[Message::user_text("Купи молоко завтра")], true).unwrap();
         assert_eq!(db.search("молоко", 5).unwrap().len(), 1);
         assert!(db.search("\"*(", 5).unwrap().is_empty());
-    }
-
-    #[test]
-    fn facts() {
-        let db = Db::in_memory();
-        let id = db.replace_facts(&[], "user lives in Berlin").unwrap();
-        assert_eq!(db.facts().unwrap().len(), 1);
-        assert!(db.delete_fact(id).unwrap());
-        assert!(!db.delete_fact(id).unwrap());
     }
 }

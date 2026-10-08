@@ -244,6 +244,8 @@ pub struct Setup<'a> {
     pub home: &'a [(&'a str, &'a str)],
     /// Extra environment for August.
     pub env: &'a [(&'a str, &'a str)],
+    /// SQL run on `august.db` before August starts (data an older version left).
+    pub db: &'a str,
     /// Also run the Telegram messenger, against the fake Bot API.
     pub telegram: bool,
 }
@@ -268,6 +270,10 @@ fn spawn(fake: &Fake, setup: Setup) -> Gateway {
         let path = home.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+    if !setup.db.is_empty() {
+        std::fs::create_dir_all(&home).unwrap();
+        rusqlite::Connection::open(home.join("august.db")).unwrap().execute_batch(setup.db).unwrap();
     }
     let workspace = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();

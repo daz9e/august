@@ -2,7 +2,6 @@
 
 mod bash;
 mod fs;
-mod memory;
 mod skills;
 
 
@@ -55,9 +54,6 @@ impl ToolRegistry {
                 Arc::new(fs::ReadFile),
                 Arc::new(fs::WriteFile),
                 Arc::new(fs::EditFile),
-                Arc::new(memory::Remember),
-                Arc::new(memory::Forget),
-                Arc::new(memory::SearchHistory),
                 Arc::new(skills::LoadSkill),
                 Arc::new(skills::SaveSkill),
                 Arc::new(skills::EditSkill),

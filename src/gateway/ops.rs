@@ -55,8 +55,8 @@ pub const OPS: &[Op] = &[
     op("history", SESSIONS, "The journal of {session} (or {thread}'s, or all): entries after {since} of {kinds}, at most {limit} (default 100)"),
     op("journal_append", None, "Record {type, data} in the journal of {session} or {thread}'s (kind `custom`, caller you)"),
     op("compact", SESSIONS, "Summarise older messages of {thread}: {before, after} or null"),
+    op("search", SESSIONS, "Full-text search over everything said in any conversation: {query, limit} → [{at, role, text}]"),
     op("usage", SESSIONS, "Token usage of {thread}'s conversation and of today"),
-    op("memory", Some("memory"), "The facts August remembers: [{id, text}]"),
     op("extensions", Some("admin"), "Every extension with its state and what it registers"),
     op("extension_enable", Some("admin"), "(Re)start {name} and keep it enabled; returns its status line, fails with its error"),
     op("extension_disable", Some("admin"), "Stop {name} and keep it disabled"),
@@ -238,7 +238,10 @@ impl Gateway {
                 None => Value::Null,
             },
             "usage" => self.db.usage(&thread(p)?.key())?,
-            "memory" => Value::Array(self.db.facts()?.into_iter().map(|f| json!({"id": f.id, "text": f.text})).collect()),
+            "search" => {
+                let limit = p["limit"].as_u64().unwrap_or(8).clamp(1, 50) as usize;
+                Value::Array(self.db.search(arg("query")?, limit)?.into_iter().map(|h| json!({"at": h.at, "role": h.role, "text": h.text})).collect())
+            }
             "extensions" => self.ext.list(),
             "extension_enable" => {
                 let name = arg("name")?;

@@ -191,7 +191,7 @@ helpers for the common ones:
   `custom`). A conversation's `settings` — `model` (`provider:model` or a model of the active provider),
   `system` (added to the system prompt), `tools` (only these) — apply from its next turn.
 - `august.stop(thread)`: like `/stop`.
-- `august.memory()`: the remembered facts, like `/memory`.
+- `august.search(query, limit?)`: full-text search over everything said in any conversation.
 - `august.extensions.list()`, `.enable(name)`, `.disable(name)`, `.reload()`: like
   `/extensions` and `/reload`.
 
@@ -231,8 +231,7 @@ refuses the rest: `august.needs("messaging", "turns")` in its setup.
 - `tools`: `ctx.callTool`;
 - `llm`: `ctx.llm`;
 - `models`: `august.model.set`;
-- `sessions`: `august.sessions.*`;
-- `memory`: `august.memory()`;
+- `sessions`: `august.sessions.*`, `august.search`;
 - `config`: `august.config.get/set` (any unit's settings);
 - `admin`: `august.extensions.*` (other extensions: list, enable, disable, reload; a reload restarts every extension but yours).
 - `user`: act for the user, as a slash command does: `august.call(op, { ...params, as_user: true })`

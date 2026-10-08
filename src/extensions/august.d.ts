@@ -69,7 +69,7 @@ declare module "august" {
   };
 
   /** What an extension declares it uses (`august.needs`); each operation needs at most one. */
-  export type Permission = "messaging" | "turns" | "tools" | "llm" | "models" | "sessions" | "memory" | "config" | "admin";
+  export type Permission = "messaging" | "turns" | "tools" | "llm" | "models" | "sessions" | "config" | "admin";
 
   /** An operation of the core's table. */
   export type Op = { name: string; permission: Permission | null; about: string };
@@ -399,8 +399,8 @@ declare module "august" {
     status(thread?: Thread): Promise<{ provider: string; model: string; workspace: string; busy: boolean | null }>;
     /** Stops everything running in `thread`, as /stop does; how many turns were running. Needs `turns`. */
     stop(thread: Thread): Promise<{ cancelled: number }>;
-    /** The facts August remembers. Needs `memory`. */
-    memory(): Promise<{ id: number; text: string }[]>;
+    /** Full-text search over everything said in any conversation. Needs `sessions`. */
+    search(query: string, limit?: number): Promise<{ at: number; role: string; text: string }[]>;
     /** Switches to another model of the current provider (persisted). Needs `models`. */
     model: { set(model: string): Promise<{ provider: string; model: string }> };
     /** Your own entries in the journal (kind `custom`, `caller` you): state that follows a

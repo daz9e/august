@@ -11,7 +11,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("queue", "Run a message as its own turn after the current one"),
     ("compact", "Summarise older messages to free up context"),
     ("usage", "Show token usage of this conversation and today"),
-    ("memory", "Show what I remember about you"),
     ("model", "Show or change the model"),
     ("status", "Show provider, model and workspace"),
     ("extensions", "List extensions; enable or disable one"),
@@ -59,11 +58,6 @@ async fn command(august: &August, name: &str, args: &str, ctx: &Ctx) -> Result<S
             Ok(v) => format!("Compacted: ~{} → ~{} tokens.", v["before"], v["after"]),
             Err(e) => format!("Could not compact: {e:#}"),
         },
-        "memory" => {
-            let facts = august.call("memory", mine(json!({}))).await?;
-            let lines: Vec<String> = facts.as_array().into_iter().flatten().map(|f| format!("#{} {}", f["id"], str(&f["text"]))).collect();
-            if lines.is_empty() { "I haven't saved any facts yet.".into() } else { lines.join("\n") }
-        }
         "usage" => {
             let u = ctx.call("usage", mine(json!({}))).await?;
             let line = |u: &Value| {
@@ -163,7 +157,7 @@ fn status_line(e: &Value) -> String {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let august = August::new();
-    august.needs(&["messaging", "turns", "sessions", "models", "memory", "admin", "config", "user"]);
+    august.needs(&["messaging", "turns", "sessions", "models", "admin", "config", "user"]);
     for (name, description) in COMMANDS {
         let a = august.clone();
         august.register_command(name, description, move |args, ctx| {

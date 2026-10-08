@@ -205,7 +205,7 @@ const api = {
   commands: () => call("commands", {}),
   status: (thread?: Thread) => call("status", { thread }),
   stop: (thread: Thread) => call("stop", { thread }),
-  memory: () => call("memory", {}),
+  search: (query: string, limit?: number) => call("search", { query, limit }),
   model: { set: (model: string) => call("model_set", { model }) },
   sessions: {
     list: (thread?: Thread) => call("sessions", { thread }),
