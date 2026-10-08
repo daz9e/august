@@ -90,12 +90,11 @@ impl Gateway {
         let (tx, rx) = mpsc::unbounded_channel();
         let renderer = tokio::spawn(render(channel.clone(), chat.to_string(), rx));
 
-        let approver = Arc::new(self.approver(channel.clone(), id.clone(), Some(state.inbox.clone())));
+        let origin = crate::extensions::Origin { thread: Some(id.clone()), turn: Some(tag.clone()) };
         let ctx = ToolCtx {
             workspace: self.workspace.clone(),
-            approver,
             db: self.db.clone(),
-            origin: crate::extensions::Origin { thread: Some(id.clone()), turn: Some(tag.clone()) },
+            origin,
             files: Some(Arc::new(ChatFiles(tx.clone()))),
             extensions: Some(self.ext.clone()),
             inbox: Some(state.inbox.clone()),

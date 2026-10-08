@@ -91,7 +91,7 @@ async fn tool_hooks_know_the_call_and_who_made_it() {
 
 const STOPPER: &str = r#"
 export default function (august) {
-  august.on("tool_call", async (_, ctx) => { await ctx.send(`turn ${ctx.turn.id} runs`); return { approve: true }; });
+  august.on("tool_call", async (_, ctx) => { await ctx.send(`turn ${ctx.turn.id} runs`); });
   august.on("stop", async ({ turns }, ctx) => { await ctx.send(`stopping turns ${turns.join(",")}`); });
 }
 "#;
@@ -102,7 +102,9 @@ async fn stop_tells_extensions_which_turns_it_cancels() {
         return;
     }
     let fake = Fake::llm(Box::new(|_| reply_tool("bash", serde_json::json!({"command": "sleep 30"})))).await;
-    let gw = august(&fake, Setup { home: &[("extensions/stopper/index.ts", STOPPER)], ..Default::default() }).await;
+    // Nobody asks about the command: this is about /stop.
+    let home = [("extensions/stopper/index.ts", STOPPER), ("config/extensions/approvals.json", r#"{"enabled": false}"#)];
+    let gw = august(&fake, Setup { home: &home, ..Default::default() }).await;
     let mut chat = gw.chat().await;
     chat.say("start a long job").await;
     let runs = chat.wait_for(" runs").await.text;

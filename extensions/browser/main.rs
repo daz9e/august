@@ -79,9 +79,6 @@ async fn run(august: &August, mut args: Vec<String>, ctx: Ctx) -> Result<String>
             files.push(arg.clone());
         }
     }
-    if cmd == "upload" && !ctx.approve(&format!("browser: upload {} to the open page", files.join(", "))).await? {
-        bail!("the user denied the upload");
-    }
 
     let mut chat = ctx.thread.as_ref().map(|t| format!("{}-{}", t.messenger, t.id)).unwrap_or_else(|| "none".into());
     // A sub-agent gets a browser of its own, so it doesn't drive the thread's tabs.

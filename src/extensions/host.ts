@@ -118,7 +118,6 @@ function context(thread: Thread | null, turn: Turn | null = null) {
     prompt: (text: string, opts: { source?: string; deliver?: string } = {}) => inThread("prompt", { text, ...opts }),
     agent: (task: string, opts: object = {}) => runTurn(need(), { ...opts, text: task, mode: "fresh", parent: turn?.id }),
     ask: async (question: string, options: string[], opts: { timeout?: number } = {}) => ask(need(), question, options, opts.timeout),
-    approve: (action: string) => inThread("approve", { action }),
     callTool: (name: string, input: unknown = {}) => inThread("callTool", { name, input }),
     llm: (prompt: string, opts: { system?: string } = {}) => call("llm", { prompt, system: opts.system }),
   };

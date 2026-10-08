@@ -1,8 +1,5 @@
 use super::*;
 
-/// Code shown in the approval request, at most.
-const PREVIEW_CHARS: usize = 3_000;
-
 pub struct SaveExtension;
 
 #[async_trait]
@@ -15,7 +12,7 @@ impl Tool for SaveExtension {
         "Create or replace an extension: TypeScript that adds tools, slash commands or hooks \
          to August itself. Load the `writing-extensions` skill first for the API. The \
          extension is started right away; the result lists what it registered or the error \
-         to fix. Requires the user's approval."
+         to fix."
     }
 
     fn input_schema(&self) -> Value {
@@ -39,18 +36,6 @@ impl Tool for SaveExtension {
             anyhow::bail!("extension names use lowercase letters, digits, `-` and `_` (max 64)");
         }
         let folder = ext.dir().join(name);
-        let verb = if folder.exists() { "Replace" } else { "Install" };
-        let mut preview: String = code.chars().take(PREVIEW_CHARS).collect();
-        if preview.len() < code.len() {
-            preview += "\n…";
-        }
-        let action = format!(
-            "{verb} extension `{name}` ({} lines, runs with full access to this machine):\n\n{preview}",
-            code.lines().count()
-        );
-        if !ctx.approver.approve(&action).await {
-            anyhow::bail!("the user denied installing this extension");
-        }
         std::fs::create_dir_all(&folder)?;
         std::fs::write(folder.join("index.ts"), code)?;
         // Written by the agent: the core says so, the extension can't.

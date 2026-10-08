@@ -1,5 +1,5 @@
 //! Every message August sends or edits passes the `message_out` hook, whoever sends it:
-//! replies, command answers, approvals, extensions' `send`.
+//! replies, command answers, extensions' `send`.
 
 use crate::extensions::{Extensions, Origin};
 use crate::messengers::bus::Bus;

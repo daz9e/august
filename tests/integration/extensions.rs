@@ -288,47 +288,82 @@ async fn context_hook_changes_what_the_model_sees_but_not_the_history() {
     }
 }
 
-const POLICY: &str = r#"
-import type { August } from "august";
-
-export default function (august: August) {
+const REPLACER: &str = r#"export default function (august) {
   august.registerTool({ name: "edit", description: "Edit a file", execute: () => "custom edit" });
-  august.on("tool_call", ({ tool, input }) => {
-    if (tool === "bash" && input.command.startsWith("touch ")) return { approve: true };
-    if (tool === "read") return { ask: "Let the agent read notes.txt?" };
-  });
-}
-"#;
+}"#;
 
 #[tokio::test]
-async fn extensions_replace_builtin_tools_and_decide_approvals() {
+async fn extensions_replace_builtin_tools() {
     if !have_bun() {
         return;
     }
+    let fake = Fake::llm(llm(|_| reply_tool("edit", json!({"path": "notes.txt"})))).await;
+    let gw = august(&fake, Setup { home: &[("extensions/replacer/index.ts", REPLACER)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("edit", "Result: custom edit").await;
+}
+
+/// The judge's verdict on a command (a separate model call), else the conversation.
+fn judged(pick: fn(&str) -> Value) -> Llm {
+    let chat = llm(pick);
+    Box::new(move |req| {
+        if messages(req)[0]["content"].as_str().is_some_and(|s| s.contains("You check a shell command")) {
+            return reply_text(if last_user_text(req).contains("touch") { "SAFE" } else { "ASK" });
+        }
+        chat(req)
+    })
+}
+
+#[tokio::test]
+async fn approvals_judge_commands_apart_and_ask_about_the_rest() {
     let pick = |text: &str| match text {
-        t if t.contains("edit") => reply_tool("edit", json!({"path": "notes.txt"})),
         t if t.contains("touch") => reply_tool("bash", json!({"command": "touch made.txt"})),
-        _ => reply_tool("read", json!({"path": "notes.txt"})),
+        _ => reply_tool("bash", json!({"command": "rm -f notes.txt"})),
     };
-    let fake = Fake::llm(llm(pick)).await;
-    let setup = Setup { seed: &[("notes.txt", b"private")], home: &[("extensions/policy/index.ts", POLICY)], ..Default::default() };
-    let gw = august(&fake, setup).await;
+    let fake = Fake::llm(judged(pick)).await;
+    let gw = august(&fake, Setup { seed: &[("notes.txt", b"keep")], ..Default::default() }).await;
     let mut chat = gw.chat().await;
 
-    // An extension tool replaces the built-in of the same name.
-    chat.ask("edit", "Result: custom edit").await;
-
-    // `approve: true` runs a risky command without asking.
+    // The judge found it harmless: it runs without a question.
     chat.ask("touch", "Result: exit code: 0").await;
     assert!(gw.workspace.join("made.txt").exists());
     assert!(chat.messages().iter().all(|m| m.buttons.is_empty()), "asked anyway");
 
-    // `ask` asks even for a tool that never does; a denial reaches the model.
-    chat.say("read").await;
+    // It didn't: the user is asked, and a denial blocks the call.
+    chat.say("remove").await;
     let ask = chat.question().await;
-    assert!(ask.text.contains("Let the agent read notes.txt?"), "{}", ask.text);
+    assert!(ask.text.contains("rm -f notes.txt"), "{}", ask.text);
     chat.press(&ask.button("Deny")).await;
-    chat.wait_for("Result: the user denied this").await;
+    chat.wait_for("Result: blocked by an extension: the user denied this").await;
+    assert!(gw.workspace.join("notes.txt").exists());
+}
+
+const GATEKEEPER: &str = r#"export default function (august) {
+  august.on("tool_call", ({ tool, input }) =>
+    tool === "bash" && input.command.startsWith("rm ") ? { block: "no deleting" } : undefined);
+}"#;
+
+#[tokio::test]
+async fn approvals_are_an_ordinary_extension_the_user_can_replace() {
+    if !have_bun() {
+        return;
+    }
+    let pick = |text: &str| match text {
+        t if t.contains("touch") => reply_tool("bash", json!({"command": "touch made.txt"})),
+        _ => reply_tool("bash", json!({"command": "rm -f notes.txt"})),
+    };
+    let fake = Fake::llm(llm(pick)).await;
+    let off = r#"{"enabled": false}"#;
+    let home = [("config/extensions/approvals.json", off), ("extensions/gatekeeper/index.ts", GATEKEEPER)];
+    let gw = august(&fake, Setup { seed: &[("notes.txt", b"keep")], home: &home, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+
+    // The core asks nobody; the user's own policy decides.
+    chat.ask("touch", "Result: exit code: 0").await;
+    assert!(gw.workspace.join("made.txt").exists());
+    chat.ask("remove", "Result: blocked by an extension: no deleting").await;
+    assert!(gw.workspace.join("notes.txt").exists());
+    assert!(chat.messages().iter().all(|m| m.buttons.is_empty()), "asked anyway");
 }
 
 const LATE: &str = r#"export default function (august) {

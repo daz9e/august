@@ -29,6 +29,10 @@ path = "src/main.rs"
 
 # Default extensions: each its own process, started by the gateway.
 [[bin]]
+name = "august-ext-approvals"
+path = "extensions/approvals/main.rs"
+
+[[bin]]
 name = "august-ext-browser"
 path = "extensions/browser/main.rs"
 

@@ -98,11 +98,6 @@ async fn schedule_task(august: &August, input: Value, ctx: Ctx) -> Result<String
         }
     }
     let script = input["script"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
-    if let Some(cmd) = &script
-        && !ctx.approve(&format!("run before every run of the task `{spec}` (unattended):\n{cmd}")).await?
-    {
-        bail!("the user denied the script");
-    }
     let id = {
         // Calls run concurrently; one at a time takes the next id.
         static NEXT_ID: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

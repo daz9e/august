@@ -202,13 +202,8 @@ impl Ctx {
         self.link.ask(self.thread()?, question, options, timeout).await
     }
 
-    /// August's approval: may `action` run?
-    pub async fn approve(&self, action: &str) -> Result<bool> {
-        Ok(self.in_thread("approve", json!({"action": action})).await? == true)
-    }
-
-    /// Runs any agent tool (built-in, MCP or an extension's) for the thread, with its hooks
-    /// and approvals: `(output, is_error)`.
+    /// Runs any agent tool (built-in, MCP or an extension's) for the thread, with its hooks:
+    /// `(output, is_error)`.
     pub async fn call_tool(&self, name: &str, input: Value) -> Result<(String, bool)> {
         let v = self.in_thread("callTool", json!({"name": name, "input": input})).await?;
         Ok((v["output"].as_str().unwrap_or_default().to_string(), v["isError"] == true))
@@ -342,7 +337,7 @@ impl August {
     }
 
     /// Starts a turn in `thread` (`{text, mode: quiet|fork|fresh, source, parent, system,
-    /// tools, exclude, approve_all, meta}`); returns its id.
+    /// tools, exclude, meta}`); returns its id.
     pub async fn start_turn(&self, thread: &Thread, turn: Value) -> Result<u64> {
         let v = self.0.link.call("turn_start", json!({"thread": thread, "turn": turn})).await?;
         v.as_u64().ok_or_else(|| anyhow!("bad turn id"))
@@ -358,7 +353,7 @@ impl August {
         Ok(self.0.link.call("turn_cancel", json!({"id": id})).await? == true)
     }
 
-    /// Runs an agent tool for `thread`, with its hooks and approvals: `(output, is_error)`.
+    /// Runs an agent tool for `thread`, with its hooks: `(output, is_error)`.
     pub async fn call_tool(&self, thread: &Thread, name: &str, input: Value) -> Result<(String, bool)> {
         let v = self.0.link.call("callTool", json!({"thread": thread, "name": name, "input": input})).await?;
         Ok((v["output"].as_str().unwrap_or_default().to_string(), v["isError"] == true))

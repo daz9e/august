@@ -6,7 +6,7 @@ use super::{Gateway, turn, waits};
 use crate::extensions::{self, Origin};
 use crate::llm::{Message, providers};
 use crate::messengers::{Button, Messenger, OutMessage, Thread};
-use crate::tools::{Approver, ToolCtx};
+use crate::tools::ToolCtx;
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -65,7 +65,6 @@ pub const OPS: &[Op] = &[
     op("settings_set", None, "Set {path, value} in the calling extension's settings (null deletes)"),
     op("config_get", Some("config"), "A setting of any unit at {path} (`august.model`, `extensions.web.settings`); secrets masked"),
     op("config_set", Some("config"), "Change the setting at {path} to {value} (null deletes); `enabled` and `origin` are the user's"),
-    op("approve", None, "Ask the user in {thread} whether {action} may run"),
     op("store_get", None, "The caller's stored value at {key}"),
     op("store_set", None, "Store {key, value} (null deletes)"),
     op("store_list", None, "The caller's stored entries under {prefix}"),
@@ -282,11 +281,6 @@ impl Gateway {
                 self.set_config(path, p["value"].clone()).await?;
                 Value::Null
             }
-            "approve" => {
-                let t = thread(p)?;
-                let approver = self.approver(self.messenger(&t)?, t, None);
-                json!(approver.approve(arg("action")?).await)
-            }
             "store_get" => match self.db.kv_get(ext, arg("key")?)? {
                 Some(v) => serde_json::from_str(&v).unwrap_or(Value::Null),
                 None => Value::Null,
@@ -429,7 +423,6 @@ impl Gateway {
         let files = turn::ThreadFiles { messenger: m.clone(), thread: thread.id.clone() };
         let ctx = ToolCtx {
             workspace: self.workspace.clone(),
-            approver: Arc::new(self.approver(m, thread, None)),
             db: self.db.clone(),
             origin,
             files: Some(Arc::new(files)),

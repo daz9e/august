@@ -4,7 +4,7 @@
 //! skills and session files turned off, so it makes exactly one model call. The
 //! conversation goes in as a transcript; August's tools are described in the system
 //! prompt and called with `<tool_call>` text blocks that this provider turns back
-//! into `ToolUse`, so every tool still runs through August (approval, rendering,
+//! into `ToolUse`, so every tool still runs through August (hooks, rendering,
 //! extensions). The CLI keeps no state between calls.
 
 use super::*;

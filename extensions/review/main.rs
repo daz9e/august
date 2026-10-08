@@ -133,7 +133,7 @@ async fn after_turn(august: August, counters: Arc<Mutex<HashMap<String, Counters
     let thread = ctx.thread.clone().ok_or_else(|| anyhow::anyhow!("a turn without a thread"))?;
     let turn = json!({
         "text": ask.trim_end(), "mode": "fork", "source": "review", "parent": ctx.turn.as_ref().map(|t| t.id),
-        "tools": ALLOWED, "approve_all": true,
+        "tools": ALLOWED, "meta": {"approve": "all"},
     });
     let id = august.start_turn(&thread, turn).await?;
     let out = august.wait_turn(id, Duration::from_secs(600)).await?;

@@ -42,7 +42,7 @@ async fn agent_patches_extends_and_archives_a_skill() {
     let loaded = chat.allow_until("loaded:").await.text;
 
     // The approval showed the change; the skill was fixed in place and lists its new file.
-    assert!(chat.texts().iter().any(|t| t.contains("- make deploy") && t.contains("+ make release")));
+    assert!(chat.texts().iter().any(|t| t.contains("old: make deploy") && t.contains("new: make release")));
     assert!(loaded.contains("make release") && !loaded.contains("make deploy"), "{loaded}");
     assert!(loaded.contains("references/hosts.md"), "{loaded}");
     assert_eq!(std::fs::read_to_string(gw.home.join("skills/deploy/references/hosts.md")).unwrap(), "web1, web2");

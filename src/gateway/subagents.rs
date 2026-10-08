@@ -1,5 +1,5 @@
 //! Sub-agents (fresh turns): a conversation of their own for a thread, with the thread's
-//! approvals, returning the final reply; and handing a thread a message.
+//! hooks, returning the final reply; and handing a thread a message.
 
 use super::Gateway;
 use crate::agent::{self, Agent};

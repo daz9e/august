@@ -8,9 +8,8 @@ use super::turn::ThreadFiles;
 use crate::agent::{TurnMode, TurnTag};
 use crate::extensions::{AgentOpts, Origin};
 use crate::messengers::Thread;
-use crate::tools::{Approver, ToolCtx};
+use crate::tools::ToolCtx;
 use anyhow::{Result, bail};
-use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -138,22 +137,9 @@ pub struct TurnRequest {
     /// `fresh`: never these tools.
     #[serde(default)]
     pub exclude: Vec<String>,
-    /// `fork`: run approvals without asking (nobody may be there to ask).
-    #[serde(default)]
-    pub approve_all: bool,
     /// Whatever the starter wants hooks to know about the turn (`ctx.turn.meta`).
     #[serde(default)]
     pub meta: Value,
-}
-
-/// Lets everything through (a fork that may write in the background).
-struct AllowAll;
-
-#[async_trait]
-impl Approver for AllowAll {
-    async fn approve(&self, _action: &str) -> bool {
-        true
-    }
 }
 
 impl Gateway {
@@ -198,13 +184,8 @@ impl Gateway {
 
     async fn run_turn(self: &Arc<Self>, messenger: Arc<dyn crate::messengers::Messenger>, thread: Thread, tag: TurnTag, cancel: Arc<Notify>, req: TurnRequest) -> Outcome {
         let origin = Origin { thread: Some(thread.clone()), turn: Some(tag.clone()) };
-        let approver: Arc<dyn Approver> = match req.approve_all {
-            true => Arc::new(AllowAll),
-            false => Arc::new(self.approver(messenger.clone(), thread.clone(), None)),
-        };
         let ctx = ToolCtx {
             workspace: self.workspace.clone(),
-            approver,
             db: self.db.clone(),
             origin,
             files: Some(Arc::new(ThreadFiles { messenger: messenger.clone(), thread: thread.id.clone() })),

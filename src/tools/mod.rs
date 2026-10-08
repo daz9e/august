@@ -1,4 +1,4 @@
-//! Tools the agent can call, plus the approval hook for risky actions.
+//! Tools the agent can call, run through the `tool_call` / `tool_result` hooks.
 
 mod bash;
 mod extensions;
@@ -18,12 +18,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Asks the human whether a risky action may run (CLI prompt, Telegram button, ...).
-#[async_trait]
-pub trait Approver: Send + Sync {
-    async fn approve(&self, action: &str) -> bool;
-}
-
 /// Delivers a file from the workspace to the chat the turn runs in.
 #[async_trait]
 pub trait FileSink: Send + Sync {
@@ -33,7 +27,6 @@ pub trait FileSink: Send + Sync {
 #[derive(Clone)]
 pub struct ToolCtx {
     pub workspace: PathBuf,
-    pub approver: Arc<dyn Approver>,
     pub db: Arc<Db>,
     /// The thread and turn this runs for.
     pub origin: crate::extensions::Origin,
@@ -53,16 +46,6 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     fn input_schema(&self) -> Value;
     async fn call(&self, input: &Value, ctx: &ToolCtx) -> Result<String>;
-}
-
-/// Approves everything (a `tool_call` hook already did).
-struct Approved;
-
-#[async_trait]
-impl Approver for Approved {
-    async fn approve(&self, _action: &str) -> bool {
-        true
-    }
 }
 
 #[derive(Clone)]
@@ -167,7 +150,6 @@ impl ToolRegistry {
             return self.run(name, input, ctx).await;
         };
         let mut input = input.clone();
-        let mut ctx = std::borrow::Cow::Borrowed(ctx);
         if ext.listens("tool_call") {
             let data = ext.emit("tool_call", json!({"tool": name, "input": input, "id": id, "caller": ctx.caller}), &ctx.origin).await;
             match &data["block"] {
@@ -178,17 +160,8 @@ impl ToolRegistry {
                 _ => {}
             }
             input = data["input"].clone();
-            // The hook may decide about approval: `approve: true` runs without asking,
-            // `ask: "<question>"` asks first even where the tool wouldn't.
-            if data["approve"] == true {
-                ctx.to_mut().approver = Arc::new(Approved);
-            } else if let Some(q) = data["ask"].as_str().filter(|q| !q.is_empty())
-                && !ctx.approver.approve(q).await
-            {
-                return ("the user denied this".into(), true);
-            }
         }
-        let (mut output, mut is_error) = self.run(name, &input, &ctx).await;
+        let (mut output, mut is_error) = self.run(name, &input, ctx).await;
         if ext.listens("tool_result") {
             let data = json!({"tool": name, "input": input, "id": id, "caller": ctx.caller, "output": output, "isError": is_error});
             let data = ext.emit("tool_result", data, &ctx.origin).await;

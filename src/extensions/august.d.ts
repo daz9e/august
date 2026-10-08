@@ -56,9 +56,8 @@ declare module "august" {
     tools?: string[];
     /** fresh: never these tools. */
     exclude?: string[];
-    /** fork: run approvals without asking (nobody may be there to ask). */
-    approve_all?: boolean;
-    /** Anything for hooks to read as `ctx.turn.meta`; the core doesn't look inside. */
+    /** Anything for hooks to read as `ctx.turn.meta` (e.g. `{ approve: "all" }` for the
+     *  default approvals extension); the core doesn't look inside. */
     meta?: unknown;
   };
   export type TurnOutcome = {
@@ -133,16 +132,14 @@ declare module "august" {
     /** Hands the thread a message (see `PromptOpts`); passes `message_in`. */
     prompt(text: string, opts?: PromptOpts): Promise<void>;
     /** Runs a sub-agent for this thread (a `fresh` turn under this one): a new conversation,
-     *  the thread's approvals, nobody to answer questions. Resolves to its final reply; throws
+     *  nobody to answer questions. Resolves to its final reply; throws
      *  if it failed or was cancelled (/stop cancels all of a thread's turns).
      *  `system` is added to the base system prompt; `tools` limits it to those tools,
      *  `exclude` hides some. */
     agent(task: string, opts?: { system?: string; tools?: string[]; exclude?: string[] }): Promise<string>;
     /** `august.ask` in this thread. */
     ask(question: string, options: string[], opts?: { timeout?: number }): Promise<string | null>;
-    /** Asks the user whether `action` may run (August's approval: Allow / Deny, 5 minutes). */
-    approve(action: string): Promise<boolean>;
-    /** Runs any agent tool (built-in, MCP or extension) for this thread, with its hooks and approvals. */
+    /** Runs any agent tool (built-in, MCP or extension) for this thread, with its hooks. */
     callTool(name: string, input?: object): Promise<{ output: string; isError: boolean }>;
     /** One completion on the configured model, without tools; returns the text. */
     llm(prompt: string, opts?: { system?: string }): Promise<string>;
@@ -259,7 +256,7 @@ declare module "august" {
     /** Changed fields replace the message's; `block: true` drops it. */
     message_out: { text?: string; buttons?: { id: string; label: string }[][]; files?: string[]; block?: boolean };
     /** `block` (a reason) stops the call; the model sees the reason as an error. */
-    tool_call: { input?: any; block?: string; approve?: boolean; ask?: string };
+    tool_call: { input?: any; block?: string };
     tool_result: { output?: string; isError?: boolean };
     turn_end: void;
     turn_settled: void;
@@ -324,7 +321,7 @@ declare module "august" {
     /** Declares what this extension uses beyond its own thread (shown in /extensions):
      *  `messaging` (messengers, sending to or listening in any thread, prompt), `turns`
      *  (starting turns, sub-agents), `tools` (callTool), `llm`. Without it, those calls fail;
-     *  answering in the thread of the call in progress, the store and approvals need nothing. */
+     *  answering in the thread of the call in progress, and the store need nothing. */
     needs(...permissions: Permission[]): void;
     /** A section of the system prompt (Markdown, e.g. "## Reminders\n..."): how and when the
      *  model should use what this extension offers. Fixed for each conversation, so a change

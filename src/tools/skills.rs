@@ -39,7 +39,7 @@ impl Tool for SaveSkill {
         "Create or update a skill: a reusable how-to for a kind of task. Save one after \
          working out a non-trivial procedure the user is likely to ask for again, or when the \
          user asks you to. The description says when to use it (one line); the body holds \
-         concrete steps, commands and gotchas. Requires the user's approval."
+         concrete steps, commands and gotchas."
     }
 
     fn input_schema(&self) -> Value {
@@ -55,14 +55,9 @@ impl Tool for SaveSkill {
         })
     }
 
-    async fn call(&self, input: &Value, ctx: &ToolCtx) -> Result<String> {
+    async fn call(&self, input: &Value, _ctx: &ToolCtx) -> Result<String> {
         let (name, description, body) =
             (str_arg(input, "name")?, str_arg(input, "description")?, str_arg(input, "body")?);
-        let exists = crate::skills::list().iter().any(|s| s.name == name);
-        let verb = if exists { "update" } else { "create" };
-        if !ctx.approver.approve(&format!("{verb} skill `{name}`: {description}")).await {
-            anyhow::bail!("the user denied saving this skill");
-        }
         let path = crate::skills::save(name, description, body)?;
         Ok(format!("saved {}", path.display()))
     }
@@ -81,8 +76,7 @@ impl Tool for EditSkill {
          piece of SKILL.md (load the skill first and copy the text), `write_file` / \
          `remove_file` manage supporting files under references/, templates/ or scripts/ \
          (mention new ones in SKILL.md), `archive` retires an outdated skill (recoverable). \
-         Fix wrong instructions in place instead of appending corrections. Requires the \
-         user's approval."
+         Fix wrong instructions in place instead of appending corrections."
     }
 
     fn input_schema(&self) -> Value {
@@ -101,26 +95,8 @@ impl Tool for EditSkill {
         })
     }
 
-    async fn call(&self, input: &Value, ctx: &ToolCtx) -> Result<String> {
+    async fn call(&self, input: &Value, _ctx: &ToolCtx) -> Result<String> {
         let (action, name) = (str_arg(input, "action")?, str_arg(input, "name")?);
-        let clip = |s: &str| -> String {
-            let c: String = s.chars().take(1_500).collect();
-            if c.len() < s.len() { c + "\n…" } else { c }
-        };
-        let ask = match action {
-            "patch" => format!(
-                "edit skill `{name}`:\n- {}\n+ {}",
-                clip(str_arg(input, "old")?),
-                clip(str_arg(input, "new")?)
-            ),
-            "write_file" => format!("write `{}` in skill `{name}`:\n{}", str_arg(input, "file")?, clip(str_arg(input, "content")?)),
-            "remove_file" => format!("remove `{}` from skill `{name}`", str_arg(input, "file")?),
-            "archive" => format!("archive skill `{name}`"),
-            other => anyhow::bail!("unknown action `{other}`"),
-        };
-        if !ctx.approver.approve(&ask).await {
-            anyhow::bail!("the user denied this change");
-        }
         Ok(match action {
             "patch" => {
                 crate::skills::patch(name, str_arg(input, "old")?, str_arg(input, "new")?)?;
@@ -134,7 +110,8 @@ impl Tool for EditSkill {
                 crate::skills::remove_file(name, str_arg(input, "file")?)?;
                 format!("removed {} from `{name}`", str_arg(input, "file")?)
             }
-            _ => format!("archived skill `{name}` to {}", crate::skills::archive(name)?.display()),
+            "archive" => format!("archived skill `{name}` to {}", crate::skills::archive(name)?.display()),
+            other => anyhow::bail!("unknown action `{other}`"),
         })
     }
 }

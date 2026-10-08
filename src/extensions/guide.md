@@ -53,8 +53,10 @@ leave it unchanged.
 - `tool_call` `{ tool, input, id, caller }`: before any tool runs (built-in or extension);
   `id` is the model's call id (null outside a model call), `caller` is `model`, or
   `ext:<name>` for an extension's `callTool`. Return
-  `{ block: "reason" }` to stop it, `{ input }` to change its arguments, `{ approve: true }`
-  to run it without the usual approval, `{ ask: "question" }` to ask the user first.
+  `{ block: "reason" }` to stop it, `{ input }` to change its arguments. The handler may
+  take its time (raise its timeout with `hook_timeout`): ask the user, run a check with
+  `ctx.llm`, then let the call through or block it. That is all approvals are: the default
+  `approvals` extension does exactly this.
 - `tool_result` `{ tool, input, id, caller, output, isError }`: return `{ output }` to change what the
   model sees.
 - `turn_end` `{ text, reply, status, toolCalls, unattended }`: after any turn; `status` is
@@ -139,7 +141,7 @@ Messengers and messages — August's primitives, usable for any thread:
 Calling into August:
 - `await ctx.callTool("read", { path: "notes.md" })` runs any agent tool (built-in,
   MCP or another extension's) for that thread, through the `tool_call`/`tool_result` hooks
-  and the usual approvals; returns `{ output, isError }`.
+  returns `{ output, isError }`.
 - `await ctx.llm(prompt, { system })` is one completion on the current model, without tools;
   returns the text.
 - `await ctx.agent(task, { system, tools, exclude })` runs a sub-agent with a fresh
@@ -151,7 +153,6 @@ Calling into August:
   `{ status, reply, error, toolCalls }`. `august.turns.cancel(id)`, `august.turns.list()`.
   /stop cancels every turn of its thread. `ctx.turn` tells which turn a call runs in
   (`{ id, mode, source, parent }`).
-- `await ctx.approve(action)` is August's own yes/no approval.
 - `august.workspace` is the agent's workspace folder.
 
 State: `august.store` keeps JSON values by key in August's database, across restarts
@@ -238,7 +239,7 @@ refuses the rest: `august.needs("messaging", "turns")` in its setup.
   counts as the user's (hooks see `by: "user"`, and it may turn extensions on and off).
 
 Answering in the call's own thread while it runs (`ctx.send`, `ctx.ask`), the store,
-`ctx.approve`, your own settings, and reading `ops`, `tools`, `commands`, `status` need
+your own settings, and reading `ops`, `tools`, `commands`, `status` need
 nothing. `/extensions`
 shows what each one needs. Ask for no more than the extension uses.
 
@@ -249,7 +250,7 @@ shows what each one needs. Ask for no more than the extension uses.
   `/extensions`, reload them with `/reload`, and pause one with
   `/extensions disable <name>` (`enable` starts it again; saving it also re-enables it).
 - Extensions run with full access to the machine, outside the workspace sandbox and the
-  shell approvals. Write only what the user asked for.
+  approvals of the agent's tool calls. Write only what the user asked for.
 - stdout is reserved for the protocol: log with `console.log`/`console.error` (goes to
   August's log).
 - npm packages: just import them; bun installs them on first run. Keep state in files under

@@ -1,7 +1,6 @@
 //! Connects channels to agents: one agent session per chat, slash commands,
-//! streamed replies rendered as live-edited messages, and button approvals.
+//! streamed replies rendered as live-edited messages.
 
-mod approval;
 mod commands;
 mod media;
 mod outbound;
@@ -141,11 +140,6 @@ impl Gateway {
         }
         dispatcher.await.ok();
         Ok(())
-    }
-
-    /// Approvals asked in `thread`; with `inbox`, a text answer also reaches the running turn.
-    fn approver(&self, messenger: Arc<dyn Messenger>, thread: Thread, inbox: Option<Arc<agent::Inbox>>) -> approval::ChatApprover {
-        approval::ChatApprover { messenger, thread, waits: self.waits.clone(), inbox }
     }
 
     fn tools(&self) -> ToolRegistry {
