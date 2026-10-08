@@ -19,7 +19,7 @@ export default function (august) {
   august.registerCommand("pirate", async (_, ctx) => {
     const id = await august.sessions.new(ctx.thread, {
       name: "pirate",
-      settings: { model: "pirate-model", system: "Talk like a pirate.", tools: ["read_file"] },
+      settings: { model: "pirate-model", system: "Talk like a pirate.", tools: ["read"] },
     });
     return `pirate session ${id.length > 0}`;
   });
@@ -52,7 +52,7 @@ async fn sessions_have_their_own_settings_and_can_be_switched() {
     assert_eq!(req["model"], "pirate-model");
     assert!(req["messages"][0]["content"].as_str().unwrap().contains("Talk like a pirate."));
     let tools: Vec<&str> = req["tools"].as_array().unwrap().iter().filter_map(|t| t["function"]["name"].as_str()).collect();
-    assert_eq!(tools, ["read_file"]);
+    assert_eq!(tools, ["read"]);
     assert!(!user_texts(&req).contains("first words"));
 
     chat.ask("/back", "back to 2 messages; 2 sessions").await;
@@ -72,7 +72,7 @@ async fn sessions_have_their_own_settings_and_can_be_switched() {
 const AUDIT: &str = r#"
 export default function (august) {
   august.needs("sessions", "tools");
-  august.registerCommand("peek", async (_, ctx) => (await ctx.callTool("read_file", { path: "note.txt" })).output);
+  august.registerCommand("peek", async (_, ctx) => (await ctx.callTool("read", { path: "note.txt" })).output);
   august.registerCommand("mark", async (_, ctx) => { await august.journal.append({ thread: ctx.thread }, "bookmark", { at: "here" }); return "marked"; });
   august.registerCommand("log", async (_, ctx) => {
     const entries = await august.sessions.history({ thread: ctx.thread });
@@ -90,7 +90,7 @@ async fn the_journal_records_what_happened_in_a_conversation() {
         let last = req["messages"].as_array().unwrap().last().unwrap();
         match last["role"].as_str() {
             Some("tool") => reply_text("done"),
-            _ => reply_tool("read_file", serde_json::json!({"path": "note.txt"})),
+            _ => reply_tool("read", serde_json::json!({"path": "note.txt"})),
         }
     }))
     .await;
@@ -102,7 +102,7 @@ async fn the_journal_records_what_happened_in_a_conversation() {
     chat.ask("/mark", "marked").await;
     chat.ask(
         "/log",
-        "turn_start,user_message,assistant,tool:read_file:model,assistant,turn_end,tool:read_file:ext:audit,custom:bookmark:ext:audit",
+        "turn_start,user_message,assistant,tool:read:model,assistant,turn_end,tool:read:ext:audit,custom:bookmark:ext:audit",
     )
     .await;
 }

@@ -30,13 +30,13 @@ fn slow_first(answer: fn(&Value) -> Value) -> Llm {
 async fn message_during_tool_use_joins_the_running_turn() {
     let llm = slow_first(|req| {
         if msgs(req).last().unwrap()["role"] == "tool" {
-            return reply_tool("shell", json!({"command": "echo again"}));
+            return reply_tool("bash", json!({"command": "echo again"}));
         }
         let last = texts(req).pop().unwrap();
         if last.contains(MARK) {
             reply_text(&format!("done, noted: {}", last.lines().last().unwrap()))
         } else {
-            reply_tool("shell", json!({"command": "echo working"}))
+            reply_tool("bash", json!({"command": "echo working"}))
         }
     });
     let fake = Fake::llm(llm).await;

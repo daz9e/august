@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 
 /// Saves each call's stdin and args next to itself. Without a tool result in the
-/// transcript it asks for `read_file` (split across deltas); with one, it answers.
+/// transcript it asks for `read` (split across deltas); with one, it answers.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 [ "$1" = "--version" ] && { echo "0.0.0 (fake)"; exit 0; }
@@ -23,8 +23,8 @@ if printf '%s' "$input" | grep -q '<tool_result>'; then
   echo '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"The note says PINEAPPLE.","usage":{"input_tokens":20,"output_tokens":5}}'
 else
   delta 'Let me look.<tool'
-  delta '_call>{\"name\":\"read_file\",\"input\":{\"path\":\"note.txt\"}}</tool_call>'
-  echo '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"Let me look.<tool_call>{\"name\":\"read_file\",\"input\":{\"path\":\"note.txt\"}}</tool_call>","usage":{"input_tokens":10,"output_tokens":5}}'
+  delta '_call>{\"name\":\"read\",\"input\":{\"path\":\"note.txt\"}}</tool_call>'
+  echo '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"Let me look.<tool_call>{\"name\":\"read\",\"input\":{\"path\":\"note.txt\"}}</tool_call>","usage":{"input_tokens":10,"output_tokens":5}}'
 fi
 "#;
 
@@ -54,11 +54,11 @@ async fn answers_through_the_claude_cli_and_runs_august_tools() {
     let flag = |f: &str| args.iter().position(|a| *a == f).map(|i| args[i + 1]);
     assert_eq!(flag("--model"), Some("sonnet"));
     assert_eq!(flag("--tools"), Some(""));
-    assert!(args.contains(&"--system-prompt") && read("args-0.txt").contains(r#"{"name":"read_file""#), "{args:?}");
+    assert!(args.contains(&"--system-prompt") && read("args-0.txt").contains(r#"{"name":"read""#), "{args:?}");
 
     let first: Value = serde_json::from_str(&read("stdin-0.json")).unwrap();
     assert!(first["message"]["content"].to_string().contains("what does note.txt say?"));
     let second = read("stdin-1.json");
     assert!(second.contains("<tool_result>\\nPINEAPPLE"), "{second}");
-    assert!(second.contains(r#"<tool_call>{\"name\":\"read_file\""#), "{second}");
+    assert!(second.contains(r#"<tool_call>{\"name\":\"read\""#), "{second}");
 }

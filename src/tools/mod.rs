@@ -1,11 +1,10 @@
 //! Tools the agent can call, plus the approval hook for risky actions.
 
+mod bash;
 mod extensions;
 mod fs;
 mod media;
 mod memory;
-mod search;
-mod shell;
 mod skills;
 
 
@@ -81,14 +80,11 @@ impl ToolRegistry {
     pub fn with_defaults() -> Self {
         Self {
             tools: vec![
-                Arc::new(shell::Shell),
+                Arc::new(bash::Bash),
                 Arc::new(fs::ReadFile),
                 Arc::new(fs::WriteFile),
                 Arc::new(fs::EditFile),
-                Arc::new(fs::ListDir),
                 Arc::new(media::SendFile),
-                Arc::new(search::Grep),
-                Arc::new(search::Glob),
                 Arc::new(memory::Remember),
                 Arc::new(memory::Forget),
                 Arc::new(memory::SearchHistory),

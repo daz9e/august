@@ -29,7 +29,7 @@ export default function (august: August) {
 
   // Hooks.
   august.on("tool_call", ({ tool, input }) => {
-    if (tool === "shell" && /git push --force/.test(input.command)) return { block: "force push is not allowed" };
+    if (tool === "bash" && /git push --force/.test(input.command)) return { block: "force push is not allowed" };
   });
   august.on("turn_end", async ({ text, reply }, ctx) => { /* observe */ });
 }
@@ -137,7 +137,7 @@ Messengers and messages — August's primitives, usable for any thread:
   like a user's message, with its `source`.
 
 Calling into August:
-- `await ctx.callTool("read_file", { path: "notes.md" })` runs any agent tool (built-in,
+- `await ctx.callTool("read", { path: "notes.md" })` runs any agent tool (built-in,
   MCP or another extension's) for that thread, through the `tool_call`/`tool_result` hooks
   and the usual approvals; returns `{ output, isError }`.
 - `await ctx.llm(prompt, { system })` is one completion on the current model, without tools;
@@ -166,8 +166,8 @@ Tools can be registered (and removed with `august.unregisterTool(name)`) at any 
 only during setup, e.g. once a remote service answers; the model sees them from its next
 call.
 
-A tool with the name of a built-in one (`shell`, `read_file`, ...) replaces it, e.g. to run
-shell commands in a container.
+A tool with the name of a built-in one (`bash`, `read`, `write`, `edit`) replaces it, e.g. to run
+bash commands in a container.
 
 ## Operations
 

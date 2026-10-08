@@ -558,7 +558,7 @@ mod tests {
         a.history.push(Message::user_text("new"));
         a.history.push(Message {
             role: Role::Assistant,
-            content: vec![Block::ToolUse { id: "1".into(), name: "shell".into(), input: Value::Null }],
+            content: vec![Block::ToolUse { id: "1".into(), name: "bash".into(), input: Value::Null }],
         });
         a.rollback_turn();
         assert_eq!(a.history.len(), 2);

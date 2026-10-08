@@ -29,7 +29,7 @@ export default function (august: August) {
     text === "secret" ? { handled: true, reply: "intercepted" } : { text: text.replace("colour", "color") });
   august.on("before_turn", ({ system }) => ({ system: system + "\nEXTENSION-CONTEXT" }));
   august.on("tool_call", ({ tool, input }) =>
-    tool === "shell" && input.command.includes("forbidden") ? { block: "no forbidden commands" } : undefined);
+    tool === "bash" && input.command.includes("forbidden") ? { block: "no forbidden commands" } : undefined);
   august.on("turn_end", async ({ reply }, ctx) => { await ctx.send(`turn ended: ${reply}`); });
   august.registerCommand("ping", { description: "Replies pong", handler: (args) => `pong ${args}` });
 }
@@ -65,7 +65,7 @@ async fn extensions_add_tools_commands_and_hooks() {
     }
     let pick: fn(&str) -> Value = |text| {
         if text.contains("forbidden") {
-            reply_tool("shell", json!({"command": "echo forbidden"}))
+            reply_tool("bash", json!({"command": "echo forbidden"}))
         } else {
             reply_tool("shout", json!({"text": "hi"}))
         }
@@ -86,12 +86,15 @@ async fn extensions_add_tools_commands_and_hooks() {
     let reqs = fake.llm_requests();
     let first = reqs.iter().find(|r| last_user_text(r).contains("hello")).unwrap();
     let tools: Vec<&str> = first["tools"].as_array().unwrap().iter().filter_map(|t| t["function"]["name"].as_str()).collect();
-    assert!(tools.contains(&"shout") && tools.contains(&"shell"), "{tools:?}");
+    assert!(tools.contains(&"shout") && tools.contains(&"bash"), "{tools:?}");
+    // The core's own file and command tools are these four; searching is bash's job.
+    assert!(["read", "write", "edit", "bash"].iter().all(|t| tools.contains(t)), "{tools:?}");
+    assert!(!["grep", "glob", "list_dir", "shell"].iter().any(|t| tools.contains(t)), "{tools:?}");
     assert!(messages(first)[0]["content"].as_str().unwrap().contains("EXTENSION-CONTEXT"));
     // message_in rewrote one message and swallowed another before the model saw them.
     assert!(last_user_text(first).contains("hello color"));
     assert!(reqs.iter().all(|r| !last_user_text(r).contains("secret")));
-    // tool_call blocked the shell command; the model got the reason as a tool error.
+    // tool_call blocked the bash command; the model got the reason as a tool error.
     assert!(reqs.iter().any(|r| messages(r).iter().any(|m| m["role"] == "tool"
         && m["content"].as_str().unwrap_or("").contains("blocked by an extension: no forbidden commands"))));
 
@@ -177,7 +180,7 @@ export default function (august: August) {
     await ctx.send(`llm_result ${step}: ${toolCalls.map((c) => c.name).join(",")}|${text}|${typeof usage.inputTokens}`);
   });
   august.registerCommand("peek", async (args, ctx) => {
-    const { output, isError } = await ctx.callTool("read_file", { path: "note.txt" });
+    const { output, isError } = await ctx.callTool("read", { path: "note.txt" });
     return `peek ${args}: ${output} (error: ${isError})`;
   });
   august.registerCommand("ask", async (args, ctx) => `llm says: ${await ctx.llm(args, { system: "SYS-X" })}`);
@@ -192,7 +195,7 @@ async fn extensions_hook_model_calls_call_into_august_and_can_be_disabled() {
     }
     let pick: fn(&str) -> Value = |text| {
         if text.contains("read the note") {
-            reply_tool("read_file", json!({"path": "note.txt"}))
+            reply_tool("read", json!({"path": "note.txt"}))
         } else {
             reply_text("forty-two")
         }
@@ -204,7 +207,7 @@ async fn extensions_hook_model_calls_call_into_august_and_can_be_disabled() {
     chat.say("read the note").await;
 
     // llm_result fires after every model call of the turn.
-    chat.wait_for("llm_result 0: read_file||number").await;
+    chat.wait_for("llm_result 0: read||number").await;
     chat.wait_for("llm_result 1: |Result: note body").await;
     // llm_call changed the system prompt of the second call only.
     let reqs = fake.llm_requests();
@@ -289,10 +292,10 @@ const POLICY: &str = r#"
 import type { August } from "august";
 
 export default function (august: August) {
-  august.registerTool({ name: "list_dir", description: "List a folder", execute: () => "custom listing" });
+  august.registerTool({ name: "edit", description: "Edit a file", execute: () => "custom edit" });
   august.on("tool_call", ({ tool, input }) => {
-    if (tool === "shell" && input.command.startsWith("touch ")) return { approve: true };
-    if (tool === "read_file") return { ask: "Let the agent read notes.txt?" };
+    if (tool === "bash" && input.command.startsWith("touch ")) return { approve: true };
+    if (tool === "read") return { ask: "Let the agent read notes.txt?" };
   });
 }
 "#;
@@ -303,9 +306,9 @@ async fn extensions_replace_builtin_tools_and_decide_approvals() {
         return;
     }
     let pick = |text: &str| match text {
-        t if t.contains("list") => reply_tool("list_dir", json!({"path": "."})),
-        t if t.contains("touch") => reply_tool("shell", json!({"command": "touch made.txt"})),
-        _ => reply_tool("read_file", json!({"path": "notes.txt"})),
+        t if t.contains("edit") => reply_tool("edit", json!({"path": "notes.txt"})),
+        t if t.contains("touch") => reply_tool("bash", json!({"command": "touch made.txt"})),
+        _ => reply_tool("read", json!({"path": "notes.txt"})),
     };
     let fake = Fake::llm(llm(pick)).await;
     let setup = Setup { seed: &[("notes.txt", b"private")], home: &[("extensions/policy/index.ts", POLICY)], ..Default::default() };
@@ -313,7 +316,7 @@ async fn extensions_replace_builtin_tools_and_decide_approvals() {
     let mut chat = gw.chat().await;
 
     // An extension tool replaces the built-in of the same name.
-    chat.ask("list", "Result: custom listing").await;
+    chat.ask("edit", "Result: custom edit").await;
 
     // `approve: true` runs a risky command without asking.
     chat.ask("touch", "Result: exit code: 0").await;
@@ -479,7 +482,7 @@ export default function (august: August) {
     return `quiet ${out.status}: ${out.reply}`;
   });
   august.registerCommand("fork", async (_, ctx) => {
-    const out = await run(ctx, { text: "look back", mode: "fork", tools: ["read_file"] });
+    const out = await run(ctx, { text: "look back", mode: "fork", tools: ["read"] });
     return `fork ${out.status}: ${out.reply} | ${out.toolCalls.map((c) => `${c.name}:${c.isError}`).join(",")}`;
   });
   august.registerCommand("spawn", async (_, ctx) => {
@@ -509,7 +512,7 @@ async fn extensions_run_quiet_fork_and_fresh_turns() {
             return reply_text("FORK-REPLY");
         }
         match last_user_text(req) {
-            t if t.contains("look back") => reply_tool("write_file", json!({"path": "x.txt", "content": "no"})),
+            t if t.contains("look back") => reply_tool("write", json!({"path": "x.txt", "content": "no"})),
             t if t.contains("check quietly") => reply_text("QUIET-REPLY"),
             _ => reply_text(&format!("saw quiet: {}", all.contains("QUIET-REPLY"))),
         }
@@ -525,7 +528,7 @@ async fn extensions_run_quiet_fork_and_fresh_turns() {
     chat.ask("hello", "saw quiet: true").await;
 
     // A fork may only call what it's allowed, and leaves the conversation as it was.
-    chat.ask("/fork", "fork ok: FORK-REPLY | write_file:true").await;
+    chat.ask("/fork", "fork ok: FORK-REPLY | write:true").await;
     assert!(!gw.workspace.join("x.txt").exists());
     chat.ask("hello again", "saw quiet: true").await;
     let last = fake.llm_requests().last().unwrap().to_string();
@@ -643,7 +646,7 @@ const CONTROL: &str = r#"export default function (august) {
     const tools = await august.tools();
     const owner = (name) => tools.find((t) => t.name === name)?.owner;
     const ops = await august.ops();
-    return `dial: ${owner("dial")}, read_file: ${owner("read_file")}, model_set needs ${ops.find((o) => o.name === "model_set").permission}`;
+    return `dial: ${owner("dial")}, read: ${owner("read")}, model_set needs ${ops.find((o) => o.name === "model_set").permission}`;
   });
   august.registerCommand("swap", async (model) => {
     const now = await august.model.set(model);
@@ -671,7 +674,7 @@ async fn extensions_drive_the_core_through_its_operations() {
     let mut chat = gw.chat().await;
 
     // The tables of tools and operations, with who offers what and what it needs.
-    chat.ask("/owners", "dial: control, read_file: august, model_set needs models").await;
+    chat.ask("/owners", "dial: control, read: august, model_set needs models").await;
 
     // Switching the model is the same operation /model runs: the next call uses it.
     chat.ask("/swap other-model", "swapped to other-model").await;

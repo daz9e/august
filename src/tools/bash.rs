@@ -19,16 +19,16 @@ fn is_safe(cmd: &str) -> bool {
     !has_meta && SAFE_COMMANDS.contains(&first)
 }
 
-pub struct Shell;
+pub struct Bash;
 
 #[async_trait]
-impl Tool for Shell {
+impl Tool for Bash {
     fn name(&self) -> &'static str {
-        "shell"
+        "bash"
     }
 
     fn description(&self) -> &'static str {
-        "Run a shell command (sh -c) in the workspace directory. Returns exit code, stdout and \
+        "Run a bash command in the workspace directory. Returns exit code, stdout and \
          stderr. Times out after 120s. Non-read-only commands require the user's approval."
     }
 
@@ -45,7 +45,7 @@ impl Tool for Shell {
 
     async fn call(&self, input: &Value, ctx: &ToolCtx) -> Result<String> {
         let cmd = str_arg(input, "command")?;
-        if !is_safe(cmd) && !ctx.approver.approve(&format!("shell: {cmd}")).await {
+        if !is_safe(cmd) && !ctx.approver.approve(&format!("bash: {cmd}")).await {
             anyhow::bail!("the user denied running this command");
         }
         let out = august_ext::sh(cmd, &ctx.workspace, TIMEOUT).await?;

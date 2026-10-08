@@ -55,7 +55,7 @@ async fn review_can_only_save_and_read() {
             return if last["role"] == "tool" {
                 reply_text(&format!("review saw: {}", last["content"].as_str().unwrap_or("")))
             } else {
-                reply_tool("shell", json!({"command": "echo hi"}))
+                reply_tool("bash", json!({"command": "echo hi"}))
             };
         }
         reply_text("hello")
@@ -107,7 +107,7 @@ async fn enough_tool_calls_trigger_a_skill_review_that_writes_a_skill() {
                 reply_tool("save_skill", json!({"name": "greeting", "description": "How to greet", "body": "Say hi twice."}))
             };
         }
-        if last["role"] == "tool" { reply_text("done") } else { reply_tool("shell", json!({"command": "echo hi"})) }
+        if last["role"] == "tool" { reply_text("done") } else { reply_tool("bash", json!({"command": "echo hi"})) }
     });
     let fake = Fake::llm(llm).await;
     let env = [("AUGUST_REVIEW_MEMORY_EVERY", "0"), ("AUGUST_REVIEW_SKILLS_AFTER", "1")];

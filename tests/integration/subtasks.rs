@@ -63,7 +63,7 @@ async fn subtasks_run_in_the_background_and_report_back() {
         assert!(all.contains("be quick"));
         let tools: Vec<&str> = c["tools"].as_array().unwrap().iter().filter_map(|t| t["function"]["name"].as_str()).collect();
         // Nobody answers a sub-agent's questions.
-        assert!(tools.contains(&"shell") && !tools.contains(&"delegate_task") && !tools.contains(&"remember") && !tools.contains(&"clarify"), "{tools:?}");
+        assert!(tools.contains(&"bash") && !tools.contains(&"delegate_task") && !tools.contains(&"remember") && !tools.contains(&"clarify"), "{tools:?}");
     }
 }
 

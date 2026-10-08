@@ -9,7 +9,7 @@ async fn out_of_steps_the_agent_reports_progress() {
     let llm: Llm = Box::new(|req| {
         let has_tools = req["tools"].as_array().is_some_and(|t| !t.is_empty());
         if has_tools {
-            reply_tool("shell", json!({"command": "echo step"}))
+            reply_tool("bash", json!({"command": "echo step"}))
         } else {
             reply_text("Did 3 steps; the rest is left for next time.")
         }
@@ -28,7 +28,7 @@ async fn out_of_steps_the_agent_reports_progress() {
 
 #[tokio::test]
 async fn stop_ends_everything_a_command_started() {
-    let llm: Llm = Box::new(|_| reply_tool("shell", json!({"command": "(sleep 2; touch late.txt) & sleep 30"})));
+    let llm: Llm = Box::new(|_| reply_tool("bash", json!({"command": "(sleep 2; touch late.txt) & sleep 30"})));
     let fake = Fake::llm(llm).await;
     let gw = august(&fake, Setup::default()).await;
     let mut chat = gw.chat().await;
@@ -44,7 +44,7 @@ async fn stop_ends_everything_a_command_started() {
 
 #[tokio::test]
 async fn stop_works_with_the_commands_extension_off() {
-    let llm: Llm = Box::new(|_| reply_tool("shell", json!({"command": "sleep 30"})));
+    let llm: Llm = Box::new(|_| reply_tool("bash", json!({"command": "sleep 30"})));
     let fake = Fake::llm(llm).await;
     let home = [("config/extensions/commands.json", r#"{"enabled": false}"#)];
     let gw = august(&fake, Setup { home: &home, ..Default::default() }).await;

@@ -15,7 +15,7 @@ async fn usage_sums_every_model_call_of_the_session() {
         } else if last["role"] == "tool" {
             reply_text("done")
         } else if last["content"].to_string().contains("look") {
-            reply_tool("list_dir", json!({"path": "."}))
+            reply_tool("bash", json!({"command": "ls"}))
         } else {
             reply_text("ok")
         };

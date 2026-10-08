@@ -32,7 +32,7 @@ async fn terminal_chat_runs_approved_tools_commands_and_subagents() {
         } else if msgs(req).last().unwrap()["role"] == "tool" {
             reply_text(&format!("Done: {}", text.lines().next().unwrap_or("")))
         } else if text.contains("make a file") {
-            reply_tool("shell", json!({"command": "touch made.txt"}))
+            reply_tool("bash", json!({"command": "touch made.txt"}))
         } else {
             reply_tool("delegate_task", json!({"goal": "count the files"}))
         }
@@ -41,7 +41,7 @@ async fn terminal_chat_runs_approved_tools_commands_and_subagents() {
     let mut term = spawn_terminal(&fake).await;
     term.wait_for(TIMEOUT, "> ").await;
 
-    // A risky shell command asks first; `y` answers the approval.
+    // A risky bash command asks first; `y` answers the approval.
     term.send("make a file");
     term.wait_for(TIMEOUT, "Approval needed").await;
     term.send("y");

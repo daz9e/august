@@ -12,7 +12,7 @@ async fn telegram_carries_replies_buttons_and_commands() {
         if req["messages"].as_array().unwrap().last().unwrap()["role"] == "tool" {
             reply_text("**Done**")
         } else {
-            reply_tool("shell", json!({"command": "touch made.txt"}))
+            reply_tool("bash", json!({"command": "touch made.txt"}))
         }
     });
     let fake = Fake::start(vec![message(1, json!({"text": "make a file"}))], HashMap::new(), Some(llm)).await;

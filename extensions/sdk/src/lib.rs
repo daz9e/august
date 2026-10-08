@@ -576,7 +576,7 @@ pub fn str_arg<'a>(input: &'a Value, key: &str) -> &'a str {
     input[key].as_str().unwrap_or_default()
 }
 
-/// Runs `sh -c cmd` in `dir` in a process group of its own, and kills the whole group if
+/// Runs `bash -c cmd` in `dir` in a process group of its own, and kills the whole group if
 /// it outlives `timeout` or the call is dropped (cancelled), so nothing it started
 /// (`sleep`, a server, a pipeline) keeps running behind it. Commands that finish leave what
 /// they deliberately put in the background alone.
@@ -590,7 +590,7 @@ pub async fn sh(cmd: &str, dir: &std::path::Path, timeout: std::time::Duration) 
             }
         }
     }
-    let child = tokio::process::Command::new("sh")
+    let child = tokio::process::Command::new("bash")
         .arg("-c")
         .arg(cmd)
         .current_dir(dir)

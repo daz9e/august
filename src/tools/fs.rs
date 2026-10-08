@@ -55,7 +55,7 @@ pub struct ReadFile;
 #[async_trait]
 impl Tool for ReadFile {
     fn name(&self) -> &'static str {
-        "read_file"
+        "read"
     }
 
     fn description(&self) -> &'static str {
@@ -78,7 +78,7 @@ pub struct WriteFile;
 #[async_trait]
 impl Tool for WriteFile {
     fn name(&self) -> &'static str {
-        "write_file"
+        "write"
     }
 
     fn description(&self) -> &'static str {
@@ -105,13 +105,13 @@ pub struct EditFile;
 #[async_trait]
 impl Tool for EditFile {
     fn name(&self) -> &'static str {
-        "edit_file"
+        "edit"
     }
 
     fn description(&self) -> &'static str {
         "Edit a workspace file by replacing `old_string` with `new_string`. `old_string` must \
          match exactly once (include surrounding lines to make it unique) unless `replace_all` \
-         is true. Prefer this over write_file for changes to existing files."
+         is true. Prefer this over `write` for changes to existing files."
     }
 
     fn input_schema(&self) -> Value {
@@ -151,39 +151,6 @@ fn replace(text: &str, old: &str, new: &str, all: bool) -> Result<String> {
         1 => Ok(text.replacen(old, new, 1)),
         _ if all => Ok(text.replace(old, new)),
         n => anyhow::bail!("old_string matches {n} places; add more context or set replace_all"),
-    }
-}
-
-pub struct ListDir;
-
-#[async_trait]
-impl Tool for ListDir {
-    fn name(&self) -> &'static str {
-        "list_dir"
-    }
-
-    fn description(&self) -> &'static str {
-        "List entries of a directory in the workspace (use \".\" for the root)."
-    }
-
-    fn input_schema(&self) -> Value {
-        path_schema(false)
-    }
-
-    async fn call(&self, input: &Value, ctx: &ToolCtx) -> Result<String> {
-        let path = resolve(&ctx.workspace, str_arg(input, "path")?)?;
-        let mut rd = tokio::fs::read_dir(&path).await?;
-        let mut entries = Vec::new();
-        while let Some(e) = rd.next_entry().await? {
-            let suffix = if e.file_type().await?.is_dir() { "/" } else { "" };
-            entries.push(format!("{}{suffix}", e.file_name().to_string_lossy()));
-        }
-        entries.sort();
-        Ok(if entries.is_empty() {
-            "(empty)".into()
-        } else {
-            entries.join("\n")
-        })
     }
 }
 

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 /// What the review may run; other tools answer with an error.
 const ALLOWED: &[&str] = &[
-    "remember", "forget", "search_history", "load_skill", "save_skill", "edit_skill", "read_file", "list_dir", "grep", "glob",
+    "remember", "forget", "search_history", "load_skill", "save_skill", "edit_skill", "read",
 ];
 
 const MEMORY_PROMPT: &str = "Memory: durable facts that matter in every future conversation — who \

@@ -62,7 +62,7 @@ export default function (august) {
   august.needs("tools");
   august.on("tool_call", async ({ tool, id, caller }, ctx) => { await ctx.send(`call ${tool} ${id} by ${caller}`); });
   august.on("tool_result", ({ caller, output }) => (caller === "model" ? { output: output + " (seen)" } : undefined));
-  august.registerCommand("peek", async (_, ctx) => `peek: ${(await ctx.callTool("read_file", { path: "note.txt" })).output}`);
+  august.registerCommand("peek", async (_, ctx) => `peek: ${(await ctx.callTool("read", { path: "note.txt" })).output}`);
 }
 "#;
 
@@ -75,7 +75,7 @@ async fn tool_hooks_know_the_call_and_who_made_it() {
         let last = req["messages"].as_array().unwrap().last().unwrap();
         match last["role"].as_str() {
             Some("tool") => reply_text(&format!("Result: {}", last["content"].as_str().unwrap_or(""))),
-            _ => reply_tool("read_file", serde_json::json!({"path": "note.txt"})),
+            _ => reply_tool("read", serde_json::json!({"path": "note.txt"})),
         }
     }))
     .await;
@@ -84,9 +84,9 @@ async fn tool_hooks_know_the_call_and_who_made_it() {
     let mut chat = gw.chat().await;
 
     chat.ask("read the note", "Result: hello (seen)").await;
-    chat.wait_for("call read_file call_1 by model").await;
+    chat.wait_for("call read call_1 by model").await;
     chat.ask("/peek", "peek: hello").await;
-    chat.wait_for("call read_file null by ext:watch").await;
+    chat.wait_for("call read null by ext:watch").await;
 }
 
 const STOPPER: &str = r#"
@@ -101,7 +101,7 @@ async fn stop_tells_extensions_which_turns_it_cancels() {
     if !have_bun() {
         return;
     }
-    let fake = Fake::llm(Box::new(|_| reply_tool("shell", serde_json::json!({"command": "sleep 30"})))).await;
+    let fake = Fake::llm(Box::new(|_| reply_tool("bash", serde_json::json!({"command": "sleep 30"})))).await;
     let gw = august(&fake, Setup { home: &[("extensions/stopper/index.ts", STOPPER)], ..Default::default() }).await;
     let mut chat = gw.chat().await;
     chat.say("start a long job").await;
@@ -114,8 +114,8 @@ async fn stop_tells_extensions_which_turns_it_cancels() {
 const ROUTER: &str = r#"
 export default function (august) {
   august.on("llm_call", async ({ step, model, tools }, ctx) => {
-    await ctx.send(`step ${step} on ${model} with ${tools.includes("read_file") && tools.includes("shell")}`);
-    return step === 0 ? { model: "cheap-model", tools: ["read_file"] } : undefined;
+    await ctx.send(`step ${step} on ${model} with ${tools.includes("read") && tools.includes("bash")}`);
+    return step === 0 ? { model: "cheap-model", tools: ["read"] } : undefined;
   });
 }
 "#;
@@ -129,7 +129,7 @@ async fn llm_call_picks_the_model_and_tools_of_one_call() {
         let last = req["messages"].as_array().unwrap().last().unwrap();
         match last["role"].as_str() {
             Some("tool") => reply_text("done"),
-            _ => reply_tool("read_file", serde_json::json!({"path": "note.txt"})),
+            _ => reply_tool("read", serde_json::json!({"path": "note.txt"})),
         }
     }))
     .await;
@@ -145,7 +145,7 @@ async fn llm_call_picks_the_model_and_tools_of_one_call() {
         r["tools"].as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str().map(String::from)).collect()
     };
     assert_eq!(reqs[0]["model"], "cheap-model");
-    assert_eq!(names(&reqs[0]), ["read_file"]);
+    assert_eq!(names(&reqs[0]), ["read"]);
     assert_eq!(reqs[1]["model"], "fake-model");
     assert!(names(&reqs[1]).len() > 1);
 }
@@ -278,7 +278,7 @@ async fn turn_event_streams_what_a_visible_turn_does_in_order() {
         let last = req["messages"].as_array().unwrap().last().unwrap();
         match last["role"].as_str() {
             Some("tool") => reply_text("done"),
-            _ => reply_tool("read_file", serde_json::json!({"path": "note.txt"})),
+            _ => reply_tool("read", serde_json::json!({"path": "note.txt"})),
         }
     }))
     .await;
@@ -293,5 +293,5 @@ async fn turn_event_streams_what_a_visible_turn_does_in_order() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert!(chat.texts().iter().any(|t| t == "tool:read_file,step,text:done"), "{:?}", chat.texts());
+    assert!(chat.texts().iter().any(|t| t == "tool:read,step,text:done"), "{:?}", chat.texts());
 }

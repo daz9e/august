@@ -123,7 +123,7 @@ pub fn load(name: &str) -> Result<String> {
     extra.sort();
     let extra: Vec<String> = extra.iter().map(|p| p.display().to_string()).collect();
     if !extra.is_empty() {
-        out += &format!("\n\n[Supporting files of this skill; read them with read_file when needed]\n{}", extra.join("\n"));
+        out += &format!("\n\n[Supporting files of this skill; read them with `read` when needed]\n{}", extra.join("\n"));
     }
     Ok(out)
 }

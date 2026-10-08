@@ -137,7 +137,7 @@ async fn mcp_server_tools_become_agent_tools() {
     // The tools were offered under prefixed, sanitized names.
     let reqs = fake.llm_requests();
     let tools: Vec<&str> = reqs[0]["tools"].as_array().unwrap().iter().filter_map(|t| t["function"]["name"].as_str()).collect();
-    for name in ["mcp_fake_echo", "mcp_fake_fail_hard", "mcp_web_time", "shell"] {
+    for name in ["mcp_fake_echo", "mcp_fake_fail_hard", "mcp_web_time", "bash"] {
         assert!(tools.contains(&name), "{tools:?}");
     }
     // Non-text content is noted; an MCP error result reaches the model as a tool error.
