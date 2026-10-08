@@ -404,6 +404,18 @@ impl Gateway {
 
     /// Rebuilds the provider with another model of the active provider and persists it.
     async fn switch_model(&self, model: &str) -> Result<(String, String)> {
+        let mut model = model.to_string();
+        if self.ext.listens("model_select") {
+            let previous = self.model.read().unwrap().1.clone();
+            let data = self.ext.emit("model_select", json!({"model": model, "previous": previous}), &Origin::default()).await;
+            match &data["block"] {
+                Value::String(why) if !why.is_empty() => bail!("blocked by an extension: {why}"),
+                Value::Bool(true) => bail!("blocked by an extension"),
+                _ => {}
+            }
+            model = data["model"].as_str().map(String::from).unwrap_or(model);
+        }
+        let model = model.as_str();
         let mut sel = providers::selection()?;
         sel.model = Some(model.to_string());
         let provider_id = sel.provider.id.to_string();

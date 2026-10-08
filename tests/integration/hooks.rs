@@ -239,3 +239,24 @@ async fn prompts_carry_their_source_and_delivery() {
     chat.wait_for("message_in from subagent").await;
     chat.wait_for("message_in from user").await;
 }
+
+const MODELS: &str = r#"
+export default function (august) {
+  august.on("model_select", ({ model, previous }) =>
+    model === "banned" ? { block: `not after ${previous}` } : model === "fast" ? { model: "fast-model-v2" } : undefined);
+}
+"#;
+
+#[tokio::test]
+async fn model_select_can_redirect_or_refuse_a_model_switch() {
+    if !have_bun() {
+        return;
+    }
+    let fake = Fake::llm(Box::new(|_| reply_text("ok"))).await;
+    let gw = august(&fake, Setup { home: &[("extensions/models/index.ts", MODELS)], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("/model banned", "blocked by an extension: not after fake-model").await;
+    chat.ask("/model fast", "fast-model-v2").await;
+    chat.ask("hi", "ok").await;
+    assert_eq!(fake.llm_requests().last().unwrap()["model"], "fast-model-v2");
+}

@@ -67,6 +67,8 @@ leave it unchanged.
   the active provider or `provider:model`. The prompt is otherwise
   byte-stable so the provider can cache it; changing it costs that cache, so prefer
   `before_turn`.
+- `model_select` `{ model, previous }`: the model is being switched (`/model`,
+  `model_set`). Return `{ model }` to switch to another one, `{ block: "reason" }` to refuse.
 - `context` `{ step, messages }`: before every model call, the conversation the model is
   about to see. Return `{ messages }` to change it for that call only (inject recalled notes,
   drop noise); the stored history stays as is. Keep tool_use/tool_result pairs intact.

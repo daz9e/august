@@ -180,6 +180,8 @@ declare module "august" {
     shutdown: {};
     /** The user sent /stop in the thread (observe only). */
     stop: { turns: number[] };
+    /** The user or an extension is switching the model (`/model`, `model_set`). */
+    model_select: { model: string; previous: string };
     /** Before each model call of a turn; `step` counts from 0, `system` is the full prompt. */
     llm_call: { step: number; system: string; model: string; tools: string[] };
     /** Before each model call, after `llm_call`: the conversation the model is about to see. */
@@ -209,6 +211,8 @@ declare module "august" {
     stop: void;
     reaction: void;
     shutdown: void;
+    /** `model` switches to another one instead; `block` (a reason) refuses the switch. */
+    model_select: { model?: string; block?: string };
     /** `system` replaces the system prompt for this one call (breaks the prompt cache). */
     llm_call: { system?: string; model?: string; tools?: string[] };
     /** Returned `messages` replace what the model sees for this one call; the stored
