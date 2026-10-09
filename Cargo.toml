@@ -33,6 +33,10 @@ name = "august-ext-anthropic"
 path = "extensions/anthropic/main.rs"
 
 [[bin]]
+name = "august-ext-config"
+path = "extensions/config/main.rs"
+
+[[bin]]
 name = "august-ext-approvals"
 path = "extensions/approvals/main.rs"
 

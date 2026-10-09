@@ -80,6 +80,7 @@ pub const OPS: &[Op] = &[
     op("extensions_reload", Some("admin"), "Restart every extension but the caller"),
     op("settings", None, "The calling extension's settings, schema defaults filled in"),
     op("settings_set", None, "Set {path, value} in the calling extension's settings (null deletes)"),
+    op("config_list", Some("config"), "Every known setting under {prefix} (default all): [{path, description, type, default, value, secret}]; secrets masked"),
     op("config_get", Some("config"), "A setting of any unit at {path} (`august.model`, `extensions.web.settings`); secrets masked"),
     op("config_set", Some("config"), "Change the setting at {path} to {value} (null deletes); `enabled` and `origin` are the user's"),
     op("emit", None, "Run your declared event {event, data} through its handlers; returns the data they leave (an observed event: at once)"),
@@ -369,6 +370,7 @@ impl Gateway {
                 self.set_config(&path, p["value"].clone()).await?;
                 Value::Null
             }
+            "config_list" => Value::Array(self.config_list(p["prefix"].as_str().unwrap_or(""))?),
             "config_get" => {
                 let (path, value) = (arg("path")?, crate::config::get(arg("path")?)?);
                 let secret = self.secret_fields(path);
@@ -424,6 +426,32 @@ impl Gateway {
             Ok((kind, id, _)) if kind == "extensions" => extensions::secret_fields(&self.ext.settings_schema(&id)),
             _ => Vec::new(),
         }
+    }
+
+    /// Every setting a schema describes or a file holds: August's own, then each extension's.
+    fn config_list(&self, prefix: &str) -> Result<Vec<Value>> {
+        let mut units = vec![("august".to_string(), crate::config::app_schema(), crate::config::unit("august", "")?)];
+        for e in self.ext.list().as_array().into_iter().flatten() {
+            let name = e["name"].as_str().unwrap_or_default();
+            units.push((format!("extensions.{name}.settings"), self.ext.settings_schema(name), crate::config::get(&format!("extensions.{name}.settings"))?));
+        }
+        let mut out = Vec::new();
+        for (unit, schema, values) in units.into_iter().filter(|(u, ..)| u.starts_with(prefix) || prefix.starts_with(u.as_str())) {
+            let props = schema["properties"].as_object().cloned().unwrap_or_default();
+            let mut keys: Vec<String> = props.keys().cloned().collect();
+            keys.extend(values.as_object().into_iter().flatten().map(|(k, _)| k.clone()).filter(|k| !props.contains_key(k)));
+            let secret = extensions::secret_fields(&schema);
+            for key in keys {
+                let (path, spec, value) = (format!("{unit}.{key}"), &props.get(&key).cloned().unwrap_or_default(), &values[&key]);
+                if !path.starts_with(prefix) {
+                    continue;
+                }
+                let hidden = crate::config::is_secret_path(&path, &secret) && !value.is_null();
+                let value = if hidden { json!(crate::config::MASK) } else { crate::config::masked(value, &secret) };
+                out.push(json!({"path": path, "description": spec["description"], "type": spec["type"], "default": spec["default"], "value": value, "secret": hidden || spec["secret"] == true}));
+            }
+        }
+        Ok(out)
     }
 
     /// Changes a setting and tells extensions (`config_changed {path}`).

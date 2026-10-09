@@ -54,6 +54,18 @@ pub struct Config {
     pub home: Option<String>,
 }
 
+/// JSON Schema of `august.json`, in the shape extensions describe their settings with.
+pub fn app_schema() -> serde_json::Value {
+    serde_json::json!({"type": "object", "properties": {
+        "provider": {"type": "string", "description": "The active model provider (an account's provider id); chosen with /login"},
+        "model": {"type": "string", "description": "The active model of that provider; /models lists them"},
+        "effort": {"type": "string", "description": "Reasoning effort for models that have it (low, medium, high)"},
+        "fallback": {"type": "string", "description": "Backup used when the active provider keeps failing: provider:model"},
+        "home": {"type": "string", "description": "The thread extensions report to (messenger:id); set with /home"},
+        "hooks": {"type": "object", "description": "Hook chains: `order` lists extensions whose handlers run first, in that order (the rest after, by name)"},
+    }})
+}
+
 // ---- units -------------------------------------------------------------------
 
 /// Kinds of units with a file each under `config/<kind>/`.
