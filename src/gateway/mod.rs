@@ -6,7 +6,6 @@ mod login;
 mod media;
 mod outbound;
 pub(crate) mod ops;
-mod subagents;
 mod turn;
 mod turns;
 mod waits;
@@ -53,7 +52,6 @@ pub struct Gateway {
     pub db: Arc<Db>,
     ext: Arc<Extensions>,
     /// Numbers sub-agents.
-    subagents: std::sync::atomic::AtomicU64,
     /// The renderer and event stream of each thread's reply in progress, so what else is sent
     /// there lands in order.
     live: StdMutex<HashMap<Thread, (String, tokio::sync::mpsc::UnboundedSender<turn::Live>)>>,
@@ -100,7 +98,6 @@ impl Gateway {
             workspace,
             db,
             ext,
-            subagents: Default::default(),
             live: Default::default(),
             logins: Default::default(),
             next_login: Default::default(),
@@ -206,6 +203,27 @@ impl Gateway {
             return Ok(None);
         }
         Ok(Some(data["text"].as_str().map(String::from).unwrap_or(text)))
+    }
+
+    /// Hands the chat a message from `source` (`user`, or e.g. `ext:goal`) after the
+    /// `message_in` hook. `deliver`: `steer` joins the running turn or starts one, `followUp`
+    /// runs as its own turn after the current one, `nextTurn` waits for the next turn
+    /// without starting one. The model sees who sent it unless it is the user.
+    pub(super) async fn deliver(self: &Arc<Self>, channel: Arc<dyn Messenger>, id: Thread, text: &str, source: &str, deliver: &str) -> Result<()> {
+        let data = serde_json::json!({"id": null, "text": text, "files": [], "source": source});
+        let Some(text) = self.message_in(&channel, &id, data).await? else {
+            return Ok(());
+        };
+        let text = if source == "user" { text } else { format!("[from {source}] {text}") };
+        let state = self.chat(&id).await?;
+        let chat = id.id.clone();
+        match deliver {
+            "nextTurn" => state.inbox.stash(&text),
+            "followUp" => drop(self.turn(channel, id, &chat, &text, Vec::new(), None).await?),
+            _ if state.inbox.offer(&text) => {}
+            _ => drop(self.turn(channel, id, &chat, &text, Vec::new(), None).await?),
+        }
+        Ok(())
     }
 
     async fn handle(self: Arc<Self>, ev: Inbound) -> Result<()> {

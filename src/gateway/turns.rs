@@ -4,8 +4,8 @@
 //! for their outcome, list and cancel them.
 
 use super::Gateway;
-use crate::agent::{TurnMode, TurnTag};
-use crate::extensions::{AgentOpts, Origin};
+use crate::agent::{self, Agent, TurnMode, TurnTag};
+use crate::extensions::Origin;
 use crate::messengers::Thread;
 use crate::tools::ToolCtx;
 use anyhow::{Result, bail};
@@ -253,9 +253,8 @@ impl Gateway {
                 }
             }
             TurnMode::Fresh => {
-                let opts = AgentOpts { system: req.system, tools: req.tools, exclude: req.exclude };
                 let r = tokio::select! {
-                    r = self.subagent(thread.clone(), &req.text, opts, ctx) => Some(r),
+                    r = self.fresh(&thread, &tag, &req, &ctx) => Some(r),
                     _ = cancel.notified() => None,
                 };
                 Outcome::of(r, Vec::new())
@@ -263,6 +262,21 @@ impl Gateway {
             TurnMode::Visible => unreachable!("visible turns run in visible_turn"),
         };
         outcome
+    }
+
+    /// A conversation of its own (a sub-agent) with the thread's hooks; returns the reply.
+    async fn fresh(&self, thread: &Thread, tag: &TurnTag, req: &TurnRequest, ctx: &ToolCtx) -> Result<String> {
+        // A key of its own, so it starts fresh instead of resuming an older one's session.
+        let key = format!("{}#agent-{}", thread.key(), &crate::util::new_uuid()[..8]);
+        let mut tools = self.tools().without(&req.exclude);
+        if let Some(only) = &req.tools {
+            tools = tools.only(only);
+        }
+        let provider = self.provider.read().unwrap().clone();
+        let system = agent::system_prompt(&self.workspace, req.system.as_deref().unwrap_or(""));
+        let mut agent = Agent::new(provider, tools, system, self.db.clone(), &key)?;
+        eprintln!("fresh turn #{} starts: {}", tag.id, req.text.chars().take(80).collect::<String>());
+        agent.run_turn(&req.text, ctx, &mut |_| {}).await
     }
 
     /// Tells extensions (`turn_settled`, once) when nothing runs in `thread` any more and

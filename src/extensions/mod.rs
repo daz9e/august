@@ -51,18 +51,6 @@ pub trait Core: Send + Sync {
     fn changed(&self);
 }
 
-/// Options of `ctx.agent`.
-#[derive(Default, serde::Deserialize)]
-pub struct AgentOpts {
-    /// Instructions added to the base system prompt.
-    pub system: Option<String>,
-    /// Only these tools.
-    pub tools: Option<Vec<String>>,
-    /// Never these tools.
-    #[serde(default)]
-    pub exclude: Vec<String>,
-}
-
 /// Where a hook, tool or command runs: its thread, and the turn when inside one.
 #[derive(Debug, Clone, Default)]
 pub struct Origin {
