@@ -16,6 +16,7 @@ async fn main() {
     let august = August::new();
     august.needs(&["admin"]);
     let dir = PathBuf::from(std::env::var("AUGUST_EXTENSIONS").unwrap_or_default());
+    let home = dir.display().to_string();
     let skills = dir.join(".runtime/skills/writing-extensions");
     let me = august.clone();
     august.register_tool(
@@ -23,7 +24,7 @@ async fn main() {
         "Create or replace an extension: TypeScript that adds tools, slash commands or hooks \
          to August itself. Load the `writing-extensions` skill first for the API. The \
          extension is started right away; the result lists what it registered or the error \
-         to fix.",
+         to fix. It must call `august.describe(summary, details)`.",
         json!({
             "type": "object",
             "properties": {
@@ -44,6 +45,12 @@ async fn main() {
                 let file = folder.join("index.ts");
                 std::fs::write(&file, code)?;
                 let status = august.call("extension_enable", json!({"name": name})).await.map_err(|e| anyhow!("saved, but it failed to start:\n{e:#}"))?;
+                let list = august.call("extensions", json!({})).await?;
+                let undescribed = list.as_array().into_iter().flatten().any(|e| e["name"] == name && e["summary"].as_str().unwrap_or_default().is_empty());
+                if undescribed {
+                    august.call("extension_disable", json!({"name": name})).await?;
+                    bail!("saved, but it doesn't describe itself, so it was turned off: call `august.describe(summary, details)` in setup and save again");
+                }
                 Ok(format!("saved {} and started it.\n{}", file.display(), status.as_str().unwrap_or_default()))
             }
         },
@@ -78,6 +85,47 @@ async fn main() {
             }
         },
     );
+    // The model is told which extensions of the user's are running, each turn, so it
+    // knows its behavior may come from them (and from one it saved a minute ago).
+    let me = august.clone();
+    august.on("before_turn", move |data, _| {
+        let (august, home) = (me.clone(), home.clone());
+        async move {
+            let list = august.call("extensions", json!({})).await?;
+            let lines: Vec<String> = list
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|e| e["state"] == "running" && e["origin"] != "default")
+                .map(|e| {
+                    let name = e["name"].as_str().unwrap_or_default();
+                    if let Some(summary) = e["summary"].as_str().filter(|s| !s.is_empty()) {
+                        return format!("- {name}: {summary}");
+                    }
+                    let parts: Vec<String> = [("tools", ""), ("commands", "/"), ("hooks", "")]
+                        .iter()
+                        .filter_map(|(key, prefix)| {
+                            let names: Vec<String> = e[key].as_array()?.iter().filter_map(|n| Some(format!("{prefix}{}", n.as_str()?))).collect();
+                            (!names.is_empty()).then(|| format!("{key}: {}", names.join(", ")))
+                        })
+                        .collect();
+                    format!("- {name} ({})", parts.join("; "))
+                })
+                .collect();
+            if lines.is_empty() {
+                return Ok(None);
+            }
+            let system = format!(
+                "{}\n\nExtensions the user or you installed are running and change how you and this chat \
+                 behave. When something happens that you didn't do (a message, a new session, a blocked \
+                 tool), check them first (`extensions` lists what each does in detail, their code is in {}), not August's source:\n{}",
+                data["system"].as_str().unwrap_or_default(),
+                home,
+                lines.join("\n")
+            );
+            Ok(Some(json!({"system": system})))
+        }
+    });
     // The guide comes from the core, so it waits for the connection `run` serves.
     let me = august.clone();
     tokio::spawn(async move {

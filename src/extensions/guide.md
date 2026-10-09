@@ -25,6 +25,13 @@ own process. It default-exports a setup function:
 import type { August } from "august";
 
 export default function (august: August) {
+  // What it does: one line, then the details (required).
+  august.describe(
+    "Weather tool and a /standup template",
+    "`weather` fetches the current weather for a city from wttr.in. /standup posts an empty \
+standup template. Blocks `git push --force` in bash.",
+  );
+
   // A tool the model can call.
   august.registerTool({
     name: "weather",
@@ -344,6 +351,10 @@ shows what each one needs. Ask for no more than the extension uses.
 
 ## Rules
 
+- Every extension calls `august.describe(summary, details)`. The summary is one line the
+  model sees each turn; the details say how it works and what it changes on its own
+  (messages it sends, sessions it starts, what it blocks, timers), so whoever meets its
+  effects later can tell where they came from. Keep them true when you change the code.
 - Install or update an extension with `save_extension`; it loads it at once and reports
   errors. Fix and save again until it loads. The user can see all extensions with
   `/extensions`, reload them with `/reload`, and pause one with

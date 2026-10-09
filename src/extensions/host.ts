@@ -45,11 +45,13 @@ const replaces = new Set<string>();
 const takes = new Set<string>();
 const accounts = new Map<string, any>();
 let settingsSchema: unknown = null;
+let about = { summary: "", details: "" };
 let started = false;
 let manifestQueued = false;
 
 function manifest() {
   return {
+    ...about,
     tools: [...tools.values()].map((t) => ({
       name: t.name,
       description: t.description,
@@ -191,6 +193,11 @@ const api = {
     permissions.forEach((p) => needs.add(p));
     // During setup, at once: calls the setup makes next are checked against it.
     if (!started) write({ method: "manifest", params: manifest() });
+    changed();
+  },
+  describe(summary: string, details: string) {
+    if (typeof summary !== "string" || typeof details !== "string") throw new Error("describe(summary, details): both must be strings");
+    about = { summary: summary.trim(), details: details.trim() };
     changed();
   },
   registerPromptSection(name: string, text: string) {

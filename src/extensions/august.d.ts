@@ -118,6 +118,8 @@ declare module "august" {
     error: string | null;
     /** Who installed it: shipped with August, the user, or the agent (`save_extension`). */
     origin: "default" | "user" | "agent";
+    /** Only while running: what it says it does (`describe`). */
+    summary?: string; details?: string;
     /** Only while running: what it registered, and the built-in tools it replaces. */
     tools?: string[]; replaces?: string[]; commands?: string[]; hooks?: string[]; needs?: Permission[]; takes?: string[]; sections?: string[];
     /** Events it emits, as others hook them. */
@@ -375,6 +377,10 @@ declare module "august" {
      *  the guide for each permission). Without it, those calls fail; answering in the thread
      *  of the call in progress, and the store need nothing. Calls made in setup after it work. */
     needs(...permissions: Permission[]): void;
+    /** What this extension does. `summary`: one line, shown to the model every turn.
+     *  `details`: how it works, what it changes and when (timers, messages it sends, what
+     *  it blocks), so the agent can explain or debug it later. Required by `save_extension`. */
+    describe(summary: string, details: string): void;
     /** A section of the system prompt (Markdown, e.g. "## Reminders\n..."): how and when the
      *  model should use what this extension offers. Fixed for each conversation, so a change
      *  shows up from the next one (`/new`). Registering a name again replaces it. */

@@ -362,6 +362,8 @@ struct Inner {
     accounts: RwLock<Vec<Account>>,
     hooks: RwLock<Vec<(String, HookFn)>>,
     sections: RwLock<Vec<(String, String)>>,
+    /// `(summary, details)` from `describe`.
+    about: RwLock<(String, String)>,
     settings: RwLock<Value>,
     needs: RwLock<Vec<String>>,
     timeouts: RwLock<HashMap<String, u64>>,
@@ -405,6 +407,7 @@ impl August {
             messengers: RwLock::default(),
             hooks: RwLock::default(),
             sections: RwLock::default(),
+            about: RwLock::default(),
             settings: RwLock::new(Value::Null),
             needs: RwLock::default(),
             timeouts: RwLock::default(),
@@ -630,6 +633,12 @@ impl August {
         self.changed();
     }
 
+    /// What this extension does: a one-line summary and the details.
+    pub fn describe(&self, summary: &str, details: &str) {
+        *self.0.about.write().unwrap() = (summary.trim().into(), details.trim().into());
+        self.changed();
+    }
+
     /// A section of the system prompt (Markdown): how and when the model should use what
     /// this extension offers. Fixed per conversation, so changes apply from the next one.
     pub fn register_prompt_section(&self, name: &str, text: &str) {
@@ -750,7 +759,10 @@ impl August {
                 events.push(e.clone());
             }
         }
+        let (summary, details) = self.0.about.read().unwrap().clone();
         json!({
+            "summary": summary,
+            "details": details,
             "tools": tools.iter().map(|t| json!({"name": t.name, "description": t.description, "parameters": t.parameters})).collect::<Vec<_>>(),
             "commands": commands.iter().map(|(n, d, _)| json!({"name": n, "description": d})).collect::<Vec<_>>(),
             "accounts": self.0.accounts.read().unwrap().iter().map(Account::manifest).collect::<Vec<_>>(),

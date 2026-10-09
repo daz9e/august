@@ -43,6 +43,9 @@ type Tail = Arc<StdMutex<VecDeque<String>>>;
 /// What an extension has registered (sent once it started, again whenever it changes).
 #[derive(Debug, Default)]
 pub struct Manifest {
+    /// What it does: one line, and as much more as the agent may need (`describe`).
+    pub summary: String,
+    pub details: String,
     pub tools: Vec<ToolSpec>,
     pub commands: Vec<(String, String)>,
     /// Accounts it signs in to (`/login`).
@@ -399,6 +402,8 @@ async fn serve(core: Option<&dyn Core>, name: &str, method: &str, params: &Value
 fn parse_manifest(params: &Value) -> Manifest {
     let list = |k: &str| params[k].as_array().cloned().unwrap_or_default();
     Manifest {
+        summary: params["summary"].as_str().unwrap_or_default().to_string(),
+        details: params["details"].as_str().unwrap_or_default().to_string(),
         tools: list("tools")
             .iter()
             .filter_map(|t| {

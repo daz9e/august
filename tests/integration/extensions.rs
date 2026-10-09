@@ -19,6 +19,7 @@ const DEMO: &str = r#"
 import type { August } from "august";
 
 export default function (august: August) {
+  august.describe("Shouts text and guards bash", "`shout` uppercases text; blocks bash commands with `forbidden`.");
   august.registerTool({
     name: "shout",
     description: "Uppercase some text",
@@ -90,7 +91,11 @@ async fn extensions_add_tools_commands_and_hooks() {
     // The core's own file and command tools are these four; searching is bash's job.
     assert!(["read", "write", "edit", "bash"].iter().all(|t| tools.contains(t)), "{tools:?}");
     assert!(!["grep", "glob", "list_dir", "shell"].iter().any(|t| tools.contains(t)), "{tools:?}");
-    assert!(messages(first)[0]["content"].as_str().unwrap().contains("EXTENSION-CONTEXT"));
+    let system = messages(first)[0]["content"].as_str().unwrap();
+    assert!(system.contains("EXTENSION-CONTEXT"));
+    // The model is told which of the user's extensions run and what they add; not the defaults.
+    assert!(system.contains("- demo: Shouts text and guards bash"), "{system}");
+    assert!(!system.contains("- memory ("), "{system}");
     // message_in rewrote one message and swallowed another before the model saw them.
     assert!(last_user_text(first).contains("hello color"));
     assert!(reqs.iter().all(|r| !last_user_text(r).contains("secret")));
@@ -106,6 +111,7 @@ async fn extensions_add_tools_commands_and_hooks() {
 }
 
 const GREETER: &str = r#"export default function (august) {
+  august.describe("Greets people", "`greet` returns a greeting for a name.");
   august.registerTool({
     name: "greet",
     description: "Greets someone",
@@ -120,7 +126,10 @@ async fn agent_installs_an_extension_with_approval() {
         return;
     }
     let pick: fn(&str) -> Value = |text| {
-        if text.contains("add a greeter") {
+        if text.contains("add a silent greeter") {
+            let code = GREETER.replace("august.describe(", "void (");
+            reply_tool("save_extension", json!({"name": "greeter", "code": code}))
+        } else if text.contains("add a greeter") {
             reply_tool("save_extension", json!({"name": "greeter", "code": GREETER}))
         } else {
             reply_tool("greet", json!({"name": "Bob"}))
@@ -129,6 +138,12 @@ async fn agent_installs_an_extension_with_approval() {
     let fake = Fake::llm(llm(pick)).await;
     let gw = august(&fake, Setup::default()).await;
     let mut chat = gw.chat().await;
+
+    // One that doesn't say what it does is turned off again.
+    chat.say("add a silent greeter").await;
+    chat.press(&chat.question().await.button("Allow")).await;
+    chat.wait_for("doesn't describe itself").await;
+
     chat.say("add a greeter").await;
 
     // The install waits for the owner's approval, which shows the code.

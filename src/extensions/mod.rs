@@ -698,6 +698,8 @@ impl Extensions {
         let mut v = json!({"name": slot.name, "state": state, "error": error, "origin": origin});
         if let State::Running(h) = &slot.state {
             let m = h.manifest();
+            v["summary"] = json!(m.summary);
+            v["details"] = json!(m.details);
             let tools: Vec<&str> = m.tools.iter().map(|t| t.name.as_str()).collect();
             v["tools"] = json!(tools);
             v["replaces"] = json!(tools.iter().filter(|t| builtin.contains(**t)).collect::<Vec<_>>());
