@@ -2,7 +2,7 @@
 //! the user (mode 0600, secrets included):
 //!
 //! ```text
-//! config/august.json               provider, model, effort, fallback, home thread
+//! config/august.json               provider, model, effort, home thread
 //! config/extensions/<name>.json    enabled, origin, settings
 //! secrets/<name>.json              an extension's secrets: API keys of accounts, tokens
 //! ```
@@ -46,9 +46,6 @@ pub struct Config {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
-    /// Backup provider used when the active one keeps failing: `provider:model`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fallback: Option<String>,
     /// The thread extensions reach as `"home"` (`messenger:id`); set with `/home`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
@@ -60,7 +57,6 @@ pub fn app_schema() -> serde_json::Value {
         "provider": {"type": "string", "description": "The active model provider (an account's provider id); chosen with /login"},
         "model": {"type": "string", "description": "The active model of that provider; /models lists them"},
         "effort": {"type": "string", "description": "Reasoning effort for models that have it (low, medium, high)"},
-        "fallback": {"type": "string", "description": "Backup used when the active provider keeps failing: provider:model"},
         "home": {"type": "string", "description": "The thread extensions report to (messenger:id); set with /home"},
         "hooks": {"type": "object", "description": "Hook chains: `order` lists extensions whose handlers run first, in that order (the rest after, by name)"},
     }})
@@ -135,7 +131,7 @@ pub fn save_app(cfg: &Config) -> Result<()> {
     // Fields this version doesn't know stay.
     let mut v = unit("august", "")?;
     let o = v.as_object_mut().context("august.json must be an object")?;
-    for k in ["provider", "model", "effort", "fallback", "home"] {
+    for k in ["provider", "model", "effort", "home"] {
         o.remove(k);
     }
     if let serde_json::Value::Object(known) = serde_json::to_value(cfg)? {

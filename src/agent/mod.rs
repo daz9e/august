@@ -353,7 +353,13 @@ impl Agent {
     ) -> Result<Completion> {
         let mut error: Option<Value> = None;
         for attempt in 1.. {
-            let e = match self.call_model(step, specs, ctx, error.as_ref(), on_event).await {
+            // Whether the failed try already showed part of a reply: another one repeats it.
+            let mut streamed = false;
+            let mut on_try = |e: Event| {
+                streamed |= matches!(e, Event::Text(_));
+                on_event(e)
+            };
+            let e = match self.call_model(step, specs, ctx, error.as_ref(), &mut on_try).await {
                 Ok(c) => return Ok(c),
                 Err(e) => e,
             };
@@ -363,7 +369,7 @@ impl Agent {
             }
             let kind = crate::llm::error::ErrorKind::of(&e).as_str();
             let failed = json!({"kind": kind, "message": format!("{e:#}")});
-            let data = json!({"step": step, "attempt": attempt, "model": self.provider().name(), "error": failed});
+            let data = json!({"step": step, "attempt": attempt, "model": self.provider().name(), "error": failed, "streamed": streamed});
             let data = ext.emit("llm_error", data, &ctx.origin).await;
             if data["retry"] != true {
                 return Err(e);

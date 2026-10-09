@@ -33,7 +33,7 @@ async fn main() {
     august.describe(
         "The `config` tool: list, read and change August's and extensions' settings",
         "Settings are addressed by dotted paths: `august.<key>` for August's own (provider, model, \
-         effort, fallback, home) and `extensions.<name>.settings.<key>` for an extension's. `list` \
+         effort, home) and `extensions.<name>.settings.<key>` for an extension's. `list` \
          shows the known ones under a prefix with descriptions, defaults and current values; `set` \
          with null deletes a value. Secrets are shown masked. Turning extensions on and off is the \
          `extensions` tool's job (the user's call).",
@@ -42,7 +42,7 @@ async fn main() {
     august.register_tool(
         "config",
         "August's settings by dotted path: `august.<key>` (its own: provider, model, effort, \
-         fallback, home) and `extensions.<name>.settings.<key>`. `list` shows what exists under \
+         home) and `extensions.<name>.settings.<key>`. `list` shows what exists under \
          `path` (a prefix; empty: everything) with descriptions, defaults and values; `get` one \
          value; `set` changes it (null deletes).",
         json!({

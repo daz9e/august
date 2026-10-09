@@ -263,8 +263,9 @@ declare module "august" {
       window: number | null;
       error: { kind: LlmErrorKind; message: string } | null;
     };
-    /** A model call failed; `attempt` counts from 1. Return `retry: true` to try again. */
-    llm_error: { step: number; attempt: number; model: string; error: { kind: LlmErrorKind; message: string } };
+    /** A model call failed; `attempt` counts from 1. Return `retry: true` to try again.
+     *  `streamed`: part of the failed reply was already shown; another try repeats it. */
+    llm_error: { step: number; attempt: number; model: string; error: { kind: LlmErrorKind; message: string }; streamed: boolean };
     /** After each model call (observe only; background). */
     llm_result: { step: number; text: string; toolCalls: { name: string; input: any }[]; usage: Usage };
     /** Before a conversation's first turn (`start`: the thread's first; `new`: after /new). */

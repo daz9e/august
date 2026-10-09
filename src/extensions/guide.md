@@ -101,9 +101,10 @@ leave it unchanged.
   extension summarises older messages this way. Keep tool_use/tool_result pairs intact.
   `error` `{ kind, message }`: the previous try of this call failed and an `llm_error`
   handler asked for another.
-- `llm_error` `{ step, attempt, model, error: { kind, message } }`: a model call failed
-  (`kind`: `rate_limit`, `overloaded`, `network`, `auth`, `quota`, `context_too_long`,
-  `refused`, `bad_request`, `other`). Return `{ retry: true }` to try again, with
+- `llm_error` `{ step, attempt, model, error: { kind, message }, streamed }`: a model call
+  failed (`kind`: `rate_limit`, `overloaded`, `network`, `auth`, `quota`, `context_too_long`,
+  `refused`, `bad_request`, `other`; `streamed`: part of its reply was already shown, so
+  another try would show it again). Return `{ retry: true }` to try again, with
   `delayMs` to wait first and `model` to use another one for the rest of the turn; at most
   8 tries.
 - `llm_result` `{ step, text, toolCalls: [{ name, input }], usage }`: after every model call.

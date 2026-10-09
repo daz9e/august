@@ -3,7 +3,6 @@
 
 pub mod providers;
 pub mod remote;
-pub mod resilient;
 
 pub use august_ext::llm::*;
 

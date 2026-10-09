@@ -97,6 +97,10 @@ name = "august-ext-render"
 path = "extensions/render/main.rs"
 
 [[bin]]
+name = "august-ext-retry"
+path = "extensions/retry/main.rs"
+
+[[bin]]
 name = "august-ext-review"
 path = "extensions/review/main.rs"
 

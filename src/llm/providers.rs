@@ -34,15 +34,10 @@ fn remote(sel: &Selection) -> Arc<dyn LlmProvider> {
     Arc::new(llm::remote::Remote::new(&sel.provider, &sel.model, &sel.effort))
 }
 
-/// The selected provider, wrapped with retries and the optional fallback
-/// (`AUGUST_FALLBACK` or `fallback` in `august.json`, as `provider:model`).
+/// The selected provider. Retries and a fallback are `llm_error` handlers (the `retry`
+/// extension).
 pub fn build(sel: Selection) -> Result<Arc<dyn LlmProvider>> {
-    let cfg: Config = config::app()?;
-    let fallback = env("AUGUST_FALLBACK").or(cfg.fallback).map(|spec| {
-        let (provider, model) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
-        remote(&Selection { provider: provider.trim().into(), model: model.trim().into(), effort: sel.effort.clone() })
-    });
-    Ok(Arc::new(llm::resilient::Resilient::new(remote(&sel), fallback)))
+    Ok(remote(&sel))
 }
 
 /// `provider:model` (`provider:` for its default) when `provider` is one the extensions
