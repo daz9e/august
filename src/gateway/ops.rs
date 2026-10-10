@@ -38,6 +38,7 @@ pub const OPS: &[Op] = &[
     op("edit", MESSAGING, "Replace a sent message {thread, id, message}"),
     op("delete", MESSAGING, "Delete a sent message {thread, id}"),
     op("react", MESSAGING, "React to a message {thread, id, emoji}"),
+    op("download", MESSAGING, "Save attachment {file} of a message in {thread} (one of `message_in`'s `files`) to {path} (relative: in the workspace); returns {path, size}"),
     op("inbound", None, "Hand in what came to {thread} of a messenger you offer from {user: {id, name}}: {kind: message|command|press|reaction, ...}"),
     op("listen", MESSAGING, "Listen in {thread} for {buttons, text}; returns a listener id. With {secret} a text taken is deleted from the chat"),
     op("next", MESSAGING, "What {listener} took"),
@@ -73,7 +74,6 @@ pub const OPS: &[Op] = &[
     op("messages", SESSIONS, "The live conversation of {thread} (what the model sees next): {session, messages, tokens, window}"),
     op("messages_set", SESSIONS, "Replace the live conversation of {thread} with {messages} (earlier ones stay searchable)"),
     op("search", SESSIONS, "Full-text search over everything said in any conversation: {query, limit} → [{at, role, text}]"),
-    op("usage", SESSIONS, "Token usage of {thread}'s conversation and of today"),
     op("extensions", Some("admin"), "Every extension with its state and what it registers"),
     op("extension_enable", Some("admin"), "(Re)start {name} and keep it enabled; returns its status line, fails with its error"),
     op("extension_disable", Some("admin"), "Stop {name} and keep it disabled"),
@@ -150,6 +150,17 @@ impl Gateway {
                 json!({"provider": m.0, "model": m.1, "workspace": self.workspace, "busy": busy})
             }
             "messengers" => self.messengers().await,
+            "download" => {
+                let t = thread(p)?;
+                let file: crate::messengers::Attachment = serde_json::from_value(p["file"].clone()).map_err(|e| anyhow!("bad `file`: {e}"))?;
+                let path = self.workspace.join(arg("path")?);
+                let bytes = self.messenger(&t)?.download(&file).await?;
+                if let Some(dir) = path.parent() {
+                    tokio::fs::create_dir_all(dir).await?;
+                }
+                tokio::fs::write(&path, &bytes).await?;
+                json!({"path": path, "size": bytes.len()})
+            }
             "send" | "edit" | "delete" | "react" => {
                 let t = thread(p)?;
                 let m = self.messenger(&t)?;
@@ -187,7 +198,7 @@ impl Gateway {
                 anyhow::ensure!(["steer", "followUp", "nextTurn"].contains(&deliver.as_str()), "`deliver` is steer, followUp or nextTurn");
                 // Not awaited: the caller may be inside a turn of that very thread.
                 tokio::spawn(async move {
-                    if let Err(e) = gw.deliver(m, t, &text, &source, &deliver).await {
+                    if let Err(e) = gw.deliver(m, t, None, text, json!([]), &source, &deliver).await {
                         eprintln!("gateway: {e:#}");
                     }
                 });
@@ -213,7 +224,7 @@ impl Gateway {
                     Some(list) => list.iter().map(Message::from_json).collect::<Option<Vec<_>>>().ok_or_else(|| anyhow!("malformed `messages`"))?,
                     None => vec![Message::user_text(arg("prompt")?)],
                 };
-                // In a thread: its conversation's model, and its usage counts the call.
+                // In a thread: its conversation's model, and `llm_result` counts the call there.
                 let session = match thread(p) {
                     Ok(t) => self.db.current_session(&t.key())?,
                     Err(_) => None,
@@ -227,8 +238,9 @@ impl Gateway {
                     None => self.provider.read().unwrap().clone(),
                 };
                 let c = provider.complete(&crate::util::new_uuid(), system, &messages, &[]).await?;
-                if let Some(s) = &session {
-                    self.db.record_usage(s, &c.usage)?;
+                if self.ext.listens("llm_result") {
+                    let (ext, data, origin) = (self.ext.clone(), crate::agent::llm_result(None, session.as_deref(), &c), self.origin(p).unwrap_or_default());
+                    tokio::spawn(async move { ext.emit("llm_result", data, &origin).await });
                 }
                 json!(c.message.text())
             }
@@ -337,7 +349,6 @@ impl Gateway {
                 self.chat(&thread(p)?).await?.agent.lock().await.set_history(messages)?;
                 Value::Null
             }
-            "usage" => self.db.usage(&thread(p)?.key())?,
             "search" => {
                 let limit = p["limit"].as_u64().unwrap_or(8).clamp(1, 50) as usize;
                 Value::Array(self.db.search(arg("query")?, limit)?.into_iter().map(|h| json!({"at": h.at, "role": h.role, "text": h.text})).collect())
@@ -600,7 +611,7 @@ impl Gateway {
         let (provider_id, model) = (sel.provider.clone(), sel.model.clone());
         let previous = self.model.read().unwrap().1.clone();
         crate::agent::SessionStore::journal(&*self.db, &crate::db::Entry::new("model_change", json!({"model": model, "previous": previous})));
-        *self.provider.write().unwrap() = providers::build(sel)?;
+        *self.provider.write().unwrap() = providers::build(sel);
         *self.model.write().unwrap() = (provider_id.clone(), model.clone());
         let mut cfg = crate::config::app()?;
         cfg.provider = Some(provider_id.clone());

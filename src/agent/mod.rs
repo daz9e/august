@@ -9,7 +9,7 @@ pub use inbox::Inbox;
 pub use store::SessionStore;
 
 use crate::extensions::Origin;
-use crate::llm::{Block, Completion, LlmProvider, Message, Role, StopReason, ToolSpec, Usage};
+use crate::llm::{Block, Completion, LlmProvider, Message, Role, StopReason, ToolSpec};
 use crate::tools::{ToolCtx, ToolRegistry};
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -23,6 +23,21 @@ fn max_steps() -> usize {
 }
 /// Tries of one model call when `llm_error` handlers keep asking for another.
 const MAX_ATTEMPTS: usize = 8;
+
+/// `llm_result`'s data for a completion: `step` of a turn's (or a fork's) loop, `None` for a
+/// single call; `session`: the conversation it is counted in.
+pub fn llm_result(step: Option<usize>, session: Option<&str>, completion: &Completion) -> Value {
+    let u = &completion.usage;
+    let calls: Vec<Value> = completion.message.tool_uses().map(|(_, name, input)| json!({"name": name, "input": input})).collect();
+    json!({
+        "step": step,
+        "session": session,
+        "text": completion.message.text(),
+        "toolCalls": calls,
+        "usage": {"inputTokens": u.input_tokens, "outputTokens": u.output_tokens,
+                  "cacheReadTokens": u.cache_read_tokens, "cacheWriteTokens": u.cache_write_tokens},
+    })
+}
 
 /// How a turn runs. `Visible`: the user's conversation, streamed to the thread. `Quiet`:
 /// in the thread's conversation, nothing shown, the reply returned. `Fork`: on a copy of
@@ -124,13 +139,6 @@ impl Agent {
             turn_provider: None,
             starting: (stored == 0).then_some(("start", None)),
         })
-    }
-
-    /// Stores the tokens of a model call; accounting never fails a turn.
-    fn record_usage(&self, usage: &Usage) {
-        if let Err(e) = self.db.record_usage(&self.session, usage) {
-            eprintln!("memory: could not record token usage: {e:#}");
-        }
     }
 
     /// Tool calls the latest turn made.
@@ -325,17 +333,7 @@ impl Agent {
             provider.complete_stream(&self.session, &system, messages, &specs, &mut on_text).await?
         };
         self.last_input_tokens = completion.usage.context_tokens() as usize;
-        self.record_usage(&completion.usage);
-        let u = &completion.usage;
-        let calls: Vec<Value> =
-            completion.message.tool_uses().map(|(_, name, input)| json!({"name": name, "input": input})).collect();
-        let data = json!({
-            "step": step,
-            "text": completion.message.text(),
-            "toolCalls": calls,
-            "usage": {"inputTokens": u.input_tokens, "outputTokens": u.output_tokens,
-                      "cacheReadTokens": u.cache_read_tokens, "cacheWriteTokens": u.cache_write_tokens},
-        });
+        let data = llm_result(Some(step), Some(&self.session), &completion);
         self.log("assistant", data.clone(), ctx.origin.turn.as_ref());
         self.notify_ext("llm_result", data, ctx.origin.clone());
         Ok(completion)
@@ -555,7 +553,7 @@ mod tests {
             Ok(Completion {
                 message: Message { role: Role::Assistant, content: vec![Block::Text("summary".into())] },
                 stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
+                usage: crate::llm::Usage::default(),
             })
         }
     }

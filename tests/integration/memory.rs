@@ -102,21 +102,3 @@ async fn compaction_refreshes_the_memory_snapshot() {
     let after = fake.llm_requests().into_iter().find(|r| last_user_text(r).contains("after compaction")).unwrap();
     assert!(system(&after).contains("User plays the cello"), "{}", system(&after));
 }
-
-#[tokio::test]
-async fn facts_saved_by_an_older_version_are_kept() {
-    let old = "CREATE TABLE facts (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, created_at INTEGER NOT NULL);
-               INSERT INTO facts VALUES (3, 'User drinks green tea', 0), (7, 'User lives in Berlin', 0);";
-    let llm: Llm = Box::new(|req| {
-        let last = req["messages"].as_array().unwrap().last().unwrap();
-        if last["role"] == "tool" { reply_text("noted") } else { reply_tool("remember", json!({"fact": "User has a cat"})) }
-    });
-    let fake = Fake::llm(llm).await;
-    let gw = august(&fake, Setup { db: old, ..Default::default() }).await;
-    let mut chat = gw.chat().await;
-    chat.ask("/memory", "#7 User lives in Berlin").await;
-    // They reach the prompt, and new facts never reuse their ids.
-    chat.ask("I have a cat", "noted").await;
-    assert!(system(&fake.llm_requests()[0]).contains("#3 User drinks green tea"));
-    chat.ask("/memory", "#8 User has a cat").await;
-}

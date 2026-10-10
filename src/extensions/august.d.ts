@@ -35,12 +35,12 @@ declare module "august" {
   export type Reply = { press: string } | { text: string } | { timeout: true } | { cancelled: "stop" | "new" };
 
   /** A run of the agent. `visible`: the thread's conversation, streamed to the thread as a
-   *  turn of the user's is (the model sees `[from <source>]` before the text); `quiet`:
+   *  turn of the user's is (the default `conversation` extension marks it `[from <source>]`); `quiet`:
    *  in the thread's conversation, nothing shown, the reply returned; `fork`: on a copy of the
    *  conversation (same prompt and tools, so the provider's cache holds), nothing kept;
    *  `fresh`: a new conversation (a sub-agent). */
   /** `source`: who it is from (default `ext:<your name>`; `user` passes it as the user's);
-   *  the model sees `[from <source>]` before it. `deliver`: `steer` (default) joins the
+   *  the default `conversation` extension marks it `[from <source>]`. `deliver`: `steer` (default) joins the
    *  running turn before its next model call or starts one; `followUp` runs as its own turn
    *  after the current one; `nextTurn` waits for the next turn without starting one. */
   export type PromptOpts = { source?: string; deliver?: "steer" | "followUp" | "nextTurn" };
@@ -110,7 +110,6 @@ declare module "august" {
     data: any;
   };
 
-  export type UsageTotal = { calls: number; input: number; output: number; cache_read: number; cache_write: number };
 
   export type ExtensionInfo = {
     name: string;
@@ -170,16 +169,19 @@ declare module "august" {
 
   /** What each event handler receives. */
   export interface Events {
-    /** A user message arrived (before the agent sees it). `files`: its attachments, already
-     *  saved in the workspace (`path` is absolute); `voice` marks a recorded voice note. */
+    /** A message arrived (before the agent sees it). `files`: its attachments as the
+     *  messenger has them, for `august.download`; the default `attachments` extension saves
+     *  them into `workspace/inbox` and leaves `{ path, mime, kind, voice }` for later hooks. */
     message_in: {
       /** The message's id in its messenger (for `react`, `reply_to`); null for a `prompt`. */
       id: string | null;
       text: string;
-      files: { path: string; mime: string; kind: "voice" | "audio" | "image" | "video" | "document"; voice: boolean }[];
+      files: any[];
       /** `user` for what came from a messenger, else the `source` of a `prompt`. */
       source: string;
-      /** It joins the turn running now instead of starting one. */
+      /** How it reaches the agent (see `PromptOpts`). */
+      deliver: "steer" | "followUp" | "nextTurn";
+      /** It would join the turn running now instead of starting one. */
       steer: boolean;
     };
     /** A turn is about to start; `system` is the base system prompt (empty unless a
@@ -269,8 +271,10 @@ declare module "august" {
     /** A model call failed; `attempt` counts from 1. Return `retry: true` to try again.
      *  `streamed`: part of the failed reply was already shown; another try repeats it. */
     llm_error: { step: number; attempt: number; model: string; error: { kind: LlmErrorKind; message: string }; streamed: boolean };
-    /** After each model call (observe only; background). */
-    llm_result: { step: number; text: string; toolCalls: { name: string; input: any }[]; usage: Usage };
+    /** After each model call August makes (observe only; background): a turn's or a fork's
+     *  (`step`), or a single `llm` call (`step` null). `session`: the conversation it counts
+     *  for (null: none). */
+    llm_result: { step: number | null; session: string | null; text: string; toolCalls: { name: string; input: any }[]; usage: Usage };
     /** Before a conversation's first turn (`start`: the thread's first; `new`: after /new). */
     session_start: { session: string; previous: string | null; reason: "start" | "new"; chat: string };
     /** The thread's conversation was replaced (/new, a switch), right away. Observe only. */
@@ -284,7 +288,9 @@ declare module "august" {
   /** What a handler may return; returned fields replace the event's data. */
   export interface Results {
     /** `handled: true` swallows the message (optionally answering with `reply`). */
-    message_in: { text?: string; handled?: boolean; reply?: string };
+    /** `images` are shown to the model (a message with images starts its own turn);
+     *  `deliver` changes how it reaches the agent. */
+    message_in: { text?: string; handled?: boolean; reply?: string; files?: any[]; images?: { path: string; mime: string }[]; deliver?: "steer" | "followUp" | "nextTurn"; steer?: boolean };
     before_turn: { text?: string; system?: string };
     /** Changed fields replace the message's; `block: true` drops it. */
     message_out: { text?: string; buttons?: { id: string; label: string }[][]; files?: string[]; block?: boolean };
@@ -425,6 +431,9 @@ declare module "august" {
     delete(thread: Thread, id: string): Promise<void>;
     /** Sets August's emoji reaction on any message, the user's too (empty removes it). */
     react(thread: Thread, id: string, emoji: string): Promise<void>;
+    /** Saves an attachment of a message in `thread` (one of `message_in`'s `files`) to
+     *  `path` (relative: in the workspace). */
+    download(thread: Thread, file: any, path: string): Promise<{ path: string; size: number }>;
     /** Starts listening in `thread` for a press of one of `buttons` and/or (`text: true`) a text
      *  message; what it takes doesn't reach the agent. Listen before you send the question.
      *  The listener ends after `ttl` ms (default 10 minutes) even if `next` is never called. */
@@ -505,8 +514,6 @@ declare module "august" {
       messages(thread: Thread): Promise<{ session: string; messages: Message[]; tokens: number; window: number | null }>;
       /** Replaces the live conversation of `thread` (earlier messages stay searchable). */
       setMessages(thread: Thread, messages: Message[]): Promise<void>;
-      /** Token usage of its current conversation, and of today across all threads. */
-      usage(thread: Thread): Promise<{ session: UsageTotal; today: UsageTotal }>;
     };
     /** Other extensions. Need `admin`. */
     extensions: {

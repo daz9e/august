@@ -1,6 +1,7 @@
 //! How August talks to the user: who it is and how its replies are shown (the start of the
-//! system prompt), the time on each message, and what happens to a message sent while it
-//! works (acknowledged, marked for the model).
+//! system prompt), the time on each message, who a message is from when not the user
+//! (`[from <source>]`), and what happens to a message sent while it works (acknowledged,
+//! marked for the model).
 
 use august_ext::August;
 use serde_json::{Value, json};
@@ -45,20 +46,28 @@ async fn main() {
             let line = all.as_array().into_iter().flatten().find(|m| m["id"] == messenger.as_str()).map(surface);
             let own = data["system"].as_str().unwrap_or_default().trim();
             let system: Vec<&str> = [intro.as_str(), line.as_deref().unwrap_or(""), own].into_iter().filter(|s| !s.is_empty()).collect();
-            let text = format!("[{}] {}", stamp(), data["text"].as_str().unwrap_or_default());
+            let from = match ctx.turn.as_ref().filter(|t| t.mode == "visible").and_then(|t| t.source.as_deref()) {
+                Some(s) if s != "user" => format!("[from {s}] "),
+                _ => String::new(),
+            };
+            let text = format!("[{}] {from}{}", stamp(), data["text"].as_str().unwrap_or_default());
             Ok(Some(json!({"system": system.join("\n"), "text": text})))
         }
     });
 
     august.on("message_in", move |data, ctx| async move {
+        let text = data["text"].as_str().unwrap_or_default();
+        let from = match data["source"].as_str() {
+            Some(s) if s != "user" => format!("[from {s}] "),
+            _ => String::new(),
+        };
         if data["steer"] != true {
-            return Ok(None);
+            return Ok((!from.is_empty()).then(|| json!({"text": format!("{from}{text}")})));
         }
-        if data["source"] == "user" {
+        if from.is_empty() {
             ctx.send("↪️ Got it, I'll take this into account.").await?;
         }
-        let text = format!("[{}] [Sent while you were working] {}", stamp(), data["text"].as_str().unwrap_or_default());
-        Ok(Some(json!({"text": text})))
+        Ok(Some(json!({"text": format!("[{}] [Sent while you were working] {from}{text}", stamp())})))
     });
     august.run().await;
 }

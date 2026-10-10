@@ -30,14 +30,10 @@ pub fn selection() -> Result<Selection> {
     })
 }
 
-fn remote(sel: &Selection) -> Arc<dyn LlmProvider> {
-    Arc::new(llm::remote::Remote::new(&sel.provider, &sel.model, &sel.effort))
-}
-
 /// The selected provider. Retries and a fallback are `llm_error` handlers (the `retry`
 /// extension).
-pub fn build(sel: Selection) -> Result<Arc<dyn LlmProvider>> {
-    Ok(remote(&sel))
+pub fn build(sel: Selection) -> Arc<dyn LlmProvider> {
+    Arc::new(llm::remote::Remote::new(&sel.provider, &sel.model, &sel.effort))
 }
 
 /// `provider:model` (`provider:` for its default) when `provider` is one the extensions
@@ -56,5 +52,5 @@ pub fn parse_spec(spec: &str, providers: &[String]) -> Result<Selection> {
 
 /// A provider for `spec` (see `parse_spec`).
 pub fn build_spec(spec: &str) -> Result<Arc<dyn LlmProvider>> {
-    build(parse_spec(spec, &llm::remote::provider_ids())?)
+    Ok(build(parse_spec(spec, &llm::remote::provider_ids())?))
 }

@@ -2,7 +2,7 @@
 //! token usage, long-term facts and extensions' key-value storage. Calls are short, so one mutex-guarded
 //! connection is enough.
 
-use crate::llm::{Block, Message, Usage};
+use crate::llm::{Block, Message};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
@@ -72,17 +72,6 @@ CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, id);
 CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(
     text, session_id UNINDEXED, role UNINDEXED, at UNINDEXED
 );
-CREATE TABLE IF NOT EXISTS usage (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL REFERENCES sessions(id),
-    input INTEGER NOT NULL,
-    output INTEGER NOT NULL,
-    cache_read INTEGER NOT NULL,
-    cache_write INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS usage_session ON usage(session_id);
-CREATE INDEX IF NOT EXISTS usage_time ON usage(created_at);
 CREATE TABLE IF NOT EXISTS journal (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts INTEGER NOT NULL,
@@ -129,19 +118,6 @@ impl Db {
             if !has {
                 conn.execute_batch(ddl)?;
             }
-        }
-        // Facts the core kept before memory became the `memory` extension move to its store.
-        let has_facts: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'facts'", [], |r| r.get::<_, i64>(0))? > 0;
-        if has_facts {
-            let facts: Vec<serde_json::Value> = conn
-                .prepare("SELECT id, text FROM facts ORDER BY id")?
-                .query_map([], |r| Ok(serde_json::json!({"id": r.get::<_, i64>(0)?, "text": r.get::<_, String>(1)?})))?
-                .collect::<rusqlite::Result<_>>()?;
-            if !facts.is_empty() {
-                let value = serde_json::Value::Array(facts).to_string();
-                conn.execute("INSERT OR IGNORE INTO kv (scope, key, value) VALUES ('memory', 'facts', ?1)", [value])?;
-            }
-            conn.execute_batch("DROP TABLE facts")?;
         }
         Ok(Arc::new(Self { conn: Mutex::new(conn) }))
     }
@@ -365,61 +341,6 @@ impl Db {
         Ok(hits)
     }
 
-    // ---- token usage ---------------------------------------------------
-
-    pub fn record_usage(&self, session: &str, u: &Usage) -> Result<()> {
-        self.conn().execute(
-            "INSERT INTO usage (session_id, input, output, cache_read, cache_write, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                session,
-                u.input_tokens as i64,
-                u.output_tokens as i64,
-                u.cache_read_tokens as i64,
-                u.cache_write_tokens as i64,
-                now()
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Number of model calls and their summed usage, for one session or (`None`) all
-    /// sessions, since `since` (unix seconds).
-    fn usage_total(&self, session: Option<&str>, since: i64) -> Result<(u64, Usage)> {
-        let row = self.conn().query_row(
-            "SELECT COUNT(*), TOTAL(input), TOTAL(output), TOTAL(cache_read), TOTAL(cache_write) FROM usage
-             WHERE (?1 IS NULL OR session_id = ?1) AND created_at >= ?2",
-            params![session, since],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?, r.get::<_, f64>(3)?, r.get::<_, f64>(4)?)),
-        )?;
-        let usage = Usage {
-            input_tokens: row.1 as u64,
-            output_tokens: row.2 as u64,
-            cache_read_tokens: row.3 as u64,
-            cache_write_tokens: row.4 as u64,
-        };
-        Ok((row.0 as u64, usage))
-    }
-
-    /// Totals of the chat's current session and of today across all chats:
-    /// `{session, today}`, each `{calls, input, output, cache_read, cache_write}`.
-    pub fn usage(&self, chat_key: &str) -> Result<serde_json::Value> {
-        let session = self.latest_session(chat_key)?.unwrap_or_default();
-        let midnight = chrono::Local::now()
-            .date_naive()
-            .and_time(chrono::NaiveTime::MIN)
-            .and_local_timezone(chrono::Local)
-            .earliest()
-            .map_or(0, |t| t.timestamp());
-        let json = |(calls, u): (u64, Usage)| {
-            serde_json::json!({
-                "calls": calls, "input": u.input_tokens, "output": u.output_tokens,
-                "cache_read": u.cache_read_tokens, "cache_write": u.cache_write_tokens,
-            })
-        };
-        Ok(serde_json::json!({"session": json(self.usage_total(Some(&session), 0)?), "today": json(self.usage_total(None, midnight)?)}))
-    }
-
     // ---- key-value storage (extensions keep their state here) -----------
 
     pub fn kv_get(&self, scope: &str, key: &str) -> Result<Option<String>> {
@@ -517,9 +438,6 @@ impl crate::agent::SessionStore for Db {
     }
     fn replace_live(&self, session: &str, msgs: &[Message]) -> Result<()> {
         Db::replace_live(self, session, msgs)
-    }
-    fn record_usage(&self, session: &str, usage: &Usage) -> Result<()> {
-        Db::record_usage(self, session, usage)
     }
 }
 

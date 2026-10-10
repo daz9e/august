@@ -20,28 +20,27 @@ async fn an_endpoint_of_the_openai_extension_answers() {
 }
 
 #[tokio::test]
-async fn anthropic_answers_with_the_key_an_older_home_saved() {
+async fn anthropic_answers_with_its_account_key() {
     let fake = Fake::llm(Box::new(|_| reply_text("hello from claude"))).await;
-    let old = json!({"key": "sk-old", "base_url": format!("{}/v1", fake.url)}).to_string();
+    let settings = json!({"settings": {"base_url": format!("{}/v1", fake.url)}}).to_string();
+    let secrets = json!({"anthropic": "sk-old"}).to_string();
     let env = [("AUGUST_PROVIDER", "anthropic"), ("AUGUST_MODEL", "")];
-    let gw = august(&fake, Setup { home: &[("config/providers/anthropic.json", &old)], env: &env, ..Default::default() }).await;
+    let home = [("config/extensions/anthropic.json", settings.as_str()), ("secrets/anthropic.json", secrets.as_str())];
+    let gw = august(&fake, Setup { home: &home, env: &env, ..Default::default() }).await;
     let mut chat = gw.chat().await;
     chat.ask("hi", "hello from claude").await;
     let call = fake.requests().into_iter().find(|r| r.path == "/v1/messages").unwrap();
     assert_eq!(call.key, "sk-old");
     assert_eq!(call.json()["model"], "claude-opus-5-5");
-    // The key is now the account's secret.
-    let moved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(gw.home.join("secrets/anthropic.json")).unwrap()).unwrap();
-    assert_eq!(moved["anthropic"], "sk-old");
 }
 
 #[tokio::test]
-async fn opencode_go_answers_with_the_key_an_older_home_saved() {
+async fn opencode_go_answers_with_its_account_key() {
     let fake = Fake::llm(Box::new(|_| reply_text("hello from opencode"))).await;
-    let old = json!({"key": "oc-old"}).to_string();
+    let secrets = json!({"opencode": "oc-old"}).to_string();
     let settings = json!({"settings": {"base_url": format!("{}/v1", fake.url), "format": "chat"}}).to_string();
     let env = [("AUGUST_PROVIDER", "opencode-go"), ("AUGUST_MODEL", "kimi-k2")];
-    let home = [("config/providers/opencode-go.json", old.as_str()), ("config/extensions/opencode.json", settings.as_str())];
+    let home = [("secrets/opencode.json", secrets.as_str()), ("config/extensions/opencode.json", settings.as_str())];
     let gw = august(&fake, Setup { home: &home, env: &env, ..Default::default() }).await;
     let mut chat = gw.chat().await;
     chat.ask("hi", "hello from opencode").await;

@@ -6,14 +6,9 @@
 //! config/extensions/<name>.json    enabled, origin, settings
 //! secrets/<name>.json              an extension's secrets: API keys of accounts, tokens
 //! ```
-//!
-//! Older homes (`config.json`, `credentials.json`, `providers.json`, `channels.json`,
-//! `disabled` markers) are moved into this layout on first use; the old files are kept in
-//! `config/.migrated/`.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Folder the agent's tools operate in (`$AUGUST_WORKSPACE`, default `./workspace`).
@@ -72,12 +67,6 @@ const SECRET_FIELDS: [&str; 5] = ["key", "token", "api_key", "password", "secret
 pub const MASK: &str = "••••";
 
 fn config_dir() -> PathBuf {
-    static MIGRATED: std::sync::Once = std::sync::Once::new();
-    MIGRATED.call_once(|| {
-        if let Err(e) = migrate().and_then(|_| migrate_providers()).and_then(|_| migrate_messengers()) {
-            eprintln!("could not move old settings into {}: {e:#}", home().join("config").display());
-        }
-    });
     home().join("config")
 }
 
@@ -230,140 +219,4 @@ pub fn masked(value: &serde_json::Value, extra: &[String]) -> serde_json::Value 
 /// Whether the last segment of `path` names a secret.
 pub fn is_secret_path(path: &str, extra: &[String]) -> bool {
     path.rsplit('.').next().is_some_and(|k| SECRET_FIELDS.contains(&k) || extra.iter().any(|e| e == k))
-}
-
-/// Moves settings of an older home into `config/`: `config.json` → `august.json`,
-/// `credentials.json` and `providers.json` → `providers/`, `channels.json` → `messengers/`,
-/// `disabled` markers → `extensions/<name>.json`. Runs once, when `config/` doesn't exist.
-fn migrate() -> Result<()> {
-    let (home, dir) = (home(), home().join("config"));
-    if dir.exists() {
-        return Ok(());
-    }
-    let old = |name: &str| home.join(name);
-    let found = ["config.json", "credentials.json", "providers.json", "channels.json"].iter().any(|n| old(n).exists());
-    let markers: Vec<(String, PathBuf)> = [home.join("extensions"), home.join("extensions/.runtime/defaults")]
-        .iter()
-        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().filter_map(|e| e.ok()))
-        .map(|e| (e.file_name().to_string_lossy().to_string(), e.path().join("disabled")))
-        .filter(|(_, m)| m.exists())
-        .collect();
-    if !found && markers.is_empty() {
-        return Ok(());
-    }
-    let write = |kind: &str, id: &str, v: serde_json::Value| -> Result<()> {
-        let path = if kind == "august" { dir.join("august.json") } else { dir.join(kind).join(format!("{id}.json")) };
-        let mut merged = read_json(&path)?;
-        for (k, val) in v.as_object().into_iter().flatten() {
-            merged[k] = val.clone();
-        }
-        write_json(&path, &merged)
-    };
-    let objects = |name: &str| -> Result<BTreeMap<String, serde_json::Value>> {
-        match read_json(&old(name))? {
-            serde_json::Value::Object(o) => Ok(o.into_iter().collect()),
-            _ => Ok(BTreeMap::new()),
-        }
-    };
-    if old("config.json").exists() {
-        write("august", "", read_json(&old("config.json"))?)?;
-    }
-    let mut providers = objects("providers.json")?;
-    for (id, v) in objects("credentials.json")? {
-        let entry = providers.entry(id).or_insert_with(|| serde_json::json!({}));
-        for (k, val) in v.as_object().into_iter().flatten() {
-            entry[k] = val.clone();
-        }
-    }
-    // OpenAI-compatible providers are settings of the `openai` extension.
-    let mut openai = serde_json::json!({});
-    for (id, v) in providers {
-        if id == "openai" {
-            openai["key"] = v["key"].clone();
-            openai["base_url"] = v["base_url"].clone();
-        } else if v["format"] == "openai" {
-            openai["endpoints"][&id] = v;
-        } else {
-            write("providers", &id, v)?;
-        }
-    }
-    if openai.as_object().is_some_and(|o| o.values().any(|v| !v.is_null())) {
-        write("extensions", "openai", serde_json::json!({"settings": openai}))?;
-    }
-    for (id, v) in objects("channels.json")? {
-        write("messengers", &id, v)?;
-    }
-    for (name, marker) in &markers {
-        write("extensions", name, serde_json::json!({"enabled": false}))?;
-        std::fs::remove_file(marker).ok();
-    }
-    let keep = dir.join(".migrated");
-    std::fs::create_dir_all(&keep)?;
-    for name in ["config.json", "credentials.json", "providers.json", "channels.json"] {
-        if old(name).exists() {
-            std::fs::rename(old(name), keep.join(name))?;
-        }
-    }
-    Ok(())
-}
-
-/// Moves `config/messengers/telegram.json` into the `telegram` extension: the token becomes
-/// its secret, `allowed` its setting. The old file goes to `config/.migrated/messengers/`.
-fn migrate_messengers() -> Result<()> {
-    let dir = home().join("config");
-    let old = dir.join("messengers/telegram.json");
-    if !old.exists() {
-        return Ok(());
-    }
-    let v = read_json(&old)?;
-    if let Some(token) = v["token"].as_str() {
-        set_secret("telegram", "token", Some(token))?;
-    }
-    let path = dir.join("extensions/telegram.json");
-    let mut unit = read_json(&path)?;
-    if v["allowed"].is_array() {
-        unit["settings"]["allowed"] = v["allowed"].clone();
-    }
-    write_json(&path, &unit)?;
-    let keep = dir.join(".migrated/messengers");
-    std::fs::create_dir_all(&keep)?;
-    std::fs::rename(&old, keep.join("telegram.json"))?;
-    Ok(())
-}
-
-/// Moves `config/providers/<id>.json` of providers that became extensions into those
-/// extensions (`anthropic`, `opencode`, `opencode-go`: the key becomes the account's secret, base_url a setting; a provider of the user's own with a
-/// `format` becomes an endpoint of the extension speaking it). The old file goes to
-/// `config/.migrated/providers/`.
-fn migrate_providers() -> Result<()> {
-    let dir = home().join("config");
-    for e in std::fs::read_dir(dir.join("providers")).into_iter().flatten().filter_map(|e| e.ok()) {
-        let name = e.file_name().to_string_lossy().to_string();
-        let Some(id) = name.strip_suffix(".json") else { continue };
-        let v = read_json(&e.path())?;
-        let (ext, patch) = match (id, v["format"].as_str()) {
-            ("anthropic" | "opencode" | "opencode-go", _) => {
-                let ext = if id == "anthropic" { "anthropic" } else { "opencode" };
-                if let Some(key) = v["key"].as_str() {
-                    set_secret(ext, ext, Some(key))?;
-                }
-                (ext, serde_json::json!({"base_url": v["base_url"]}))
-            }
-            (_, Some(f @ ("openai" | "anthropic"))) => (f, serde_json::json!({"endpoints": {id: v}})),
-            _ => continue,
-        };
-        let path = dir.join("extensions").join(format!("{ext}.json"));
-        let mut unit = read_json(&path)?;
-        for (k, val) in patch.as_object().into_iter().flatten().filter(|(_, v)| !v.is_null()) {
-            match (unit["settings"][k].as_object_mut(), val.as_object()) {
-                (Some(have), Some(more)) => have.extend(more.clone()),
-                _ => unit["settings"][k] = val.clone(),
-            }
-        }
-        write_json(&path, &unit)?;
-        let keep = dir.join(".migrated/providers");
-        std::fs::create_dir_all(&keep)?;
-        std::fs::rename(e.path(), keep.join(&name))?;
-    }
-    Ok(())
 }

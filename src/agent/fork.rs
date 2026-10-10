@@ -43,10 +43,11 @@ impl Fork {
     pub async fn run(mut self, task: &str, allow: Option<&[String]>, ctx: &ToolCtx) -> anyhow::Result<(String, Vec<Value>)> {
         self.history.push(Message::user_text(task));
         let mut calls = Vec::new();
-        for _ in 0..MAX_STEPS {
+        for step in 0..MAX_STEPS {
             let completion = self.provider.complete(&self.session, &self.system, &self.history, &self.specs).await?;
-            if let Err(e) = ctx.db.record_usage(&self.session, &completion.usage) {
-                eprintln!("memory: could not record token usage: {e:#}");
+            if let Some(ext) = self.tools.extensions().filter(|e| e.listens("llm_result")).cloned() {
+                let (data, origin) = (super::llm_result(Some(step), Some(&self.session), &completion), ctx.origin.clone());
+                tokio::spawn(async move { ext.emit("llm_result", data, &origin).await });
             }
             let reply = completion.message;
             self.history.push(reply.clone());

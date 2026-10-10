@@ -250,6 +250,7 @@ const api = {
   edit: (thread: Thread, id: string, message: Message) => call("edit", { thread, id, message }),
   delete: (thread: Thread, id: string) => call("delete", { thread, id }),
   react: (thread: Thread, id: string, emoji: string) => call("react", { thread, id, emoji }),
+  download: (thread: Thread, file: any, path: string) => call("download", { thread, file, path }),
   listen: (thread: Thread, opts: { buttons?: string[]; text?: boolean; ttl?: number } = {}) =>
     call("listen", { thread, buttons: opts.buttons ?? [], text: opts.text ?? false, ttl_ms: opts.ttl ?? 600_000 }),
   next: (listener: number, opts: { timeout?: number } = {}) => call("next", { listener, timeout_ms: opts.timeout ?? 300_000 }),
@@ -296,7 +297,6 @@ const api = {
       call("history", { ...where, ...opts }),
     messages: (thread: Thread) => call("messages", { thread }),
     setMessages: (thread: Thread, messages: object[]) => call("messages_set", { thread, messages }),
-    usage: (thread: Thread) => call("usage", { thread }),
   },
   extensions: {
     list: () => call("extensions", {}),

@@ -109,7 +109,7 @@ async fn stop_tells_extensions_which_turns_it_cancels() {
     chat.say("start a long job").await;
     let runs = chat.wait_for(" runs").await.text;
     let id = runs.trim_start_matches("turn ").trim_end_matches(" runs");
-    chat.ask("/stop", "Stopping").await;
+    chat.ask("/stop", "Stopped.").await;
     chat.wait_for(&format!("stopping turns {id}")).await;
 }
 
@@ -214,6 +214,11 @@ async fn turn_settled_comes_when_nothing_runs_in_the_thread() {
 const SENDER: &str = r#"
 export default function (august) {
   august.on("message_in", async ({ source }, ctx) => { await ctx.send(`message_in from ${source}`); });
+  august.on("message_in", async ({ text }, ctx) => {
+    if (!text.includes("later:")) return;
+    await ctx.send("held for later");
+    return { deliver: "nextTurn" };
+  });
   august.registerCommand("stash", async (_, ctx) => { await ctx.prompt("remember the milk", { deliver: "nextTurn" }); return "stashed"; });
   august.registerCommand("report", async (_, ctx) => { await ctx.prompt("all done", { source: "subagent" }); return "reported"; });
 }
@@ -234,6 +239,11 @@ async fn prompts_carry_their_source_and_delivery() {
     chat.ask("hello", "remember the milk | ").await;
     assert_eq!(fake.llm_requests().len(), 1);
     assert!(chat.texts().iter().any(|t| t.contains("milk") && t.ends_with("hello")), "{:?}", chat.texts());
+
+    // A message_in hook can hold a user's message for the next turn too.
+    chat.ask("later: buy bread", "held for later").await;
+    chat.ask("and now", "buy bread").await;
+    assert_eq!(fake.llm_requests().len(), 2);
 
     // Another source is shown to the model and to message_in.
     chat.ask("/report", "reported").await;

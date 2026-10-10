@@ -603,7 +603,7 @@ async fn extensions_run_quiet_fork_and_fresh_turns() {
 
     // /stop cancels the thread's turns, sub-agents included.
     chat.ask("/spawn", "running: fresh").await;
-    chat.ask("/stop", "Stopping…").await;
+    chat.ask("/stop", "Stopped.").await;
     chat.wait_for("spawned cancelled").await;
 }
 
@@ -748,7 +748,7 @@ async fn extensions_hear_cancels_and_shutdowns_and_set_hook_timeouts() {
     // /stop while the extension's tool runs: the extension is told to stop.
     chat.say("run slow").await;
     chat.wait_for("`slow`").await;
-    chat.ask("/stop", "Stopping…").await;
+    chat.ask("/stop", "Stopped.").await;
     chat.wait_until("the tool aborted", |_| gw.workspace.join("aborted").exists()).await;
 
     // Its own timeout: the hanging hook is skipped, the quick one applies.

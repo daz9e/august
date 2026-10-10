@@ -34,6 +34,10 @@ name = "august-ext-anthropic"
 path = "extensions/anthropic/main.rs"
 
 [[bin]]
+name = "august-ext-attachments"
+path = "extensions/attachments/main.rs"
+
+[[bin]]
 name = "august-ext-config"
 path = "extensions/config/main.rs"
 
@@ -132,6 +136,10 @@ path = "extensions/telegram/main.rs"
 [[bin]]
 name = "august-ext-tools"
 path = "extensions/tools/main.rs"
+
+[[bin]]
+name = "august-ext-usage"
+path = "extensions/usage/main.rs"
 
 [[bin]]
 name = "august-ext-voice"

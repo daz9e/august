@@ -192,12 +192,8 @@ impl Gateway {
     }
 
     /// A visible turn an extension started: like one of the user's, after whatever runs in
-    /// the thread now, streamed there; the model sees who it is from.
+    /// the thread now, streamed there.
     async fn visible_turn(self: &Arc<Self>, thread: Thread, tag: TurnTag, cancel: Arc<Notify>, text: String) -> Outcome {
-        let text = match tag.source.as_deref() {
-            Some(s) if s != "user" => format!("[from {s}] {text}"),
-            _ => text,
-        };
         let id = tag.id;
         let run = async {
             let channel = self.messenger(&thread)?;

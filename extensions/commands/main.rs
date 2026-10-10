@@ -9,7 +9,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("new", "Start a fresh conversation"),
     ("stop", "Cancel the current task"),
     ("queue", "Run a message as its own turn after the current one"),
-    ("usage", "Show token usage of this conversation and today"),
     ("model", "Show or change the model: /model <id> or <provider>:<id>"),
     ("models", "List the models of the current provider: /models [filter]"),
     ("login", "Sign in to an account (a model provider: then use it): /login [account]"),
@@ -42,10 +41,6 @@ async fn command(august: &August, name: &str, args: &str, ctx: &Ctx) -> Result<S
             }
             s
         }
-        "stop" => match ctx.call("stop", mine(json!({}))).await?["cancelled"].as_u64() {
-            Some(0) | None => "Nothing is running.".into(),
-            Some(_) => "Stopping…".into(),
-        },
         "queue" if args.is_empty() => "Usage: /queue <message>".into(),
         "queue" => {
             ctx.prompt_with(args, json!({"source": "user", "deliver": "followUp"})).await?;
@@ -54,16 +49,6 @@ async fn command(august: &August, name: &str, args: &str, ctx: &Ctx) -> Result<S
         "new" => {
             ctx.call("session_new", mine(json!({}))).await?;
             "Started a new conversation.".into()
-        }
-        "usage" => {
-            let u = ctx.call("usage", mine(json!({}))).await?;
-            let line = |u: &Value| {
-                format!(
-                    "{} calls · in {} · cache read {} · cache write {} · out {}",
-                    u["calls"], u["input"], u["cache_read"], u["cache_write"], u["output"]
-                )
-            };
-            format!("This session: {}\nToday, all chats: {}", line(&u["session"]), line(&u["today"]))
         }
         "status" => {
             let s = ctx.call("status", mine(json!({}))).await?;
@@ -148,6 +133,22 @@ async fn command(august: &August, name: &str, args: &str, ctx: &Ctx) -> Result<S
     })
 }
 
+/// `/stop`: "Stopping…", edited to "Stopped." once nothing runs in the thread any more.
+async fn stop(august: &August, ctx: &Ctx) -> Result<Option<String>> {
+    if ctx.call("stop", mine(json!({}))).await?["cancelled"].as_u64().unwrap_or(0) == 0 {
+        return Ok(Some("Nothing is running.".into()));
+    }
+    let id = ctx.send("Stopping…").await?;
+    for _ in 0..300 {
+        if ctx.call("status", mine(json!({}))).await?["busy"] != true {
+            august.edit(ctx.thread.as_ref().unwrap(), &id, "Stopped.").await?;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Ok(None)
+}
+
 /// `/extensions`' text for the `extensions` operation's list.
 fn status(list: &Value) -> String {
     let all = list.as_array().cloned().unwrap_or_default();
@@ -226,7 +227,12 @@ async fn main() {
         let a = august.clone();
         august.register_command(name, description, move |args, ctx| {
             let a = a.clone();
-            async move { command(&a, name, &args, &ctx).await.map(Some) }
+            async move {
+                match *name {
+                    "stop" => stop(&a, &ctx).await,
+                    _ => command(&a, name, &args, &ctx).await.map(Some),
+                }
+            }
         });
     }
     august.run().await;

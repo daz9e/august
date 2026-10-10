@@ -36,7 +36,9 @@ async fn stop_ends_everything_a_command_started() {
     let ask = chat.question().await;
     chat.press(&ask.button("Allow")).await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    chat.ask("/stop", "Stopping").await;
+    // "Stopping…" until the turn has ended, then "Stopped.".
+    chat.ask("/stop", "Stopped.").await;
+    assert!(chat.history().iter().any(|t| t == "Stopping…"), "{:?}", chat.history());
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     assert!(!gw.workspace.join("late.txt").exists(), "a process of the stopped command kept running");
@@ -49,7 +51,6 @@ async fn stop_works_with_the_commands_extension_off() {
     let home = [("config/extensions/commands.json", r#"{"enabled": false}"#)];
     let gw = august(&fake, Setup { home: &home, ..Default::default() }).await;
     let mut chat = gw.chat().await;
-    chat.ask("/help", "/stop — Cancel the current task").await;
     chat.say("start a long job").await;
     let ask = chat.question().await;
     chat.press(&ask.button("Allow")).await;

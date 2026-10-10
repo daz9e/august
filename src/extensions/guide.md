@@ -61,11 +61,15 @@ standup template. Blocks `git push --force` in bash.",
 Handlers get `(data, ctx)`. Returned fields replace the event's data; return nothing to
 leave it unchanged.
 
-- `message_in` `{ id, text, files, source, steer }`: a message for the thread, before the agent
-  sees it; `source` is `user` for what came from a messenger, else a `prompt`'s source. `files` are its
-  attachments, already saved (`{ path, mime, voice }`). `steer`: it joins the turn running now
-  (the default `conversation` extension acknowledges it and marks it for the model). Return `{ text }` to rewrite it, or
-  `{ handled: true, reply? }` to swallow it.
+- `message_in` `{ id, text, files, source, deliver, steer }`: a message for the thread, before
+  the agent sees it; `source` is `user` for what came from a messenger, else a `prompt`'s
+  source (the default `conversation` extension marks it `[from <source>]`). `files` are its
+  attachments as the messenger has them, for `august.download(thread, file, path)`; the
+  default `attachments` extension saves them into `workspace/inbox` and leaves
+  `{ path, mime, kind, voice }` for later hooks. `steer`: it would join the turn running now
+  (`conversation` acknowledges it and marks it for the model). Return `{ text }` to rewrite
+  it, `{ images: [{ path, mime }] }` to show the model images (such a message starts its own
+  turn), `{ deliver }` to change how it arrives, or `{ handled: true, reply? }` to swallow it.
 - `message_out` `{ kind: send|edit, id, text, buttons, files, reply_to }`: before August
   sends or edits any message (replies, command answers, questions, extensions' `send`);
   a streamed reply passes once per edit. Return changed fields, or `{ block: true }` to drop
@@ -109,7 +113,9 @@ leave it unchanged.
   another try would show it again). Return `{ retry: true }` to try again, with
   `delayMs` to wait first and `model` to use another one for the rest of the turn; at most
   8 tries.
-- `llm_result` `{ step, text, toolCalls: [{ name, input }], usage }`: after every model call.
+- `llm_result` `{ step, session, text, toolCalls: [{ name, input }], usage }`: after every
+  model call August makes — a turn's, a fork's, or an `llm` call's (`step` null); the
+  default `usage` extension counts them for `/usage`.
 - `turn_event` `{ kind: text|step|tool|note, text?, tool?, input? }`: what a visible
   turn does, in order, as it happens (reply fragments, a new model call, a tool call, a
   `note` a `context` handler asked to show): the stream a renderer draws from.
@@ -190,8 +196,7 @@ Messengers and messages — August's primitives, usable for any thread:
   does all that: buttons, and the answer as the option pressed, numbered or named, the
   user's own words, or null.
 - `ctx.prompt(text, opts)` / `august.prompt(thread, text, opts)` hand a thread a message.
-  `source` says who it is from (default `ext:<your name>`; the model sees `[from <source>]`,
-  `user` passes it as the user's); `deliver` is `steer` (default: joins the running turn
+  `source` says who it is from (default `ext:<your name>`; `user` passes it as the user's); `deliver` is `steer` (default: joins the running turn
   before its next model call, or starts one), `followUp` (its own turn after the current
   one) or `nextTurn` (waits for the next turn without starting one). It passes `message_in`
   like a user's message, with its `source`.
@@ -201,13 +206,13 @@ Calling into August:
   MCP or another extension's) for that thread, through the `tool_call`/`tool_result` hooks
   returns `{ output, isError }`.
 - `await ctx.llm(prompt, { system })` is one completion without tools on the thread's
-  conversation's model (counted in its usage); `prompt` may be a list of messages as
+  conversation's model (`llm_result` counts it there); `prompt` may be a list of messages as
   `context` has them. Returns the text.
 - `await ctx.agent(task, { system, tools, exclude })` runs a sub-agent with a fresh
   conversation and returns its final reply (`tools` limits it, `exclude` hides some).
 - Turns: `const id = await august.turns.start(thread, { text, mode })` starts a `visible`
   turn (in the thread's conversation, shown there like one of the user's, after whatever runs
-  there now; the model sees `[from <source>]`; unlike `prompt`, it skips `message_in`), a `quiet` one (in the thread's conversation,
+  there now; `conversation` marks it `[from <source>]`; unlike `prompt`, it skips `message_in`), a `quiet` one (in the thread's conversation,
   nothing shown, e.g. a scheduled check), a `fork` (on a copy of the conversation, nothing
   kept; `tools` limits what it may call; good for looking back at a conversation) or a
   `fresh` one (a sub-agent); `await august.turns.wait(id)` gives
@@ -249,7 +254,7 @@ helpers for the common ones:
   `owner` (`august` or the extension).
 - `august.status(thread?)`: `{ provider, model, workspace, busy }`.
 - `august.model.set(id)`: switch the model, like `/model id`.
-- `august.sessions.new(thread, { name, settings })`, `.usage(thread)`: like `/new`, `/usage`.
+- `august.sessions.new(thread, { name, settings })`: like `/new`.
   `.messages(thread)` is the live conversation (what the model sees next, with `tokens` and
   `window`); `.setMessages(thread, messages)` replaces it (outside the thread's running turn;
   inside one, return `history` from `context`).

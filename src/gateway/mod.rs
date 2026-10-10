@@ -3,7 +3,6 @@
 
 mod commands;
 mod login;
-mod media;
 mod outbound;
 pub(crate) mod ops;
 mod turn;
@@ -15,7 +14,7 @@ use crate::messengers::bus::Bus;
 use crate::db::Db;
 use crate::extensions::{self, Extensions};
 use crate::messengers::{Inbound, InboundKind, Messenger, OutMessage, Thread};
-use crate::llm::LlmProvider;
+use crate::llm::{Block, LlmProvider};
 use crate::llm::providers;
 use crate::tools::ToolRegistry;
 use anyhow::Result;
@@ -187,12 +186,11 @@ impl Gateway {
         Ok(chat)
     }
 
-    /// Runs the `message_in` hook on a message for `thread`: its text as the hooks left it, or
+    /// Runs the `message_in` hook on a message for `thread`: its data as the hooks left it, or
     /// `None` when one handled it (its reply, if any, is sent).
-    async fn message_in(&self, channel: &Arc<dyn Messenger>, thread: &Thread, data: Value) -> Result<Option<String>> {
-        let text = data["text"].as_str().unwrap_or_default().to_string();
+    async fn message_in(&self, channel: &Arc<dyn Messenger>, thread: &Thread, data: Value) -> Result<Option<Value>> {
         if !self.ext.listens("message_in") {
-            return Ok(Some(text));
+            return Ok(Some(data));
         }
         let data = self.ext.emit("message_in", data, &extensions::Origin::thread(thread.clone())).await;
         if data["handled"] == true {
@@ -202,28 +200,42 @@ impl Gateway {
             channel.presence(&thread.id, false).await;
             return Ok(None);
         }
-        Ok(Some(data["text"].as_str().map(String::from).unwrap_or(text)))
+        Ok(Some(data))
     }
 
     /// Hands the chat a message from `source` (`user`, or e.g. `ext:goal`) after the
-    /// `message_in` hook. `deliver`: `steer` joins the running turn or starts one, `followUp`
-    /// runs as its own turn after the current one, `nextTurn` waits for the next turn
-    /// without starting one. The model sees who sent it unless it is the user.
-    pub(super) async fn deliver(self: &Arc<Self>, channel: Arc<dyn Messenger>, id: Thread, text: &str, source: &str, deliver: &str) -> Result<()> {
-        let state = self.chat(&id).await?;
+    /// `message_in` hook, which may change its text, add `images` (`[{path, mime}]`) or its
+    /// `deliver`: `steer` joins the running turn or starts one, `followUp` runs as its own
+    /// turn after the current one, `nextTurn` waits for the next turn without starting one.
+    /// `files` are the messenger's attachments, for hooks to `download`.
+    pub(super) async fn deliver(self: &Arc<Self>, channel: Arc<dyn Messenger>, thread: Thread, message: Option<String>, text: String, files: Value, source: &str, deliver: &str) -> Result<()> {
+        let state = self.chat(&thread).await?;
+        let intake = state.intake.lock().await;
+        // ponytail: the turn may end while `message_in` runs; then a message marked as
+        // steering runs as the next turn. Hold the turn's end on intake if that matters.
         let steer = deliver == "steer" && state.inbox.steers();
-        let data = serde_json::json!({"id": null, "text": text, "files": [], "source": source, "steer": steer});
-        let Some(text) = self.message_in(&channel, &id, data).await? else {
+        let data = serde_json::json!({"id": message, "text": text, "files": files, "source": source, "deliver": deliver, "steer": steer});
+        let Some(data) = self.message_in(&channel, &thread, data).await? else {
             return Ok(());
         };
-        let text = if source == "user" { text } else { format!("[from {source}] {text}") };
-        let chat = id.id.clone();
-        match deliver {
-            "nextTurn" => state.inbox.stash(&text),
-            "followUp" => drop(self.turn(channel, id, &chat, &text, Vec::new(), None).await?),
-            _ if state.inbox.offer(&text) => {}
-            _ => drop(self.turn(channel, id, &chat, &text, Vec::new(), None).await?),
+        let text = data["text"].as_str().unwrap_or_default().to_string();
+        let images: Vec<Block> = data["images"].as_array().into_iter().flatten().filter_map(|i| {
+            Some(Block::Image { media_type: i["mime"].as_str()?.into(), path: i["path"].as_str()?.into() })
+        }).collect();
+        if text.is_empty() && images.is_empty() {
+            return Ok(());
         }
+        match data["deliver"].as_str().unwrap_or(deliver) {
+            "nextTurn" => return Ok(state.inbox.stash(&text)),
+            // While a turn runs, plain text goes to it instead of waiting for it to end.
+            "steer" if images.is_empty() && state.inbox.offer(&text) => return Ok(()),
+            _ => {}
+        }
+        // Busy from here, so the next message joins this turn instead of racing it.
+        state.inbox.start();
+        drop(intake);
+        let chat = thread.id.clone();
+        self.turn(channel, thread, &chat, &text, images, None).await?;
         Ok(())
     }
 
@@ -252,26 +264,8 @@ impl Gateway {
             }
             InboundKind::Message { text, files, .. } if text.is_empty() && files.is_empty() => {}
             InboundKind::Message { id: message, text, files } => {
-                let state = self.chat(&ev.thread).await?;
-                let intake = state.intake.lock().await;
-                let (note, images, saved) = self.receive(&*channel, &files).await;
-                let mut text = [text, note].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
-                // ponytail: the turn may end while `message_in` runs; then a message marked as
-                // steering runs as the next turn. Hold the turn's end on intake if that matters.
-                let steer = images.is_empty() && state.inbox.steers();
-                let data = serde_json::json!({"id": message, "text": text, "files": saved, "source": "user", "steer": steer});
-                let Some(t) = self.message_in(&channel, &ev.thread, data).await? else {
-                    return Ok(());
-                };
-                text = t;
-                // While a turn runs, plain text goes to it instead of waiting for it to end.
-                if images.is_empty() && state.inbox.offer(&text) {
-                    return Ok(());
-                }
-                // Busy from here, so the next message joins this turn instead of racing it.
-                state.inbox.start();
-                drop(intake);
-                self.turn(channel, ev.thread, &chat, &text, images, None).await?;
+                let files = serde_json::to_value(files)?;
+                self.deliver(channel, ev.thread, Some(message), text, files, "user", "steer").await?;
             }
         }
         Ok(())
@@ -290,7 +284,7 @@ pub async fn start(chans: Vec<Arc<dyn Messenger>>) -> Result<()> {
     let selection = providers::selection()?;
     let model = (selection.provider.clone(), selection.model.clone());
     let label = if model.0.is_empty() { "no model provider yet (/login)".to_string() } else { format!("{} · {}", model.0, model.1) };
-    let provider = providers::build(selection)?;
+    let provider = providers::build(selection);
     println!(
         "august serving {} (and the extensions' messengers) · {label} · workspace {}",
         chans.iter().map(|c| c.id().to_string()).collect::<Vec<_>>().join(", "),

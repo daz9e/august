@@ -1,6 +1,6 @@
 //! What the agent needs from storage, so it can run against SQLite or a test double.
 
-use crate::llm::{Message, Usage};
+use crate::llm::Message;
 use anyhow::Result;
 
 pub trait SessionStore: Send + Sync {
@@ -18,9 +18,6 @@ pub trait SessionStore: Send + Sync {
     fn append(&self, session: &str, msgs: &[Message], index: bool) -> Result<()>;
     /// Replaces the live messages (after a rollback or compaction); old ones stay searchable.
     fn replace_live(&self, session: &str, msgs: &[Message]) -> Result<()>;
-    /// Long-term facts shown in the system prompt.
     /// Appends to the journal; never fails the caller.
     fn journal(&self, entry: &crate::db::Entry);
-    /// Tokens of one model call made in the session.
-    fn record_usage(&self, session: &str, usage: &Usage) -> Result<()>;
 }
