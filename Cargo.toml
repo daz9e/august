@@ -38,6 +38,10 @@ name = "august-ext-attachments"
 path = "extensions/attachments/main.rs"
 
 [[bin]]
+name = "august-ext-core"
+path = "extensions/core/main.rs"
+
+[[bin]]
 name = "august-ext-config"
 path = "extensions/config/main.rs"
 

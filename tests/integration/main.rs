@@ -28,6 +28,7 @@ mod browser;
 mod web;
 mod clarify;
 mod config;
+mod core;
 mod hooks;
 mod render;
 mod sessions;

@@ -6,7 +6,8 @@
 //!
 //! What it asks about: bash commands (read-only ones from `safe_commands` pass at once, the
 //! rest go to the judge when `judge` is on), saving or editing skills and extensions,
-//! turning extensions on and off, changing settings, scheduled tasks with a script, browser uploads. A turn started with
+//! turning extensions on and off, changing settings, scheduled tasks with a script, browser uploads, core operations (the `august` tool) that
+//! change something. A turn started with
 //! `meta: {approve: "all"}` passes without asking.
 
 use anyhow::Result;
@@ -21,6 +22,13 @@ const SHOWN_CHARS: usize = 3_000;
 const SAFE_COMMANDS: &[&str] = &[
     "ls", "pwd", "cat", "head", "tail", "wc", "echo", "grep", "rg", "date", "whoami", "uname",
     "which", "file", "stat", "du", "df", "tree",
+];
+
+/// Core operations (the `august` tool) that only read; every other one is asked about.
+const READ_OPS: &[&str] = &[
+    "ops", "guide", "tools", "commands", "status", "messengers", "turns", "providers", "models",
+    "accounts", "sessions", "history", "messages", "search", "extensions", "extension_logs",
+    "extension_health", "settings", "config_list", "config_get", "store_get", "store_list",
 ];
 
 const JUDGE: &str = "You check a shell command an AI assistant wants to run on its user's machine. \
@@ -81,6 +89,7 @@ async fn needs_asking(tool: &str, input: &Value, ctx: &Ctx, settings: &Value) ->
         "config" => input["action"] == "set",
         "schedule_task" => input["script"].as_str().is_some_and(|s| !s.trim().is_empty()),
         "browser" => input["args"][0] == "upload",
+        "august" => !READ_OPS.contains(&input["op"].as_str().unwrap_or_default()),
         _ => false,
     }
 }
