@@ -80,7 +80,7 @@ async fn extensions_see_messengers_and_talk_to_any_thread() {
     // /stop in that thread cancels the question, and it says so.
     first.say("/poke 2");
     second.question().await;
-    second.ask("/stop", "Stopped 0 turn(s).").await;
+    assert_eq!(core.call_in(&second.thread, "stop", json!({})).await.unwrap()["cancelled"], 0);
     first.wait_for("poke failed: the user cancelled the question").await;
     second.wait_for("→ ⏹ cancelled").await;
 

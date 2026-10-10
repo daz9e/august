@@ -117,8 +117,7 @@ async fn stop_tells_extensions_which_turns_it_cancels() {
     let runs = chat.wait_for(" runs").await.text;
     let id = runs.trim_start_matches("turn ").trim_end_matches(" runs").to_string();
 
-    // No extension owns /stop here: the core's own brake still works.
-    chat.ask("/stop", "Stopped 1 turn(s).").await;
+    assert_eq!(core.call_in(&chat.thread, "stop", json!({})).await.unwrap()["cancelled"], 1);
     chat.wait_for(&format!("stopping turns {id}")).await;
 }
 

@@ -1,18 +1,16 @@
 //! Messengers. A `Messenger` is a live connection to one messenger (it publishes
-//! `Inbound` events on the bus and can send/edit messages): the terminal is built in, any
-//! other one lives in an extension (`remote.rs`). The message format is the SDK's
+//! `Inbound` events on the bus and can send/edit messages); each lives in an extension
+//! (`remote.rs`), the terminal too. The message format is the SDK's
 //! (`august_ext::messenger`). Message text everywhere is plain Markdown; each messenger
 //! converts it to its own dialect.
 
 pub mod bus;
 pub use august_ext::chunk;
 pub mod remote;
-pub mod terminal;
 
 use bus::Bus;
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
 
 /// A conversation in a messenger: a Telegram chat, a terminal window, ...
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -88,9 +86,4 @@ pub trait Messenger: Send + Sync {
     async fn action(&self, _thread: &str, name: &str, _args: serde_json::Value) -> Result<serde_json::Value> {
         anyhow::bail!("this messenger has no action `{name}`")
     }
-}
-
-/// The messengers built into the core: the terminal. The rest come from extensions.
-pub fn builtin(root: &crate::config::Root) -> Vec<Arc<dyn Messenger>> {
-    vec![Arc::new(terminal::Terminal::new(terminal::socket_in(root.home())))]
 }

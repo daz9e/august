@@ -83,6 +83,16 @@ pub struct Manifest {
     pub takes: Vec<String>,
     /// Messengers it offers.
     pub messengers: Vec<crate::messengers::Description>,
+    /// Commands of the `august` program it offers (`""`: `august` alone).
+    pub cli: Vec<CliCommand>,
+}
+
+/// `august <name> args...`: runs `exec` with the args appended, in the user's terminal.
+#[derive(Debug, Clone)]
+pub struct CliCommand {
+    pub name: String,
+    pub description: String,
+    pub exec: Vec<String>,
 }
 
 /// An account an extension signs in to.
@@ -391,8 +401,13 @@ impl Host {
         Ok(host)
     }
 
+    /// Whether it may call `method` with `params` (see `allowed`).
+    pub fn allows(&self, method: &str, params: &Value) -> anyhow::Result<()> {
+        allowed(&self.manifest, &self.busy, method, params)
+    }
+
     /// Ends it: kills its process group, or closes the link.
-    fn kill(&self) {
+    pub fn kill(&self) {
         if self.pid > 0 {
             // SAFETY: plain syscall; the group is the extension's own (`process_group(0)`).
             unsafe { libc::killpg(self.pid, libc::SIGKILL) };
@@ -590,6 +605,14 @@ fn parse_manifest(params: &Value) -> Manifest {
         replaces: list("replaces").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
         takes: list("takes").iter().filter_map(|e| e.as_str().map(String::from)).collect(),
         messengers: list("messengers").into_iter().filter_map(|m| serde_json::from_value(m).ok()).collect(),
+        cli: list("cli")
+            .iter()
+            .filter_map(|c| {
+                let exec: Vec<String> = c["exec"].as_array()?.iter().filter_map(|a| a.as_str().map(String::from)).collect();
+                Some(CliCommand { name: c["name"].as_str()?.to_string(), description: c["description"].as_str().unwrap_or_default().to_string(), exec })
+            })
+            .filter(|c| !c.exec.is_empty())
+            .collect(),
         providers: list("providers")
             .iter()
             .filter_map(|p| {

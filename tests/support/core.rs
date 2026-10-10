@@ -334,7 +334,6 @@ pub struct Builder {
     home: Vec<(String, String)>,
     seed: Vec<(String, Vec<u8>)>,
     caps: Capabilities,
-    terminal: bool,
     /// Default extensions: `(name, sh script)`.
     defaults: Vec<(String, String)>,
 }
@@ -348,7 +347,6 @@ pub fn core() -> Builder {
         home: Vec::new(),
         seed: Vec::new(),
         caps: FakeMessenger::full(),
-        terminal: false,
         defaults: Vec::new(),
     }
 }
@@ -390,12 +388,6 @@ impl Builder {
         self
     }
 
-    /// Also run the built-in terminal messenger (its socket in the home).
-    pub fn terminal(mut self) -> Self {
-        self.terminal = true;
-        self
-    }
-
     pub async fn start(self) -> Core {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
@@ -431,7 +423,7 @@ impl Builder {
         let probe: Arc<Mutex<Option<August>>> = Arc::default();
         let mut exts = vec![("model".to_string(), model_setup(self.model, requests.clone())), ("probe".to_string(), probe_setup(probe.clone()))];
         exts.extend(self.exts);
-        let parts = Parts { root, exts, caps: self.caps, terminal: self.terminal, defaults };
+        let parts = Parts { root, exts, caps: self.caps, defaults };
         let pumps: Pumps = Arc::default();
         let (gw, messenger, run) = parts.launch(&pumps);
         let core = Core { gw, home, workspace, messenger, requests, probe, pumps, parts, _run: run, _dir: dir };
@@ -445,18 +437,13 @@ struct Parts {
     root: Root,
     exts: Vec<(String, Setup)>,
     caps: Capabilities,
-    terminal: bool,
     defaults: Option<PathBuf>,
 }
 
 impl Parts {
     fn launch(&self, pumps: &Pumps) -> (Arc<Gateway>, Arc<FakeMessenger>, Aborts) {
         let messenger = Arc::new(FakeMessenger::new(self.caps.clone()));
-        let mut messengers: Vec<Arc<dyn Messenger>> = vec![messenger.clone()];
-        if self.terminal {
-            let socket = august::messengers::terminal::socket_in(self.root.home());
-            messengers.push(Arc::new(august::messengers::terminal::Terminal::new(socket)));
-        }
+        let messengers: Vec<Arc<dyn Messenger>> = vec![messenger.clone()];
         let linked = self.exts.iter().map(|(name, setup)| (name.clone(), link(&self.root, name, setup.clone(), pumps.clone()))).collect();
         let gw = gateway::build(Options { root: self.root.clone(), messengers, defaults: self.defaults.clone(), linked }).unwrap();
         let run = tokio::spawn(gw.clone().run());
@@ -553,6 +540,10 @@ impl Core {
     /// Stops the core and builds it again on the same home and workspace (a restart of
     /// August); chats made before it talk to the old one.
     pub async fn restart(&mut self) {
+        // The old one lets go of its control socket first, or the new one won't start.
+        self._run.0.abort();
+        let socket = august::gateway::control::socket_in(&self.home);
+        self.wait_until("the core to stop", |_| std::os::unix::net::UnixStream::connect(&socket).is_err()).await;
         let (gw, messenger, run) = self.parts.launch(&self.pumps);
         (self.gw, self.messenger, self._run) = (gw, messenger, run);
         self.wait_until("the core to start again", |c| c.messenger.bus.lock().unwrap().is_some()).await;

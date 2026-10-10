@@ -349,7 +349,7 @@ async fn extensions_hear_cancels_and_shutdowns_and_set_hook_timeouts() {
     chat.say("run slow");
     core.wait_until("the tool to run", |c| c.requests().len() == 1).await;
     settle(50).await;
-    chat.ask("/stop", "Stopped 1 turn(s).").await;
+    assert_eq!(core.call_in(&chat.thread, "stop", json!({})).await.unwrap()["cancelled"], 1);
     core.wait_until("the tool aborted", |_| aborted.load(Ordering::SeqCst)).await;
 
     // Its own timeout: the hanging hook is skipped, the quick one applies.

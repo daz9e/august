@@ -36,8 +36,6 @@ impl Gateway {
             Some(Ok(Some(reply))) => Some(reply),
             Some(Ok(None)) => None,
             Some(Err(e)) => Some(format!("⚠️ /{name} failed: {e}")),
-            // The emergency brake works even with no extension running to own it.
-            None if name == "stop" => Some(format!("Stopped {} turn(s).", self.stop(id).await)),
             None => Some(format!("Unknown command /{name}.")),
         };
         if let Some(reply) = reply {

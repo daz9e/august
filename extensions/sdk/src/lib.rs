@@ -5,6 +5,7 @@
 //! `ctx.ask`, ...) while others are served. stdout is the protocol; log with `eprintln!`.
 
 pub mod chunk;
+pub mod client;
 pub mod fake;
 pub mod llm;
 pub mod messenger;
@@ -379,6 +380,8 @@ struct Inner {
     takes: RwLock<Vec<String>>,
     providers: RwLock<Vec<Provider>>,
     messengers: RwLock<Vec<(messenger::Description, Arc<dyn messenger::Messenger>)>>,
+    /// Commands of the `august` program: `(name, description, exec)`.
+    cli: RwLock<Vec<(String, String, Vec<String>)>>,
     /// Calls from August still running, by request id, so a cancel can stop them.
     running: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
     /// Set once `ready` was sent; later changes send a new manifest.
@@ -424,6 +427,7 @@ impl August {
             takes: RwLock::default(),
             providers: RwLock::default(),
             messengers: RwLock::default(),
+            cli: RwLock::default(),
             hooks: RwLock::default(),
             health: RwLock::default(),
             sections: RwLock::default(),
@@ -732,6 +736,23 @@ impl August {
         self.changed();
     }
 
+    /// A command of the `august` program: `august <name> args...` runs `exec` with the args
+    /// appended, in the user's terminal, with `AUGUST_SOCKET` and `AUGUST_TOKEN` to call the
+    /// core's operations as this extension (see `Client`). `""` is `august` alone. Of two
+    /// with one name, the user's own extension's wins over a default's.
+    pub fn register_cli(&self, name: &str, description: &str, exec: &[String]) {
+        let mut all = self.0.cli.write().unwrap();
+        all.retain(|(n, ..)| n != name);
+        all.push((name.into(), description.into(), exec.to_vec()));
+        drop(all);
+        self.changed();
+    }
+
+    pub fn unregister_cli(&self, name: &str) {
+        self.0.cli.write().unwrap().retain(|(n, ..)| n != name);
+        self.changed();
+    }
+
     /// Hands August what came in to `thread` (of a messenger this extension registered, at
     /// `place`) from `user`.
     pub async fn inbound(&self, thread: &Thread, place: &messenger::Place, user: &messenger::User, kind: &messenger::InboundKind) -> Result<()> {
@@ -816,6 +837,7 @@ impl August {
             "takes": *self.0.takes.read().unwrap(),
             "providers": self.0.providers.read().unwrap().iter().map(|p| json!({"id": p.id, "label": p.label, "default_model": p.default_model})).collect::<Vec<_>>(),
             "messengers": self.0.messengers.read().unwrap().iter().map(|(d, _)| d).collect::<Vec<_>>(),
+            "cli": self.0.cli.read().unwrap().iter().map(|(n, d, e)| json!({"name": n, "description": d, "exec": e})).collect::<Vec<_>>(),
         })
     }
 

@@ -341,6 +341,7 @@ fn manifest_json(m: &host::Manifest) -> Value {
         "accounts": m.accounts.iter().map(|a| &a.id).collect::<Vec<_>>(),
         "providers": m.providers.iter().map(|p| &p.id).collect::<Vec<_>>(),
         "messengers": m.messengers.iter().map(|d| &d.id).collect::<Vec<_>>(),
+        "cli": m.cli.iter().map(|c| &c.name).collect::<Vec<_>>(),
     })
 }
 
@@ -477,6 +478,7 @@ impl Extensions {
                 let mut env = serde_json::Map::new();
                 env.insert("AUGUST_EXTENSION_DIR".into(), json!(text(dir)));
                 env.insert("AUGUST_EXTENSIONS".into(), json!(text(&self.dir)));
+                env.insert("AUGUST_HOME".into(), json!(text(self.root.home())));
                 Ok(Spec { command: vec![text(exe)], env, dir: dir.clone() })
             }
         }
@@ -784,7 +786,7 @@ impl Extensions {
     /// place before the extensions they watch start.
     async fn restart_all(&self, keep: Option<&str>, reason: &str) -> String {
         let (kept, old): (Vec<_>, Vec<_>) = self.running().into_iter().partition(|(name, _)| Some(name.as_str()) == keep);
-        shut_down(old.into_iter().map(|(_, h)| h).collect()).await;
+        shut_down(old.into_iter().map(|(_, h)| h).collect(), "reload").await;
         if let Err(e) = self.prepare_defaults() {
             eprintln!("could not prepare default extensions: {e}");
         }
@@ -826,7 +828,7 @@ impl Extensions {
     pub async fn load(&self, name: &str) -> Result<String> {
         let launch = self.launch(name)?;
         self.root.set(&format!("extensions.{name}.enabled"), Value::Null)?;
-        shut_down(self.running().into_iter().filter(|(n, _)| n == name).map(|(_, h)| h).collect()).await;
+        shut_down(self.running().into_iter().filter(|(n, _)| n == name).map(|(_, h)| h).collect(), "reload").await;
         {
             let mut slots = self.slots.write().unwrap();
             slots.retain(|s| s.name != name); // the process is killed as it drops
@@ -846,6 +848,17 @@ impl Extensions {
         Ok(line)
     }
 
+    /// Stops every extension for good, after telling them why (`shutdown {reason}`).
+    pub async fn stop_all(&self, reason: &str) {
+        let hosts: Vec<Arc<Host>> = self.running().into_iter().map(|(_, h)| h).collect();
+        shut_down(hosts.clone(), reason).await;
+        // Without their slots, their exits don't look like crashes to restart.
+        self.slots.write().unwrap().clear();
+        for h in hosts {
+            h.kill();
+        }
+    }
+
     fn launch(&self, name: &str) -> Result<Launch> {
         let found = self.discover().into_iter().find(|(n, _)| n == name);
         found.map(|(_, launch)| launch).ok_or_else(|| anyhow::anyhow!("no extension named `{name}`"))
@@ -854,7 +867,7 @@ impl Extensions {
     /// Stops an extension and keeps it from starting until it is enabled or saved again.
     pub async fn disable(&self, name: &str) -> Result<()> {
         let launch = self.launch(name)?;
-        shut_down(self.running().into_iter().filter(|(n, _)| n == name).map(|(_, h)| h).collect()).await;
+        shut_down(self.running().into_iter().filter(|(n, _)| n == name).map(|(_, h)| h).collect(), "disable").await;
         self.root.set(&format!("extensions.{name}.enabled"), json!(false))?;
         {
             let mut slots = self.slots.write().unwrap();
@@ -1143,6 +1156,23 @@ impl Extensions {
             .collect()
     }
 
+    /// Commands of the `august` program: `(extension, command)`; of two with one name, the
+    /// user's own extension's before a default's.
+    pub fn cli(&self) -> Vec<(String, host::CliCommand)> {
+        let mut seen = HashSet::new();
+        self.tool_hosts()
+            .iter()
+            .flat_map(|(owner, h)| h.manifest().cli.iter().map(|c| (owner.clone(), c.clone())).collect::<Vec<_>>())
+            .filter(|(_, c)| seen.insert(c.name.clone()))
+            .collect()
+    }
+
+    /// Whether running extension `ext` may call `method` with `params`.
+    pub fn allows(&self, ext: &str, method: &str, params: &Value) -> Result<()> {
+        let host = self.running().into_iter().find(|(n, _)| n == ext).map(|(_, h)| h);
+        host.ok_or_else(|| anyhow::anyhow!("extension `{ext}` is not running"))?.allows(method, params)
+    }
+
     /// Runs `/name args`; `None` if no extension has the command, else the optional reply.
     pub async fn run_command(&self, name: &str, args: &str, chat: &Origin) -> Option<Result<Option<String>, String>> {
         let host = self.running().into_iter().find(|(_, h)| h.manifest().commands.iter().any(|(n, _)| n == name))?.1;
@@ -1287,9 +1317,10 @@ fn in_user_order(root: &Root, hosts: &mut [(String, Arc<Host>)]) {
 
 /// Tells extensions they are about to stop (the `shutdown` event), so they can clean up;
 /// each gets a couple of seconds.
-async fn shut_down(hosts: Vec<Arc<Host>>) {
+/// `reason`: `reload`, `disable`, `stop` (August stops), `restart` or `signal`.
+async fn shut_down(hosts: Vec<Arc<Host>>, reason: &str) {
     let asked = hosts.iter().filter(|h| h.manifest().events.iter().any(|e| e == "shutdown")).map(|h| {
-        let params = json!({"name": "shutdown", "data": {}, "ctx": ctx_json(&Origin::default())});
+        let params = json!({"name": "shutdown", "data": {"reason": reason}, "ctx": ctx_json(&Origin::default())});
         h.request("event", params, SHUTDOWN_TIMEOUT)
     });
     futures_util::future::join_all(asked).await;

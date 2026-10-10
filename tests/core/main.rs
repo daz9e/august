@@ -4,6 +4,7 @@
 #[path = "../support/core.rs"]
 mod support;
 
+mod control;
 mod extensions;
 mod hooks;
 mod lifecycle;
@@ -11,5 +12,4 @@ mod login;
 mod messaging;
 mod render;
 mod sessions;
-mod terminal;
 mod turns;

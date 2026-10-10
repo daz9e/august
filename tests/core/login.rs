@@ -65,7 +65,7 @@ async fn an_api_key_signs_in_and_stays_out_of_the_chat() {
     assert_eq!(secret(&core, "acme", "acme"), None);
     let attempt = login();
     chat.wait_until("a third question", |c| c.texts().iter().filter(|t| t.starts_with("🔑")).count() == 3).await;
-    chat.say("/stop");
+    core.call_in(&chat.thread, "stop", json!({})).await.unwrap();
     let cancelled = attempt.await.unwrap().unwrap_err().to_string();
     assert!(cancelled.contains("sign-in cancelled"), "{cancelled}");
 }

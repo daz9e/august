@@ -1,9 +1,11 @@
-//! Runs the gateway as a background service that starts at login and is
-//! restarted when it dies: a launchd agent on macOS, a systemd user unit on Linux.
+//! Runs August as a background service that starts at login and is restarted when it
+//! crashes (not when it stops cleanly: `august stop`, `restart`): a launchd agent on macOS,
+//! a systemd user unit on Linux. Or, without the service, on its own in the background.
 
 use crate::config;
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 const LABEL: &str = "dev.august.agent";
@@ -15,8 +17,12 @@ fn label() -> String {
 const UNIT: &str = "august.service";
 
 /// Whether `august serve` installed the background service.
+/// Whether `august serve` installed the background service for this `AUGUST_HOME` (one
+/// installed for another home is not this August's to stop or restart).
 pub fn installed() -> bool {
-    if cfg!(target_os = "macos") { plist_path().exists() } else { unit_path().exists() }
+    let file = if cfg!(target_os = "macos") { plist_path() } else { unit_path() };
+    let home = config::home().display().to_string();
+    std::fs::read_to_string(file).is_ok_and(|f| f.contains(&format!("AUGUST_HOME</key><string>{}<", xml(&home))) || f.contains(&format!("AUGUST_HOME={home}\"")))
 }
 
 pub fn log_path() -> PathBuf {
@@ -69,9 +75,9 @@ pub fn start() -> Result<()> {
   <key>Label</key><string>{label}</string>
   <key>ProgramArguments</key><array><string>{exe}</string><string>gateway</string></array>
   <key>WorkingDirectory</key><string>{dir}</string>
-  <key>EnvironmentVariables</key><dict><key>PATH</key><string>{path}</string></dict>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>{path}</string><key>AUGUST_HOME</key><string>{home}</string></dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ThrottleInterval</key><integer>5</integer>
   <key>StandardOutPath</key><string>{log}</string>
   <key>StandardErrorPath</key><string>{log}</string>
@@ -83,6 +89,7 @@ pub fn start() -> Result<()> {
             dir = xml(&dir.to_string_lossy()),
             path = xml(&path),
             log = xml(&log.to_string_lossy()),
+            home = xml(&config::home().to_string_lossy()),
         );
         let file = plist_path();
         std::fs::create_dir_all(file.parent().unwrap())?;
@@ -104,12 +111,13 @@ pub fn start() -> Result<()> {
     } else {
         let unit = format!(
             "[Unit]\nDescription=August agent\nAfter=network-online.target\nWants=network-online.target\n\n\
-             [Service]\nExecStart=\"{exe}\" gateway\nWorkingDirectory={dir}\nEnvironment=\"PATH={path}\"\n\
-             Restart=always\nRestartSec=5\nStandardOutput=append:{log}\nStandardError=append:{log}\n\n\
+             [Service]\nExecStart=\"{exe}\" gateway\nWorkingDirectory={dir}\nEnvironment=\"PATH={path}\"\nEnvironment=\"AUGUST_HOME={home}\"\n\
+             Restart=on-failure\nRestartSec=5\nStandardOutput=append:{log}\nStandardError=append:{log}\n\n\
              [Install]\nWantedBy=default.target\n",
             exe = exe.display(),
             dir = dir.display(),
             log = log.display(),
+            home = config::home().display(),
         );
         let file = unit_path();
         std::fs::create_dir_all(file.parent().unwrap())?;
@@ -124,14 +132,41 @@ pub fn start() -> Result<()> {
     Ok(())
 }
 
-/// Stops the service and removes it from autostart.
-pub fn stop() -> Result<()> {
+/// Starts the installed service again.
+pub fn kick() -> Result<()> {
+    if cfg!(target_os = "macos") {
+        run(Command::new("launchctl").args(["kickstart", &format!("gui/{}/{}", uid()?, label())]))
+    } else {
+        run(Command::new("systemctl").args(["--user", "restart", UNIT]))
+    }
+}
+
+/// Starts August on its own in the background (`august serve` keeps it running at login).
+pub fn spawn() -> Result<()> {
+    let log = log_path();
+    std::fs::create_dir_all(log.parent().unwrap_or(&log))?;
+    let out = std::fs::OpenOptions::new().create(true).append(true).open(&log)?;
+    Command::new(std::env::current_exe()?)
+        .arg("gateway")
+        .stdin(std::process::Stdio::null())
+        .stdout(out.try_clone()?)
+        .stderr(out)
+        // Its own process group, so closing this terminal doesn't stop it.
+        .process_group(0)
+        .spawn()
+        .context("could not start August")?;
+    Ok(())
+}
+
+/// Stops the service (if still running) and removes it from autostart.
+pub fn uninstall() -> Result<()> {
     if cfg!(target_os = "macos") {
         let file = plist_path();
         if !file.exists() {
             bail!("service is not installed");
         }
-        run(Command::new("launchctl").args(["bootout", &format!("gui/{}/{}", uid()?, label())]))?;
+        // Already stopped (`august stop` shut it down first) is fine.
+        Command::new("launchctl").args(["bootout", &format!("gui/{}/{}", uid()?, label())]).output().ok();
         std::fs::remove_file(file)?;
     } else {
         let file = unit_path();
@@ -142,7 +177,6 @@ pub fn stop() -> Result<()> {
         std::fs::remove_file(file)?;
         run(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
     }
-    println!("august stopped and removed from autostart");
     Ok(())
 }
 

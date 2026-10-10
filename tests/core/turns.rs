@@ -108,9 +108,9 @@ async fn extensions_run_quiet_fork_and_fresh_turns() {
     let last = all_text(core.requests().last().unwrap());
     assert!(!last.contains("look back") && !last.contains("FORK-REPLY"), "the fork was kept");
 
-    // /stop cancels the thread's turns, sub-agents included.
+    // Stopping the thread cancels its turns, sub-agents included.
     chat.ask("/spawn", "running: fresh").await;
-    chat.ask("/stop", "Stopped 1 turn(s).").await;
+    assert_eq!(core.call_in(&chat.thread, "stop", json!({})).await.unwrap()["cancelled"], 1);
     chat.wait_for("spawned cancelled").await;
 }
 

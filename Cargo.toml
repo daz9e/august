@@ -23,6 +23,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11.0"
 tokio = { version = "1", features = ["full"] }
+crossterm = "0.29"
+unicode-width = "0.2.2"
 
 [[bin]]
 name = "august"
@@ -136,6 +138,10 @@ path = "extensions/subagents/main.rs"
 [[bin]]
 name = "august-ext-telegram"
 path = "extensions/telegram/main.rs"
+
+[[bin]]
+name = "august-ext-terminal"
+path = "extensions/terminal/main.rs"
 
 [[bin]]
 name = "august-ext-tools"

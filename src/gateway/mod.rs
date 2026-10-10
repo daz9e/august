@@ -2,6 +2,7 @@
 //! extensions call; drawing replies is an extension's job (`render`).
 
 mod commands;
+pub mod control;
 mod login;
 mod outbound;
 pub(crate) mod ops;
@@ -60,6 +61,10 @@ pub struct Gateway {
     /// Sign-ins in progress, by session id.
     logins: StdMutex<HashMap<u64, login::Session>>,
     next_login: std::sync::atomic::AtomicU64,
+    /// Programs `august` started for extensions (`control.rs`): their tokens' extensions.
+    tokens: StdMutex<HashMap<String, String>>,
+    /// Notified once August is to stop.
+    stopping: tokio::sync::Notify,
 }
 
 /// The core's operations as extensions call them.
@@ -102,29 +107,35 @@ impl Gateway {
             live: Default::default(),
             logins: Default::default(),
             next_login: Default::default(),
+            tokens: Default::default(),
+            stopping: Default::default(),
         });
         gw.ext.set_core(Arc::new(ExtCore(Arc::downgrade(&gw))));
         gw
     }
 
-    /// Runs every channel and dispatches their events until all channels stop.
+    /// Runs the extensions, the messengers and the control socket and dispatches what comes
+    /// in, until `shutdown`.
     pub async fn run(self: Arc<Self>) -> Result<()> {
+        let control = control::bind(self.root().home()).await?;
         let bus: Bus<Inbound> = Bus::new(256);
         let mut events = bus.subscribe();
         let mut tasks = tokio::task::JoinSet::new();
         eprintln!("{}", self.ext.start_all().await);
         self.publish_commands().await;
+        tasks.spawn(self.clone().serve_control(control));
         for ch in self.channels.values() {
             let (ch, bus) = (ch.clone(), bus.clone());
             tasks.spawn(async move {
-                let r = ch.run(bus).await;
-                (ch.id().to_string(), r)
+                match ch.run(bus).await {
+                    Ok(()) => eprintln!("{}: stopped", ch.id()),
+                    Err(e) => eprintln!("{}: stopped: {e:#}", ch.id()),
+                }
             });
         }
         drop(bus);
-
         let me = self.clone();
-        let dispatcher = tokio::spawn(async move {
+        tasks.spawn(async move {
             while let Some(ev) = events.recv().await {
                 let me = me.clone();
                 tokio::spawn(async move {
@@ -134,16 +145,16 @@ impl Gateway {
                 });
             }
         });
-
-        while let Some(done) = tasks.join_next().await {
-            let (id, r) = done?;
-            match r {
-                Ok(()) => eprintln!("{id}: stopped"),
-                Err(e) => eprintln!("{id}: stopped: {e:#}"),
-            }
-        }
-        dispatcher.await.ok();
+        self.stopping.notified().await;
+        std::fs::remove_file(control::socket_in(self.root().home())).ok();
         Ok(())
+    }
+
+    /// Stops every extension, telling them `reason` (`stop`, `restart`, `signal`), and ends `run`.
+    pub async fn shutdown(&self, reason: &str) {
+        eprintln!("august: stopping ({reason})");
+        self.ext.stop_all(reason).await;
+        self.stopping.notify_one();
     }
 
     fn root(&self) -> &Root {
@@ -311,7 +322,7 @@ impl Gateway {
 /// What a core is built from.
 pub struct Options {
     pub root: Root,
-    /// The messengers built in (extensions add theirs).
+    /// Messengers of the embedder's (extensions add theirs).
     pub messengers: Vec<Arc<dyn Messenger>>,
     /// Where the default extensions' binaries are; `None`: no default extensions.
     pub defaults: Option<PathBuf>,
@@ -319,15 +330,22 @@ pub struct Options {
     pub linked: Vec<(String, Link)>,
 }
 
-/// Runs the agent behind the built-in messengers and those of extensions (foreground).
+/// Runs August in the foreground until `august stop` or a signal.
 pub async fn serve() -> Result<()> {
     let root = Root::from_env()?;
-    let messengers = crate::messengers::builtin(&root);
-    let names = messengers.iter().map(|c| c.id().to_string()).collect::<Vec<_>>().join(", ");
-    let gw = build(Options { root: root.clone(), messengers, defaults: Some(extensions::bin_dir()), linked: Vec::new() })?;
+    let gw = build(Options { root: root.clone(), messengers: Vec::new(), defaults: Some(extensions::bin_dir()), linked: Vec::new() })?;
     let model = gw.model.read().unwrap().clone();
     let label = if model.0.is_empty() { "no model provider yet (/login)".to_string() } else { format!("{} · {}", model.0, model.1) };
-    println!("august serving {names} (and the extensions' messengers) · {label} · workspace {}", root.workspace().display());
+    println!("august · {label} · workspace {}", root.workspace().display());
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let signals = gw.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+        signals.shutdown("signal").await;
+    });
     gw.run().await
 }
 
