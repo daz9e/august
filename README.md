@@ -32,64 +32,39 @@ Your agent runs on a server, and you want to OK every shell command it runs, fro
 phone, with a button. In August that's one extension.
 **The core has no idea what an "approval" is: the extension hooks the tool call, sends you a question in Telegram (or any messenger), waits for your press, and lets the command through or blocks it.**
 
+With the TypeScript SDK from august-agent, it's a dozen lines.
+`~/.august/extensions/ask-me/index.ts`:
+
+```ts
+import type { August } from "august";
+
+export default function (august: August) {
+  august.describe("Asks before shell commands", "Every bash call waits for Run or Block in the home chat.");
+  august.needs("messaging");
+  august.on("tool_call", async ({ tool, input }) => {
+    if (tool !== "bash") return;
+    const answer = await august.ask("home", `Run \`${input.command}\`?`, ["Run", "Block"]);
+    if (answer !== "Run") return { block: "the user said no" };
+  }, { timeout: 310_000 });
+}
+```
+
 `~/.august/extensions/ask-me/extension.json`:
 
 ```json
-{"command": ["python3", "main.py"]}
+{"command": ["bun", "run", "../.runtime/ts/host.ts", "index.ts", "ask-me"]}
 ```
 
-`main.py`:
-
-```python
-import json, sys, threading, itertools, queue
-
-lock, ids, waiting = threading.Lock(), itertools.count(), {}
-
-def send(msg):
-    with lock:
-        print(json.dumps(msg), flush=True)
-
-def call(method, **params):  # call August and wait for the reply
-    id, reply = f"q{next(ids)}", queue.Queue()
-    waiting[id] = reply
-    send({"id": id, "method": method, "params": params})
-    return reply.get().get("result")
-
-def tool_call(id, data):
-    verdict = None
-    if data["tool"] == "bash":
-        listener = call("listen", thread="home", buttons=["run", "block"])
-        call("send", thread="home", message={
-            "text": f"Run `{data['input'].get('command')}`?",
-            "buttons": [{"id": "run", "label": "Run"}, {"id": "block", "label": "Block"}]})
-        if (call("next", listener=listener) or {}).get("press") != "run":
-            verdict = {"block": "the user said no"}
-    send({"id": id, "result": verdict})
-
-send({"method": "ready", "params": {
-    "protocol": 2, "summary": "Asks the user before every shell command",
-    "events": ["tool_call"], "needs": ["messaging"], "timeouts": {"tool_call": 300000}}})
-
-for line in sys.stdin:
-    msg = json.loads(line)
-    if "method" not in msg:
-        waiting.pop(msg["id"]).put(msg)  # August's reply to one of our calls
-    elif msg["method"] == "event":
-        threading.Thread(target=tool_call, args=(msg["id"], msg["params"]["data"])).start()
-    elif "id" in msg:
-        send({"id": msg["id"], "error": {"message": f"unknown method {msg['method']}"}})
-```
+No SDK for your language? It's plain JSON lines over stdin/stdout; see the
+[complete extension in Python](PROTOCOL.md#14-a-complete-extension).
 
 Run `/reload`, and the next `rm -rf` waits for you on your phone.
 
-**Would you rather have new extensions picked up on their own? Write an extension for that!**
+> **Would you rather have new extensions picked up on their own? Write an extension for that!**
 
 The same protocol covers the rest: tools, slash commands, hooks on every step of a turn
 (rewrite the prompt, swap the model, trim the context), sub-agents, and whole new
 messengers and model providers. See [PROTOCOL.md](PROTOCOL.md).
-
-Real extensions use an SDK: `august-ext` for Rust (in `sdk/`) or the TypeScript SDK in
-august-agent. Or skip writing it yourself and ask the agent to write the extension.
 
 ## Repository
 
