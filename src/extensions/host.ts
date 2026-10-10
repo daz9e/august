@@ -45,6 +45,7 @@ const replaces = new Set<string>();
 const takes = new Set<string>();
 const accounts = new Map<string, any>();
 let settingsSchema: unknown = null;
+let healthCheck: (() => unknown) | null = null;
 let about = { summary: "", details: "" };
 let started = false;
 let manifestQueued = false;
@@ -195,6 +196,13 @@ const api = {
     if (!started) write({ method: "manifest", params: manifest() });
     changed();
   },
+  /** How it is doing, asked every so often: `{status: "ok" | "degraded" | "failed", detail}`.
+   * `degraded`: something outside is wrong (restarting won't help); `failed`: broken inside,
+   * August restarts it. */
+  health(check: () => unknown) {
+    if (typeof check !== "function") throw new Error("health(check): check must be a function");
+    healthCheck = check;
+  },
   describe(summary: string, details: string) {
     if (typeof summary !== "string" || typeof details !== "string") throw new Error("describe(summary, details): both must be strings");
     about = { summary: summary.trim(), details: details.trim() };
@@ -317,6 +325,8 @@ async function handle(method: string, params: any, signal: AbortSignal): Promise
       const out = await tool.execute(params.input ?? {}, ctx);
       return typeof out === "string" ? out : JSON.stringify(out ?? null);
     }
+    case "health":
+      return healthCheck ? await healthCheck() : { status: "ok" };
     case "account_check":
     case "login":
     case "logout": {

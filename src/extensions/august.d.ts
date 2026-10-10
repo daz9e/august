@@ -378,6 +378,9 @@ declare module "august" {
      *  the guide for each permission). Without it, those calls fail; answering in the thread
      *  of the call in progress, and the store need nothing. Calls made in setup after it work. */
     needs(...permissions: Permission[]): void;
+    /** How this extension is doing, asked every so often (`degraded`: something outside is
+     * wrong, restarting won't help; `failed`: broken inside, August restarts it). */
+    health(check: () => Health | Promise<Health>): void;
     /** What this extension does. `summary`: one line, shown to the model every turn.
      *  `details`: how it works, what it changes and when (timers, messages it sends, what
      *  it blocks), so the agent can explain or debug it later. Required by `save_extension`. */
@@ -550,3 +553,5 @@ declare module "august" {
     waitCallback(opts?: { timeout?: number }): Promise<Record<string, string>>;
   }
 }
+
+export type Health = { status: "ok" | "degraded" | "failed"; detail?: string };

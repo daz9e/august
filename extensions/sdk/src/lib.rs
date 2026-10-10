@@ -33,6 +33,7 @@ type LoginFn = Arc<dyn Fn(String, Login) -> Fut<Signed> + Send + Sync>;
 type LogoutFn = Arc<dyn Fn(String) -> Fut<()> + Send + Sync>;
 /// Returns fields that replace the event's data (`None` leaves it as is).
 type HookFn = Arc<dyn Fn(Value, Ctx) -> Fut<Option<Value>> + Send + Sync>;
+type HealthFn = Arc<dyn Fn() -> Fut<Value> + Send + Sync>;
 
 struct Link {
     out: Mutex<std::io::Stdout>,
@@ -361,6 +362,8 @@ struct Inner {
     commands: RwLock<Vec<(String, String, CommandFn)>>,
     accounts: RwLock<Vec<Account>>,
     hooks: RwLock<Vec<(String, HookFn)>>,
+    /// How it says it is doing (`health`); without one, `ok` whenever it answers.
+    health: RwLock<Option<HealthFn>>,
     sections: RwLock<Vec<(String, String)>>,
     /// `(summary, details)` from `describe`.
     about: RwLock<(String, String)>,
@@ -406,6 +409,7 @@ impl August {
             providers: RwLock::default(),
             messengers: RwLock::default(),
             hooks: RwLock::default(),
+            health: RwLock::default(),
             sections: RwLock::default(),
             about: RwLock::default(),
             settings: RwLock::new(Value::Null),
@@ -750,6 +754,17 @@ impl August {
         self.changed();
     }
 
+    /// Its health check, which August runs every so often: `{status: ok|degraded|failed,
+    /// detail}`. `degraded`: something outside is wrong (restarting won't help); `failed`:
+    /// broken inside, August restarts it.
+    pub fn health<F, R>(&self, run: F)
+    where
+        F: Fn() -> R + Send + Sync + 'static,
+        R: Future<Output = Result<Value>> + Send + 'static,
+    {
+        *self.0.health.write().unwrap() = Some(Arc::new(move || Box::pin(run())));
+    }
+
     fn manifest(&self) -> Value {
         let tools = self.0.tools.read().unwrap();
         let commands = self.0.commands.read().unwrap();
@@ -842,6 +857,13 @@ impl August {
                 let run = run.ok_or_else(|| anyhow!("no provider named {id}"))?;
                 let models = run(id.to_string()).await?;
                 Ok(Value::Array(models.iter().map(llm::ModelInfo::to_json).collect()))
+            }
+            "health" => {
+                let check = self.0.health.read().unwrap().clone();
+                match check {
+                    Some(check) => check().await,
+                    None => Ok(json!({"status": "ok"})),
+                }
             }
             m if m.starts_with("messenger_") => self.serve_messenger(m, params).await,
             other => Err(anyhow!("unknown method {other}")),
