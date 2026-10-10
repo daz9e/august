@@ -84,6 +84,11 @@ impl Turns {
         self.running.lock().unwrap().get(&id).map(|r| r.tag.clone())
     }
 
+    /// Whether `id` is the visible turn running in `thread` (the one holding its conversation).
+    pub fn is_reply_of(&self, id: u64, thread: &Thread) -> bool {
+        self.running.lock().unwrap().get(&id).is_some_and(|r| &r.thread == thread && r.tag.mode == TurnMode::Visible)
+    }
+
     /// Cancels every running turn of `thread`; returns how many there were.
     pub fn cancel_thread(&self, thread: &Thread) -> usize {
         let running = self.running.lock().unwrap();

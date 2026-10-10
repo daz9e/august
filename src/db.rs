@@ -413,9 +413,6 @@ impl crate::agent::SessionStore for Db {
     fn resume_session(&self, chat_key: &str) -> Result<(String, Vec<Message>)> {
         Db::resume_session(self, chat_key)
     }
-    fn new_session(&self, chat_key: &str) -> Result<String> {
-        Db::new_session(self, chat_key)
-    }
     fn live(&self, session: &str) -> Result<Vec<Message>> {
         Db::live(self, session)
     }

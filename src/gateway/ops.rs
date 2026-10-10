@@ -322,19 +322,38 @@ impl Gateway {
                         _ => {}
                     }
                 }
-                self.waits.cancel(&t, "new");
-                self.turns.cancel_thread(&t);
-                let chat = self.chat(&t).await?;
-                let mut agent = chat.agent.lock().await;
-                if name == "session_switch" {
+                let switch = name == "session_switch";
+                let id = if switch {
                     let id = arg("session")?;
                     anyhow::ensure!(self.db.session(id)?.is_some(), "no session `{id}`");
-                    agent.switch(id)?;
+                    id.to_string()
                 } else {
-                    agent.reset()?;
-                    self.db.update_session(agent.session(), p["name"].as_str(), &p["settings"])?;
+                    let id = self.db.new_session(&t.key())?;
+                    self.db.update_session(&id, p["name"].as_str(), &p["settings"])?;
+                    id
+                };
+                let chat = self.chat(&t).await?;
+                let apply = {
+                    let (gw, t, id) = (self.clone(), t.clone(), id.clone());
+                    async move {
+                        let mut agent = chat.agent.lock().await;
+                        gw.waits.cancel(&t, "new");
+                        if switch { agent.switch(&id) } else { Ok(agent.begin(id)) }
+                    }
+                };
+                // Asked from the thread's own reply, which holds the conversation: the change
+                // waits for that turn to end instead of cancelling it.
+                if p["from_turn"].as_u64().is_some_and(|turn| self.turns.is_reply_of(turn, &t)) {
+                    tokio::spawn(async move {
+                        if let Err(e) = apply.await {
+                            eprintln!("session change: {e:#}");
+                        }
+                    });
+                } else {
+                    self.turns.cancel_thread(&t);
+                    apply.await?;
                 }
-                json!(agent.session())
+                json!(id)
             }
             "history" => {
                 let session = match (p["session"].as_str(), thread(p)) {

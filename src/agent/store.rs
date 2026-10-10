@@ -6,7 +6,6 @@ use anyhow::Result;
 pub trait SessionStore: Send + Sync {
     /// Latest session of a chat with its live messages, or a fresh session.
     fn resume_session(&self, chat_key: &str) -> Result<(String, Vec<Message>)>;
-    fn new_session(&self, chat_key: &str) -> Result<String>;
     /// A session's live messages.
     fn live(&self, session: &str) -> Result<Vec<Message>>;
     /// Makes `session` the conversation of `chat_key`.

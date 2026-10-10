@@ -151,8 +151,9 @@ impl Agent {
     }
 
     /// Starts a new conversation; the old one stays searchable.
-    pub fn reset(&mut self) -> Result<()> {
-        let previous = std::mem::replace(&mut self.session, self.db.new_session(&self.chat_key)?);
+    /// Starts `session`, created for this chat and still empty, as its conversation.
+    pub fn begin(&mut self, session: String) {
+        let previous = std::mem::replace(&mut self.session, session);
         self.log("session", json!({"reason": "new", "previous": previous}), None);
         self.notify_ext("session_changed", json!({"reason": "new", "previous": previous, "session": self.session}), self.chat_ref());
         self.starting = Some(("new", Some(previous)));
@@ -161,7 +162,6 @@ impl Agent {
         self.stored = 0;
         self.turn_start = 0;
         self.last_input_tokens = 0;
-        Ok(())
     }
 
     /// Records `kind` in this session's journal, for turn `turn` if inside one.
@@ -579,15 +579,5 @@ mod tests {
         });
         a.rollback_turn();
         assert_eq!(a.history.len(), 2);
-    }
-
-    #[test]
-    fn reset_starts_a_fresh_session() {
-        let db = Db::in_memory();
-        let mut a = agent(db.clone());
-        a.history.push(Message::user_text("hi"));
-        a.persist();
-        a.reset().unwrap();
-        assert_eq!(agent(db).history.len(), 0);
     }
 }
