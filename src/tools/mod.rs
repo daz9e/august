@@ -1,22 +1,15 @@
-//! Tools the agent can call, run through the `tool_call` / `tool_result` hooks.
-
-mod bash;
-mod fs;
-
+//! Tools the agent can call: all of them come from extensions (the default `tools` one has
+//! `bash`, `read`, `write`, `edit`) and run through the `tool_call` / `tool_result` hooks.
 
 use crate::db::Db;
 use crate::extensions::Extensions;
 use crate::llm::ToolSpec;
-use anyhow::Result;
-use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ToolCtx {
-    pub workspace: PathBuf,
     pub db: Arc<Db>,
     /// The thread and turn this runs for.
     pub origin: crate::extensions::Origin,
@@ -26,41 +19,18 @@ pub struct ToolCtx {
     pub caller: String,
 }
 
-#[async_trait]
-pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
-    fn input_schema(&self) -> Value;
-    async fn call(&self, input: &Value, ctx: &ToolCtx) -> Result<String>;
-}
-
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ToolRegistry {
-    tools: Vec<Arc<dyn Tool>>,
     /// Extension tools and the `tool_call` / `tool_result` hooks.
     ext: Option<Arc<Extensions>>,
-    /// Tools (of any kind) the model is not offered and may not call.
+    /// Tools the model is not offered and may not call.
     hidden: HashSet<String>,
     /// When set, only these tools are offered.
     only: Option<HashSet<String>>,
 }
 
 impl ToolRegistry {
-    pub fn with_defaults() -> Self {
-        Self {
-            tools: vec![
-                Arc::new(bash::Bash),
-                Arc::new(fs::ReadFile),
-                Arc::new(fs::WriteFile),
-                Arc::new(fs::EditFile),
-            ],
-            ext: None,
-            hidden: HashSet::new(),
-            only: None,
-        }
-    }
-
-    /// Hides tools by name, built-in or not (e.g. what a sub-agent may not use).
+    /// Hides tools by name (e.g. what a sub-agent may not use).
     pub fn without<S: AsRef<str>>(mut self, names: &[S]) -> Self {
         self.hidden.extend(names.iter().map(|n| n.as_ref().to_string()));
         self
@@ -85,23 +55,8 @@ impl ToolRegistry {
         self.ext.as_ref()
     }
 
-    pub fn builtin_names() -> Vec<&'static str> {
-        Self::with_defaults().tools.iter().map(|t| t.name()).collect()
-    }
-
     pub fn specs(&self) -> Vec<ToolSpec> {
-        let ext = self.ext.as_ref().map(|e| e.tool_specs()).unwrap_or_default();
-        let mut specs: Vec<ToolSpec> = self
-            .tools
-            .iter()
-            .filter(|t| !ext.iter().any(|e| e.name == t.name())) // replaced by an extension
-            .map(|t| ToolSpec {
-                name: t.name().to_string(),
-                description: t.description().to_string(),
-                input_schema: t.input_schema(),
-            })
-            .collect();
-        specs.extend(ext);
+        let mut specs = self.ext.as_ref().map(|e| e.tool_specs()).unwrap_or_default();
         let mut seen = HashSet::new();
         specs.retain(|s| self.offered(&s.name) && seen.insert(s.name.clone()));
         specs
@@ -121,11 +76,8 @@ impl ToolRegistry {
     }
 
     async fn call_hooked(&self, id: Option<&str>, name: &str, input: &Value, ctx: &ToolCtx) -> (String, bool) {
-        if !self.offered(name) {
+        let Some(ext) = self.ext.as_ref().filter(|_| self.offered(name)) else {
             return (format!("unknown tool: {name}"), true);
-        }
-        let Some(ext) = &self.ext else {
-            return self.run(name, input, ctx).await;
         };
         let mut input = input.clone();
         if ext.listens("tool_call") {
@@ -139,7 +91,14 @@ impl ToolRegistry {
             }
             input = data["input"].clone();
         }
-        let (mut output, mut is_error) = self.run(name, &input, ctx).await;
+        let (mut output, mut is_error) = match ext.has_tool(name).then(|| ext.call_tool(name, &input, &ctx.origin)) {
+            Some(call) => match call.await {
+                Some(Ok(out)) => (out, false),
+                Some(Err(e)) => (format!("error: {e}"), true),
+                None => (format!("unknown tool: {name}"), true),
+            },
+            None => (format!("unknown tool: {name}"), true),
+        };
         if ext.listens("tool_result") {
             let data = json!({"tool": name, "input": input, "id": id, "caller": ctx.caller, "output": output, "isError": is_error});
             let data = ext.emit("tool_result", data, &ctx.origin).await;
@@ -152,42 +111,4 @@ impl ToolRegistry {
         }
         (output, is_error)
     }
-
-    async fn run(&self, name: &str, input: &Value, ctx: &ToolCtx) -> (String, bool) {
-        if let Some(ext) = &self.ext
-            && ext.has_tool(name)
-            && let Some(r) = ext.call_tool(name, input, &ctx.origin).await
-        {
-            return match r {
-                Ok(out) => (out, false),
-                Err(e) => (format!("error: {e}"), true),
-            };
-        }
-        match self.tools.iter().find(|t| t.name() == name) {
-            Some(tool) => match tool.call(input, ctx).await {
-                Ok(out) => (out, false),
-                Err(e) => (format!("error: {e:#}"), true),
-            },
-            None => (format!("unknown tool: {name}"), true),
-        }
-    }
-}
-
-pub(crate) fn str_arg<'a>(input: &'a Value, key: &str) -> Result<&'a str> {
-    input[key]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("missing string argument `{key}`"))
-}
-
-pub(crate) fn truncate(mut s: String, max: usize) -> String {
-    if s.len() > max {
-        let mut cut = max;
-        while !s.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        let dropped = s.len() - cut;
-        s.truncate(cut);
-        s.push_str(&format!("\n... [truncated {dropped} bytes]"));
-    }
-    s
 }

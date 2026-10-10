@@ -568,7 +568,6 @@ impl Gateway {
         let thread = origin.thread.clone().expect("a call's origin has its thread");
         self.messenger(&thread)?;
         let ctx = ToolCtx {
-            workspace: self.workspace.clone(),
             db: self.db.clone(),
             origin,
             inbox: None,

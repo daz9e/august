@@ -120,7 +120,7 @@ declare module "august" {
     origin: "default" | "user" | "agent";
     /** Only while running: what it says it does (`describe`). */
     summary?: string; details?: string;
-    /** Only while running: what it registered, and the built-in tools it replaces. */
+    /** Only while running: what it registered. */
     tools?: string[]; replaces?: string[]; commands?: string[]; hooks?: string[]; needs?: Permission[]; takes?: string[]; sections?: string[];
     /** Events it emits, as others hook them. */
     events?: { name: string; description: string; schema: object | null; observe: boolean }[];
@@ -146,7 +146,7 @@ declare module "august" {
     agent(task: string, opts?: { system?: string; tools?: string[]; exclude?: string[] }): Promise<string>;
     /** `august.ask` in this thread. */
     ask(question: string, options: string[], opts?: { timeout?: number }): Promise<string | null>;
-    /** Runs any agent tool (built-in, MCP or extension) for this thread, with its hooks. */
+    /** Runs any agent tool (MCP or extension) for this thread, with its hooks. */
     callTool(name: string, input?: object): Promise<{ output: string; isError: boolean }>;
     /** One completion without tools on this thread's conversation's model (counted in its
      *  usage); a prompt, or messages as the `context` hook has them. Returns the text. */
@@ -179,8 +179,11 @@ declare module "august" {
       files: { path: string; mime: string; kind: "voice" | "audio" | "image" | "video" | "document"; voice: boolean }[];
       /** `user` for what came from a messenger, else the `source` of a `prompt`. */
       source: string;
+      /** It joins the turn running now instead of starting one. */
+      steer: boolean;
     };
-    /** A turn is about to start; `system` is the base system prompt. */
+    /** A turn is about to start; `system` is the base system prompt (empty unless a
+     *  sub-agent's; the `conversation` extension writes August's). */
     before_turn: { text: string; system: string };
     /** August is about to send (`kind: "send"`) or replace (`"edit"`, message `id`) a message
      *  in `ctx.thread`, whoever sends it; streamed replies pass once per edit. */
@@ -317,7 +320,7 @@ declare module "august" {
   }
 
   export interface Tool<P = any> {
-    /** Letters, digits, `_` and `-`; a built-in tool's name replaces that tool. */
+    /** Letters, digits, `_` and `-`; a default extension's tool of that name is replaced. */
     name: string;
     /** Tells the model what the tool does and when to use it. */
     description: string;
@@ -465,7 +468,7 @@ declare module "august" {
     call(op: string, params?: object): Promise<any>;
     /** Every operation with the permission it needs. */
     ops(): Promise<Op[]>;
-    /** Every agent tool and who offers it (`august` for built-in ones). */
+    /** Every agent tool and who offers it . */
     tools(): Promise<{ name: string; description: string; parameters: object; owner: string }[]>;
     /** Every slash command and who offers it. */
     commands(): Promise<{ name: string; description: string; owner: string }[]>;

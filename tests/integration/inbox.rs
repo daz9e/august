@@ -5,7 +5,7 @@ use crate::support::*;
 use serde_json::{Value, json};
 use std::time::Duration;
 
-const MARK: &str = "[Sent while you were working; unmarked lines are from the user]";
+const MARK: &str = "[Sent while you were working]";
 
 fn msgs(req: &Value) -> &Vec<Value> {
     req["messages"].as_array().unwrap()
@@ -34,7 +34,7 @@ async fn message_during_tool_use_joins_the_running_turn() {
         }
         let last = texts(req).pop().unwrap();
         if last.contains(MARK) {
-            reply_text(&format!("done, noted: {}", last.lines().last().unwrap()))
+            reply_text(&format!("done, noted: {}", last.rsplit(MARK).next().unwrap().trim()))
         } else {
             reply_tool("bash", json!({"command": "echo working"}))
         }
@@ -51,7 +51,7 @@ async fn message_during_tool_use_joins_the_running_turn() {
     // One turn: the message never started its own.
     let reqs = fake.llm_requests();
     assert!(reqs.iter().all(|r| texts(r).iter().filter(|t| t.contains("start the job")).count() == 1));
-    assert!(!reqs.iter().any(|r| texts(r).iter().any(|t| t.ends_with("] use the blue theme"))));
+    assert!(!reqs.iter().any(|r| texts(r).iter().any(|t| t.ends_with("] use the blue theme") && !t.contains(MARK))));
 }
 
 #[tokio::test(flavor = "multi_thread")]

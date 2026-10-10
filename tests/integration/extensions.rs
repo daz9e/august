@@ -321,6 +321,20 @@ async fn extensions_replace_builtin_tools() {
     chat.ask("edit", "Result: custom edit").await;
 }
 
+#[tokio::test]
+async fn file_tools_stay_inside_the_workspace() {
+    let pick = |text: &str| match text {
+        t if t.contains("escape") => reply_tool("read", json!({"path": "../home/config/august.json"})),
+        _ => reply_tool("edit", json!({"path": "notes.txt", "old_string": "keep", "new_string": "kept"})),
+    };
+    let fake = Fake::llm(llm(pick)).await;
+    let gw = august(&fake, Setup { seed: &[("notes.txt", b"keep")], ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("escape", "outside the workspace").await;
+    chat.ask("fix the note", "Result: edited").await;
+    assert_eq!(std::fs::read_to_string(gw.workspace.join("notes.txt")).unwrap(), "kept");
+}
+
 /// The judge's verdict on a command (a separate model call), else the conversation.
 fn judged(pick: fn(&str) -> Value) -> Llm {
     let chat = llm(pick);
@@ -783,7 +797,7 @@ async fn extensions_drive_the_core_through_its_operations() {
     let mut chat = gw.chat().await;
 
     // The tables of tools and operations, with who offers what and what it needs.
-    chat.ask("/owners", "dial: control, read: august, model_set needs models").await;
+    chat.ask("/owners", "dial: control, read: tools, model_set needs models").await;
 
     // Switching the model is the same operation /model runs: the next call uses it.
     chat.ask("/swap other-model", "swapped to other-model").await;

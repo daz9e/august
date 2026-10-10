@@ -61,17 +61,19 @@ standup template. Blocks `git push --force` in bash.",
 Handlers get `(data, ctx)`. Returned fields replace the event's data; return nothing to
 leave it unchanged.
 
-- `message_in` `{ id, text, files, source }`: a message for the thread, before the agent
+- `message_in` `{ id, text, files, source, steer }`: a message for the thread, before the agent
   sees it; `source` is `user` for what came from a messenger, else a `prompt`'s source. `files` are its
-  attachments, already saved (`{ path, mime, voice }`). Return `{ text }` to rewrite it, or
+  attachments, already saved (`{ path, mime, voice }`). `steer`: it joins the turn running now
+  (the default `conversation` extension acknowledges it and marks it for the model). Return `{ text }` to rewrite it, or
   `{ handled: true, reply? }` to swallow it.
 - `message_out` `{ kind: send|edit, id, text, buttons, files, reply_to }`: before August
   sends or edits any message (replies, command answers, questions, extensions' `send`);
   a streamed reply passes once per edit. Return changed fields, or `{ block: true }` to drop
   the message.
 - `before_turn` `{ text, system }`: once per turn. Return `{ system }` to change the base
-  system prompt for this turn, `{ text }` to change the user message.
-- `tool_call` `{ tool, input, id, caller }`: before any tool runs (built-in or extension);
+  system prompt for this turn, `{ text }` to change the user message. The core's base prompt
+  is empty: the default `conversation` extension writes who August is and timestamps the text.
+- `tool_call` `{ tool, input, id, caller }`: before any tool runs;
   `id` is the model's call id (null outside a model call), `caller` is `model`, or
   `ext:<name>` for an extension's `callTool`. Return
   `{ block: "reason" }` to stop it, `{ input }` to change its arguments. The handler may
@@ -195,7 +197,7 @@ Messengers and messages — August's primitives, usable for any thread:
   like a user's message, with its `source`.
 
 Calling into August:
-- `await ctx.callTool("read", { path: "notes.md" })` runs any agent tool (built-in,
+- `await ctx.callTool("read", { path: "notes.md" })` runs any agent tool (
   MCP or another extension's) for that thread, through the `tool_call`/`tool_result` hooks
   returns `{ output, isError }`.
 - `await ctx.llm(prompt, { system })` is one completion without tools on the thread's
@@ -233,8 +235,9 @@ Tools can be registered (and removed with `august.unregisterTool(name)`) at any 
 only during setup, e.g. once a remote service answers; the model sees them from its next
 call.
 
-A tool with the name of a built-in one (`bash`, `read`, `write`, `edit`) replaces it, e.g. to run
-bash commands in a container.
+Every tool comes from an extension; `bash`, `read`, `write` and `edit` from the default `tools`
+one. A tool of yours with one of those names replaces it (of two extensions offering a tool, a
+user's own wins over a default), e.g. to run bash commands in a container.
 
 ## Operations
 
@@ -419,6 +422,6 @@ shows what each one needs. Ask for no more than the extension uses.
   `fetch` and long work so it stops too.
 - Before a reload or `/extensions disable`, the `shutdown` event gives you 2 s to clean up. A failing or slow hook is skipped
   (August continues as if it returned nothing); a crashed extension is restarted.
-- Built-in command names can't be taken; a tool with a built-in tool's name replaces it.
+- Built-in command names can't be taken; a tool of yours replaces a default extension's tool of the same name.
 
 ## Full API types

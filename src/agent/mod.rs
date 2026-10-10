@@ -6,7 +6,6 @@ mod prompt;
 mod store;
 
 pub use inbox::Inbox;
-pub use prompt::system_prompt;
 pub use store::SessionStore;
 
 use crate::extensions::Origin;
@@ -66,7 +65,7 @@ pub struct Agent {
     provider: Arc<dyn LlmProvider>,
     tools: ToolRegistry,
     system: String,
-    /// The system prompt a `before_turn` hook set for the running turn.
+    /// The system prompt `before_turn` hooks set for the running (or latest) turn.
     turn_system: Option<String>,
     /// The session's own and the extensions' prompt sections, fixed for the session.
     snapshot: Option<String>,
@@ -451,8 +450,8 @@ impl Agent {
             }
         }
         self.log("user_message", json!({"text": text}), ctx.origin.turn.as_ref());
+        // `turn_system` stays: a fork after the turn talks with the prompt it ended on.
         let result = self.run_turn_inner(&text, attachments, ctx, on_event).await;
-        self.turn_system = None;
         match &result {
             Ok(_) => {
                 self.persist();
@@ -471,8 +470,7 @@ impl Agent {
         ctx: &ToolCtx,
         on_event: &mut (dyn FnMut(Event) + Send),
     ) -> Result<String> {
-        let stamp = chrono::Local::now().format("%a %Y-%m-%d %H:%M");
-        let mut user = Message::user_text(format!("[{stamp}] {user_text}"));
+        let mut user = Message::user_text(user_text);
         user.content.extend(attachments);
         self.history.push(user);
         let specs = self.specs();
@@ -483,12 +481,10 @@ impl Agent {
                 on_event(Event::Step);
                 // Messages the user sent meanwhile join the tool results.
                 let news = ctx.inbox.as_ref().map(|i| i.take()).unwrap_or_default();
-                if !news.is_empty() {
-                    let stamp = chrono::Local::now().format("%a %Y-%m-%d %H:%M");
-                    let text = format!("[{stamp}] [Sent while you were working; unmarked lines are from the user]\n{}", news.join("\n"));
-                    if let Some(last) = self.history.last_mut() {
-                        last.content.push(Block::Text(text));
-                    }
+                if !news.is_empty()
+                    && let Some(last) = self.history.last_mut()
+                {
+                    last.content.push(Block::Text(news.join("\n")));
                 }
             }
             let completion = self.call_with_retries(step, &specs, ctx, on_event).await?;
@@ -565,7 +561,7 @@ mod tests {
     }
 
     fn agent(db: Arc<Db>) -> Agent {
-        Agent::new(Arc::new(Fake), ToolRegistry::with_defaults(), "sys".into(), db, "test").unwrap()
+        Agent::new(Arc::new(Fake), ToolRegistry::default(), "sys".into(), db, "test").unwrap()
     }
 
     #[test]

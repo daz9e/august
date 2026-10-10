@@ -353,11 +353,6 @@ fn stopped(data: &Value) -> bool {
     block == true || block.as_str().is_some_and(|s| !s.is_empty()) || data["handled"] == true
 }
 
-/// Built-in tool names (an extension tool of the same name replaces the built-in).
-fn builtin_tools() -> HashSet<String> {
-    crate::tools::ToolRegistry::builtin_names().into_iter().map(String::from).collect()
-}
-
 impl Extensions {
     pub fn new(dir: PathBuf) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
@@ -833,7 +828,7 @@ impl Extensions {
         let data = {
             let slots = self.slots.read().unwrap();
             let Some(slot) = slots.iter().find(|s| s.name == name) else { return };
-            let e = self.entry(slot, &HashSet::new(), &HashMap::new());
+            let e = self.entry(slot, &HashMap::new());
             json!({"name": name, "state": e["state"], "reason": e["reason"], "error": e["error"], "detail": e["health"]["detail"],
                    "restarts": e["restarts"], "final": e["final"]})
         };
@@ -869,6 +864,16 @@ impl Extensions {
                 State::Starting | State::Failed(_) | State::Disabled => None,
             })
             .collect()
+    }
+
+    /// Running extensions in the order their tools win over one another's of the same name:
+    /// the user's own before the defaults (`tools`' `bash` gives way to a sandboxed one).
+    fn tool_hosts(&self) -> Vec<(String, Arc<Host>)> {
+        let defaults: HashSet<String> =
+            self.slots.read().unwrap().iter().filter(|s| matches!(s.launch, Launch::Binary { .. })).map(|s| s.name.clone()).collect();
+        let mut hosts = self.running();
+        hosts.sort_by_key(|(n, _)| defaults.contains(n));
+        hosts
     }
 
     /// Running extensions that may hook `event` (only those with `admin` the guarded ones).
@@ -1043,7 +1048,7 @@ impl Extensions {
     /// Tools of all running extensions; a name an earlier extension took is skipped.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
         let mut seen = HashSet::new();
-        self.running()
+        self.tool_hosts()
             .iter()
             .flat_map(|(_, h)| h.manifest().tools.clone())
             .filter(|t| seen.insert(t.name.clone()))
@@ -1058,7 +1063,7 @@ impl Extensions {
     /// The extension behind each extension tool (the first one, as in `tool_specs`).
     pub fn tool_owners(&self) -> std::collections::HashMap<String, String> {
         let mut owners = std::collections::HashMap::new();
-        for (name, h) in self.running() {
+        for (name, h) in self.tool_hosts() {
             for t in &h.manifest().tools {
                 owners.entry(t.name.clone()).or_insert_with(|| name.clone());
             }
@@ -1072,7 +1077,7 @@ impl Extensions {
 
     /// Runs an extension tool; `None` if no extension has it.
     pub async fn call_tool(&self, name: &str, input: &Value, chat: &Origin) -> Option<Result<String, String>> {
-        let host = self.running().into_iter().find(|(_, h)| h.manifest().tools.iter().any(|t| t.name == name))?.1;
+        let host = self.tool_hosts().into_iter().find(|(_, h)| h.manifest().tools.iter().any(|t| t.name == name))?.1;
         let params = json!({"name": name, "input": input, "ctx": ctx_json(chat)});
         Some(host.request("tool", params, TOOL_TIMEOUT).await.map(|v| match v {
             Value::String(s) => s,
@@ -1103,7 +1108,7 @@ impl Extensions {
     }
 
     /// One extension as `list` shows it; `usage` is `(memory KB, CPU %)` by process group.
-    fn entry(&self, slot: &Slot, builtin: &HashSet<String>, usage: &HashMap<i32, (u64, f64)>) -> Value {
+    fn entry(&self, slot: &Slot, usage: &HashMap<i32, (u64, f64)>) -> Value {
         let degraded = slot.health.as_ref().is_some_and(|(s, _)| s == "degraded");
         let (state, error) = match &slot.state {
             State::Starting => ("starting", None),
@@ -1134,7 +1139,6 @@ impl Extensions {
             v["details"] = json!(m.details);
             let tools: Vec<&str> = m.tools.iter().map(|t| t.name.as_str()).collect();
             v["tools"] = json!(tools);
-            v["replaces"] = json!(tools.iter().filter(|t| builtin.contains(**t)).collect::<Vec<_>>());
             v["commands"] = json!(m.commands.iter().map(|c| &c.0).collect::<Vec<_>>());
             v["accounts"] = json!(m.accounts.iter().map(|a| &a.id).collect::<Vec<_>>());
             v["hooks"] = json!(m.events);
@@ -1154,15 +1158,15 @@ impl Extensions {
 
     fn line(&self, name: &str) -> String {
         let slots = self.slots.read().unwrap();
-        slots.iter().find(|s| s.name == name).map(|s| status_line(&self.entry(s, &builtin_tools(), &HashMap::new()))).unwrap_or_default()
+        slots.iter().find(|s| s.name == name).map(|s| status_line(&self.entry(s, &HashMap::new()))).unwrap_or_default()
     }
 
     /// Every extension in name order: `{name, state: starting|running|degraded|failed|disabled,
     /// reason, error, restarts, final, health, pid, uptime_s, memory_kb, cpu, tools, replaces,
     /// commands, hooks, needs, takes, sections, events}`.
     pub fn list(&self) -> Value {
-        let (builtin, usage) = (builtin_tools(), usage());
-        Value::Array(self.slots.read().unwrap().iter().map(|s| self.entry(s, &builtin, &usage)).collect())
+        let usage = usage();
+        Value::Array(self.slots.read().unwrap().iter().map(|s| self.entry(s, &usage)).collect())
     }
 
     /// One line per extension, as `/extensions` shows them.
@@ -1199,7 +1203,6 @@ fn status_line(e: &Value) -> String {
                 ("needs", "needs", ""),
                 ("takes", "takes", ""),
                 ("sections", "prompt", ""),
-                ("replaces", "replaces built-in", ""),
             ] {
                 let items = list(key, prefix);
                 if !items.is_empty() {

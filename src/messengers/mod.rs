@@ -47,19 +47,6 @@ pub struct Inbound {
     pub kind: InboundKind,
 }
 
-/// The system prompt's line on how replies are shown, from the messenger's description.
-pub fn surface(d: &Description) -> String {
-    if d.capabilities.markdown {
-        format!(
-            "The user reads your replies in {}, which renders Markdown (bold, italic, `code`, \
-             fenced code blocks, lists, links). Avoid tables and headings unless they really help.",
-            d.name
-        )
-    } else {
-        format!("The user reads your replies in {}: plain text, Markdown is shown as is.", d.name)
-    }
-}
-
 #[async_trait]
 pub trait Messenger: Send + Sync {
     fn id(&self) -> &str;

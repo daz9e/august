@@ -97,7 +97,6 @@ impl Gateway {
 
         let origin = crate::extensions::Origin { thread: Some(id.clone()), turn: Some(tag.clone()), ..Default::default() };
         let ctx = ToolCtx {
-            workspace: self.workspace.clone(),
             db: self.db.clone(),
             origin,
             inbox: Some(state.inbox.clone()),
@@ -120,10 +119,12 @@ impl Gateway {
             }
         };
 
+        state.inbox.steering(true);
         let outcome = tokio::select! {
             r = agent.run_turn_with(text, images, &ctx, &mut on_event) => Some(r),
             _ = cancel.notified() => None,
         };
+        state.inbox.steering(false);
         let ended = Outcome::of(
             outcome.as_ref().map(|r| r.as_ref().map(String::clone).map_err(|e| anyhow::anyhow!("{e:#}"))),
             vec![serde_json::Value::Null; agent.tool_calls()],

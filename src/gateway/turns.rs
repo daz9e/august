@@ -4,7 +4,7 @@
 //! for their outcome, list and cancel them.
 
 use super::Gateway;
-use crate::agent::{self, Agent, TurnMode, TurnTag};
+use crate::agent::{Agent, TurnMode, TurnTag};
 use crate::extensions::Origin;
 use crate::messengers::Thread;
 use crate::tools::ToolCtx;
@@ -212,7 +212,6 @@ impl Gateway {
     async fn run_turn(self: &Arc<Self>, thread: Thread, tag: TurnTag, cancel: Arc<Notify>, req: TurnRequest) -> Outcome {
         let origin = Origin { thread: Some(thread.clone()), turn: Some(tag.clone()), ..Default::default() };
         let ctx = ToolCtx {
-            workspace: self.workspace.clone(),
             db: self.db.clone(),
             origin,
             inbox: None,
@@ -273,7 +272,7 @@ impl Gateway {
             tools = tools.only(only);
         }
         let provider = self.provider.read().unwrap().clone();
-        let system = agent::system_prompt(&self.workspace, req.system.as_deref().unwrap_or(""));
+        let system = req.system.clone().unwrap_or_default();
         let mut agent = Agent::new(provider, tools, system, self.db.clone(), &key)?;
         eprintln!("fresh turn #{} starts: {}", tag.id, req.text.chars().take(80).collect::<String>());
         agent.run_turn(&req.text, ctx, &mut |_| {}).await
