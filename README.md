@@ -3,8 +3,9 @@
 A minimal, modular core for building your own agent from the ground up.
 
 August's core only provides mechanisms: it reaches people through messengers, calls models
-through providers, runs turns, and fires events that can be hooked. Everything else lives in
-extensions: tools, commands, approvals, memory, sub-agents, and even Telegram and the
+through providers, runs turns, and fires events that can be hooked. 
+
+Everything else lives in extensions: tools, commands, approvals, memory, sub-agents, and even Telegram and the
 terminal. An extension is a separate process written in any language. It talks to the core
 with one JSON object per line over stdin/stdout.
 
