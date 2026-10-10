@@ -125,7 +125,10 @@ async fn ask(august: &August, ctx: &Ctx, action: &str) -> Result<Option<String>>
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await
+}
+
+async fn serve(august: August) {
     august.needs(&["messaging", "llm"]);
     august.settings_schema(json!({
         "type": "object",
@@ -153,17 +156,4 @@ async fn main() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn safe_detection() {
-        let safe: Vec<String> = SAFE_COMMANDS.iter().map(|s| s.to_string()).collect();
-        assert!(is_safe("ls -la", &safe));
-        assert!(is_safe("cat notes.md", &safe));
-        assert!(!is_safe("rm -rf /", &safe));
-        assert!(!is_safe("ls; rm x", &safe));
-        assert!(!is_safe("cat a > b", &safe));
-        assert!(!is_safe("echo $(whoami)", &safe));
-    }
-}
+mod tests;

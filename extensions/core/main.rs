@@ -8,7 +8,10 @@ use serde_json::json;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await
+}
+
+async fn serve(august: August) {
     august.needs(&["messaging", "turns", "tools", "llm", "models", "sessions", "config", "admin"]);
     august.describe(
         "The `august` tool: call any of August's core operations (`ops` lists them)",
@@ -63,3 +66,6 @@ async fn main() {
     );
     august.run().await;
 }
+
+#[cfg(test)]
+mod tests;

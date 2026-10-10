@@ -51,7 +51,10 @@ fn describe(all: &Value) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await
+}
+
+async fn serve(august: August) {
     august.needs(&["messaging"]);
     let me = august.clone();
     august.register_tool(
@@ -179,3 +182,6 @@ async fn main() {
     );
     august.run().await;
 }
+
+#[cfg(test)]
+mod tests;

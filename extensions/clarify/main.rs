@@ -10,7 +10,10 @@ const WAIT: Duration = Duration::from_secs(600);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await
+}
+
+async fn serve(august: August) {
     august.needs(&["messaging"]);
     august.register_tool(
         "clarify",
@@ -51,3 +54,6 @@ async fn main() {
     );
     august.run().await;
 }
+
+#[cfg(test)]
+mod tests;

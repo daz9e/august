@@ -76,7 +76,10 @@ fn free_path(workspace: &Path, name: &str) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await
+}
+
+async fn serve(august: August) {
     august.needs(&["messaging"]);
     august.describe("Attachments", "Saves files sent to August into workspace/inbox and shows images to the model.");
     let workspace = august.workspace().clone();
@@ -113,3 +116,6 @@ async fn main() {
     });
     august.run().await;
 }
+
+#[cfg(test)]
+mod tests;

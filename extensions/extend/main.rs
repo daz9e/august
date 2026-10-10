@@ -13,9 +13,12 @@ fn valid_name(name: &str) -> bool {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await;
+}
+
+async fn serve(august: August) {
     august.needs(&["admin"]);
-    let dir = PathBuf::from(std::env::var("AUGUST_EXTENSIONS").unwrap_or_default());
+    let dir = PathBuf::from(august.env("AUGUST_EXTENSIONS").unwrap_or_default());
     let home = dir.display().to_string();
     let skills = dir.join(".runtime/skills/writing-extensions");
     let me = august.clone();
@@ -74,7 +77,7 @@ async fn main() {
                     Ok(status) => status,
                     Err(e) => {
                         let log = august.call("extension_logs", json!({"name": name, "lines": 30})).await.unwrap_or_default();
-                        let path = PathBuf::from(std::env::var("AUGUST_HOME").unwrap_or_default()).join(format!("logs/extensions/{name}.log"));
+                        let path = PathBuf::from(august.env("AUGUST_HOME").unwrap_or_default()).join(format!("logs/extensions/{name}.log"));
                         bail!("saved, but it failed to start:\n{e:#}\n\nIts log ({}):\n{}", path.display(), log.as_str().unwrap_or_default());
                     }
                 };

@@ -6,7 +6,8 @@ use august_ext::{August, Ctx, split_markdown};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// One thread's turn being drawn.
 struct Draw {
@@ -87,7 +88,10 @@ fn tool_line(name: &str, input: &Value) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await
+}
+
+async fn serve(august: August) {
     august.takes(&["render"]);
     // Waiting out the messenger's edit interval, then sending a long reply in pieces.
     august.hook_timeout("render", Duration::from_secs(60));
@@ -140,3 +144,6 @@ async fn main() {
     });
     august.run().await;
 }
+
+#[cfg(test)]
+mod tests;

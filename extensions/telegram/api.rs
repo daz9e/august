@@ -39,17 +39,9 @@ impl std::error::Error for ApiError {}
 const FILE_TIMEOUT: Duration = Duration::from_secs(300);
 
 impl Api {
-    /// `TELEGRAM_API_BASE` points at a self-hosted Bot API server (or a test double).
-    pub fn new(token: &str) -> Self {
-        let host = std::env::var("TELEGRAM_API_BASE")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| "https://api.telegram.org".into());
-        Self::with_host(&host, token)
-    }
-
-    pub fn with_host(host: &str, token: &str) -> Self {
-        let host = host.trim_end_matches('/');
+    /// `host`: a self-hosted Bot API server (or a test double), else Telegram's.
+    pub fn new(host: Option<&str>, token: &str) -> Self {
+        let host = host.unwrap_or("https://api.telegram.org").trim_end_matches('/');
         Self {
             http: reqwest::Client::builder()
                 .user_agent(august_llm::USER_AGENT)

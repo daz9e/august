@@ -221,7 +221,10 @@ fn status_line(e: &Value) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await
+}
+
+async fn serve(august: August) {
     august.needs(&["messaging", "turns", "sessions", "models", "admin", "config", "user"]);
     for (name, description) in COMMANDS {
         let a = august.clone();
@@ -237,3 +240,6 @@ async fn main() {
     }
     august.run().await;
 }
+
+#[cfg(test)]
+mod tests;

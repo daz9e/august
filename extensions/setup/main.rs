@@ -16,7 +16,10 @@ const TAIL: usize = 1_000;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await;
+}
+
+async fn serve(august: August) {
     august.describe(
         "Runs extensions' setup steps (build, download, install) before they start",
         "An extension's `extension.json` may list `setup`: commands (argv lists) run in its folder \
@@ -63,7 +66,8 @@ async fn main() {
             august.set(&format!("force:{name}"), Value::Null).await?;
             let timeout = Duration::from_secs(august.settings().await?["step_timeout_s"].as_u64().unwrap_or(600));
             let started = Instant::now();
-            let outcome = run(&ctx, &name, &dir, &steps, timeout).await;
+            let log = PathBuf::from(august.env("AUGUST_HOME").unwrap_or_default()).join("logs/extensions/setup.log");
+            let outcome = run(&ctx, &name, &dir, &steps, timeout, &log).await;
             let error = outcome.as_ref().err().cloned();
             let done = json!({"extension": name, "ok": error.is_none(), "error": error, "duration_ms": started.elapsed().as_millis() as u64});
             ctx.emit("done", done).await.ok();
@@ -103,7 +107,7 @@ fn steps(dir: &Path) -> Vec<Vec<String>> {
 }
 
 /// Runs the steps in order, each through the `setup:step` hooks; the first failure stops them.
-async fn run(ctx: &august_ext::Ctx, name: &str, dir: &Path, steps: &[Vec<String>], timeout: Duration) -> Result<(), String> {
+async fn run(ctx: &august_ext::Ctx, name: &str, dir: &Path, steps: &[Vec<String>], timeout: Duration, log: &Path) -> Result<(), String> {
     let total = steps.len();
     for (i, step) in steps.iter().enumerate() {
         let index = i + 1;
@@ -124,7 +128,6 @@ async fn run(ctx: &august_ext::Ctx, name: &str, dir: &Path, steps: &[Vec<String>
         }
         if !out.status.success() {
             let code = out.status.code().map_or("a signal".into(), |c| format!("code {c}"));
-            let log = PathBuf::from(std::env::var("AUGUST_HOME").unwrap_or_default()).join("logs/extensions/setup.log");
             return Err(format!(
                 "setup step {index} ({}) failed with {code}: {}\n(all of its output: lines starting `{name}:` in {})",
                 argv.join(" "),

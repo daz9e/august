@@ -12,12 +12,9 @@ use std::time::Duration;
 const OPENAI_URL: &str = "https://api.openai.com/v1";
 const TIMEOUT: Duration = Duration::from_secs(100);
 
-fn env(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
-}
-
 /// The OpenAI provider's key, if it talks to OpenAI itself.
-fn openai_key() -> Option<String> {
+fn openai_key(august: &August) -> Option<String> {
+    let env = |k: &str| august.env(k);
     let home = env("AUGUST_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env("HOME").unwrap_or_default()).join(".august"));
     let stored: Value = std::fs::read_to_string(home.join("credentials.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     let stored = &stored["openai"];
@@ -28,11 +25,12 @@ fn openai_key() -> Option<String> {
     env("OPENAI_API_KEY").or_else(|| stored["key"].as_str().map(String::from))
 }
 
-async fn transcribe(http: &reqwest::Client, path: &Path, mime: &str) -> Result<String> {
+async fn transcribe(august: &August, http: &reqwest::Client, path: &Path, mime: &str) -> Result<String> {
+    let env = |k: &str| august.env(k);
     let (base, key) = match env("AUGUST_TRANSCRIBE_URL") {
         Some(url) => (url, env("AUGUST_TRANSCRIBE_API_KEY").unwrap_or_default()),
         None => {
-            let key = env("AUGUST_TRANSCRIBE_API_KEY").or_else(openai_key).filter(|k| !k.is_empty()).context(
+            let key = env("AUGUST_TRANSCRIBE_API_KEY").or_else(|| openai_key(august)).filter(|k| !k.is_empty()).context(
                 "transcription is not configured (set AUGUST_TRANSCRIBE_API_KEY or OPENAI_API_KEY, \
                  or AUGUST_TRANSCRIBE_URL for another OpenAI-compatible service)",
             )?;
@@ -64,11 +62,15 @@ async fn transcribe(http: &reqwest::Client, path: &Path, mime: &str) -> Result<S
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    serve(August::new()).await
+}
+
+async fn serve(august: August) {
     let http = reqwest::Client::builder().timeout(TIMEOUT).build().expect("http client");
-    let august = August::new();
     let workspace = august.workspace().clone();
+    let me = august.clone();
     august.on("message_in", move |data, _| {
-        let (http, workspace) = (http.clone(), workspace.clone());
+        let (august, http, workspace) = (me.clone(), http.clone(), workspace.clone());
         async move {
             let audio: Vec<&Value> = data["files"].as_array().into_iter().flatten().filter(|f| f["mime"].as_str().is_some_and(|m| m.starts_with("audio/"))).collect();
             if audio.is_empty() {
@@ -79,9 +81,9 @@ async fn main() {
                 let path = Path::new(f["path"].as_str().unwrap_or_default());
                 let name = path.strip_prefix(&workspace).unwrap_or(path).display();
                 let kind = if f["voice"] == true { "Voice message" } else { "Audio" };
-                let http = &http;
+                let (august, http) = (&august, &http);
                 async move {
-                    match transcribe(http, path, f["mime"].as_str().unwrap_or_default()).await {
+                    match transcribe(august, http, path, f["mime"].as_str().unwrap_or_default()).await {
                         Ok(text) => format!("[{kind} transcript, {name}]\n{text}"),
                         Err(e) => format!("[No transcript of {name}: {e:#}]"),
                     }
@@ -94,3 +96,6 @@ async fn main() {
     });
     august.run().await;
 }
+
+#[cfg(test)]
+mod tests;

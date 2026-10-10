@@ -438,8 +438,11 @@ fn report(status: &Status, config: &PathBuf) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
-    let home = std::env::var("AUGUST_HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".august"));
+    serve(August::new()).await;
+}
+
+async fn serve(august: August) {
+    let home = august.env("AUGUST_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(august.env("HOME").unwrap_or_default()).join(".august"));
     let config_path = home.join("mcp.json");
     let status: Status = Arc::default();
     // A server that failed is outside this extension (its command, its address): degraded.

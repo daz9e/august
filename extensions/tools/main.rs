@@ -74,7 +74,10 @@ fn path_schema(with_content: bool) -> Value {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await
+}
+
+async fn serve(august: August) {
     let ws = august.workspace().canonicalize().unwrap_or_else(|_| august.workspace().clone());
 
     let dir = ws.clone();
@@ -166,3 +169,6 @@ async fn main() {
     );
     august.run().await;
 }
+
+#[cfg(test)]
+mod tests;

@@ -86,7 +86,7 @@ async fn run(august: &August, mut args: Vec<String>, ctx: Ctx) -> Result<String>
         chat += &format!("-agent{}", turn.id);
     }
     let session = format!("august-{}", chat.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>());
-    let bin = std::env::var("AUGUST_BROWSER_BIN").ok().filter(|b| !b.is_empty()).unwrap_or_else(|| "agent-browser".into());
+    let bin = august.env("AUGUST_BROWSER_BIN").unwrap_or_else(|| "agent-browser".into());
     let child = tokio::process::Command::new(&bin)
         .arg("--session")
         .arg(&session)
@@ -110,7 +110,10 @@ async fn run(august: &August, mut args: Vec<String>, ctx: Ctx) -> Result<String>
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await;
+}
+
+async fn serve(august: August) {
     let me = august.clone();
     august.register_tool(
         "browser",
@@ -140,3 +143,6 @@ async fn main() {
     );
     august.run().await;
 }
+
+#[cfg(test)]
+mod tests;

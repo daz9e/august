@@ -25,7 +25,10 @@ fn surface(m: &Value) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await
+}
+
+async fn serve(august: August) {
     august.needs(&["messaging"]);
     august.describe("How August talks", "The start of the system prompt, timestamps on messages, acknowledgements of messages sent mid-turn.");
     let intro = format!(
@@ -80,3 +83,6 @@ async fn main() {
     });
     august.run().await;
 }
+
+#[cfg(test)]
+mod tests;

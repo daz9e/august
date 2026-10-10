@@ -44,7 +44,10 @@ async fn report(august: &August, ctx: &Ctx) -> Result<String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await
+}
+
+async fn serve(august: August) {
     august.needs(&["sessions"]);
     august.describe("Token usage", "Counts the tokens of every model call; /usage shows them.");
     // Totals are read, added to and written back: one call at a time.
@@ -68,3 +71,6 @@ async fn main() {
     });
     august.run().await;
 }
+
+#[cfg(test)]
+mod tests;

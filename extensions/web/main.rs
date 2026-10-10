@@ -133,8 +133,7 @@ struct Hit {
     snippet: String,
 }
 
-async fn brave(http: &reqwest::Client, query: &str, key: &str) -> Result<Vec<Hit>> {
-    let url = std::env::var("BRAVE_API_URL").unwrap_or_else(|_| "https://api.search.brave.com/res/v1/web/search".into());
+async fn brave(http: &reqwest::Client, url: &str, query: &str, key: &str) -> Result<Vec<Hit>> {
     let resp = http
         .get(url)
         .query(&[("q", query), ("count", "10")])
@@ -157,15 +156,14 @@ async fn brave(http: &reqwest::Client, query: &str, key: &str) -> Result<Vec<Hit
 }
 
 /// Keyless fallback: scrapes DuckDuckGo's HTML results page.
-async fn duckduckgo(http: &reqwest::Client, query: &str) -> Result<Vec<Hit>> {
-    let url = std::env::var("DUCKDUCKGO_URL").unwrap_or_else(|_| "https://html.duckduckgo.com/html/".into());
+async fn duckduckgo(http: &reqwest::Client, url: &str, query: &str) -> Result<Vec<Hit>> {
     let mut last = anyhow!("no attempt");
     for attempt in 0..3 {
         if attempt > 0 {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         let tried: Result<Vec<Hit>> = async {
-            let resp = http.post(&url).form(&[("q", query)]).send().await?;
+            let resp = http.post(url).form(&[("q", query)]).send().await?;
             if resp.status() != 200 {
                 bail!("DuckDuckGo answered HTTP {}", resp.status().as_u16());
             }
@@ -222,8 +220,14 @@ fn percent_decode(s: &str) -> Option<String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    serve(August::new()).await;
+}
+
+async fn serve(august: August) {
     let http = reqwest::Client::builder().user_agent(UA).timeout(TIMEOUT).build().expect("http client");
-    let august = August::new();
+    let key = august.env("BRAVE_API_KEY");
+    let brave_url = august.env("BRAVE_API_URL").unwrap_or_else(|| "https://api.search.brave.com/res/v1/web/search".into());
+    let ddg_url = august.env("DUCKDUCKGO_URL").unwrap_or_else(|| "https://html.duckduckgo.com/html/".into());
 
     let client = http.clone();
     august.register_tool(
@@ -257,12 +261,12 @@ async fn main() {
             "additionalProperties": false,
         }),
         move |input, _| {
-            let http = http.clone();
+            let (http, key, brave_url, ddg_url) = (http.clone(), key.clone(), brave_url.clone(), ddg_url.clone());
             async move {
                 let query = str_arg(&input, "query");
-                let hits = match std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.is_empty()) {
-                    Some(key) => brave(&http, query, &key).await?,
-                    None => duckduckgo(&http, query).await?,
+                let hits = match key {
+                    Some(key) => brave(&http, &brave_url, query, &key).await?,
+                    None => duckduckgo(&http, &ddg_url, query).await?,
                 };
                 if hits.is_empty() {
                     return Ok("no results".into());
@@ -274,3 +278,6 @@ async fn main() {
     );
     august.run().await;
 }
+
+#[cfg(test)]
+mod tests;

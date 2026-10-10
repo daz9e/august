@@ -37,10 +37,6 @@ const MAX_CAPTION: usize = 1024;
 /// How long pairing waits for the owner's message.
 const PAIR_WAIT: Duration = Duration::from_secs(180);
 
-fn env(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
-}
-
 // ---------------------------------------------------------------- inbound parsing
 
 struct Bot {
@@ -530,7 +526,7 @@ impl Messenger for Telegram {
 
 /// The saved token (or `TELEGRAM_BOT_TOKEN`).
 async fn token(august: &August) -> Result<Option<String>> {
-    Ok(match env("TELEGRAM_BOT_TOKEN") {
+    Ok(match august.env("TELEGRAM_BOT_TOKEN") {
         Some(t) => Some(t),
         None => august.secret("token").await?,
     })
@@ -538,7 +534,7 @@ async fn token(august: &August) -> Result<Option<String>> {
 
 /// The allowed user ids: `TELEGRAM_ALLOWED_USERS`, else the setting.
 async fn allowed(august: &August) -> Result<Vec<i64>> {
-    if let Some(list) = env("TELEGRAM_ALLOWED_USERS") {
+    if let Some(list) = august.env("TELEGRAM_ALLOWED_USERS") {
         return Ok(list.split(',').filter_map(|s| s.trim().parse().ok()).collect());
     }
     Ok(serde_json::from_value(august.settings().await?["allowed"].clone()).unwrap_or_default())
@@ -547,7 +543,7 @@ async fn allowed(august: &August) -> Result<Vec<i64>> {
 /// Connects with `token`: checks it, offers the messenger and starts long polling (in place
 /// of a previous connection). Returns the bot's username.
 async fn connect(august: &August, tg: &Arc<Telegram>, token: &str) -> Result<String> {
-    let api = Api::new(token);
+    let api = Api::new(august.env("TELEGRAM_API_BASE").as_deref(), token);
     let me = api.get_me().await.context("Telegram rejected the bot token")?;
     let bot = Bot { id: me["id"].as_i64().unwrap_or(0), username: me["username"].as_str().unwrap_or("").to_string() };
     // Long polling and webhooks are mutually exclusive.
@@ -697,7 +693,10 @@ async fn logout(august: &August, tg: &Telegram) -> Result<()> {
 
 #[tokio::main]
 async fn main() {
-    let august = August::new();
+    serve(August::new()).await;
+}
+
+async fn serve(august: August) {
     august.needs(&["config"]);
     august.settings_schema(json!({"properties": {
         "allowed": {"type": "array", "items": {"type": "integer"}, "default": [], "description": "Telegram user ids allowed to talk to the bot (/login telegram pairs one)"},
@@ -746,113 +745,4 @@ async fn main() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn bot() -> Bot {
-        Bot { id: 99, username: "AugustBot".into() }
-    }
-
-    fn msg(chat_type: &str, text: &str, user: i64) -> Value {
-        json!({"update_id": 1, "message": {
-            "chat": {"id": 5, "type": chat_type}, "from": {"id": user, "first_name": "Ann", "username": "ann"},
-            "text": text}})
-    }
-
-    #[test]
-    fn private_text_and_command() {
-        let Parsed::Event(e) = parse_update(&msg("private", "hi", 7), &bot(), &[7]) else { panic!() };
-        assert!(matches!(e.kind, InboundKind::Message { ref text, .. } if text == "hi"));
-        assert_eq!(e.user.name, "Ann (@ann)");
-        let Parsed::Event(e) = parse_update(&msg("private", "/model x", 7), &bot(), &[7]) else { panic!() };
-        assert!(matches!(e.kind, InboundKind::Command { ref name, ref args } if name == "model" && args == "x"));
-    }
-
-    #[test]
-    fn allowlist_is_enforced() {
-        assert!(matches!(parse_update(&msg("private", "hi", 8), &bot(), &[7]), Parsed::Deny(5, 8, _)));
-        assert!(matches!(parse_update(&msg("private", "hi", 8), &bot(), &[]), Parsed::Deny(..)));
-    }
-
-    #[test]
-    fn groups_mark_what_is_addressed() {
-        let Parsed::Event(e) = parse_update(&msg("supergroup", "hi all", 7), &bot(), &[7]) else { panic!() };
-        assert!(matches!(e.kind, InboundKind::Message { addressed: false, .. }));
-        assert_eq!(e.place.kind, PlaceKind::Group);
-        let Parsed::Event(e) = parse_update(&msg("supergroup", "@augustbot hi", 7), &bot(), &[7]) else { panic!() };
-        assert!(matches!(e.kind, InboundKind::Message { ref text, addressed: true, .. } if text == "hi"));
-        // A command for another bot is chatter too.
-        let Parsed::Event(e) = parse_update(&msg("group", "/new@OtherBot", 7), &bot(), &[7]) else { panic!() };
-        assert!(matches!(e.kind, InboundKind::Message { addressed: false, .. }));
-        // Strangers chatting in a group are ignored, not turned away.
-        assert!(matches!(parse_update(&msg("group", "hi all", 8), &bot(), &[7]), Parsed::Ignore));
-    }
-
-    #[test]
-    fn topics_are_threads_and_replies_quote() {
-        let mut u = msg("supergroup", "and flights?", 7);
-        u["message"]["is_topic_message"] = json!(true);
-        u["message"]["message_thread_id"] = json!(3);
-        u["message"]["reply_to_message"] = json!({"message_id": 3, "forum_topic_created": {"name": "Trip"}, "from": {"id": 99}});
-        let Parsed::Event(e) = parse_update(&u, &bot(), &[7]) else { panic!() };
-        assert_eq!(e.thread, "5/3");
-        assert_eq!(e.place, Place { kind: PlaceKind::Thread, parent: Some("5".into()), title: Some("Trip".into()) });
-        // The topic's start is no quote, but the bot opened it, so it is addressed.
-        assert!(matches!(e.kind, InboundKind::Message { reply_to: None, addressed: true, .. }));
-
-        u["message"]["reply_to_message"] = json!({"message_id": 9, "text": "Book it?", "from": {"id": 99}});
-        let Parsed::Event(e) = parse_update(&u, &bot(), &[7]) else { panic!() };
-        let InboundKind::Message { reply_to: Some(q), .. } = e.kind else { panic!() };
-        assert_eq!((q.id.as_str(), q.text.as_str(), q.mine), ("9", "Book it?", true));
-    }
-
-    #[test]
-    fn edits() {
-        let mut u = msg("private", "hi there", 7);
-        u["edited_message"] = u["message"].take();
-        u["edited_message"]["message_id"] = json!(4);
-        let Parsed::Event(e) = parse_update(&u, &bot(), &[7]) else { panic!() };
-        assert!(matches!(e.kind, InboundKind::Edited { ref id, ref text } if id == "4" && text == "hi there"));
-    }
-
-    #[test]
-    fn callbacks() {
-        let u = json!({"update_id": 2, "callback_query": {"id": "cb1", "from": {"id": 7, "first_name": "A"},
-            "message": {"chat": {"id": 5}}, "data": "k1.0"}});
-        let Parsed::Press(e, callback) = parse_update(&u, &bot(), &[7]) else { panic!() };
-        assert!(matches!(e.kind, InboundKind::Press { ref button } if button == "k1.0"));
-        assert_eq!(callback, "cb1");
-        assert!(matches!(parse_update(&u, &bot(), &[1]), Parsed::Deny(5, 7, _)));
-    }
-
-    /// End to end against a fake Bot API server.
-    #[tokio::test]
-    async fn send_falls_back_to_plain_text_on_parse_error() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let seen2 = seen.clone();
-        tokio::spawn(async move {
-            for n in 0..2 {
-                let (mut s, _) = listener.accept().await.unwrap();
-                let mut buf = vec![0u8; 8192];
-                let len = s.read(&mut buf).await.unwrap();
-                seen2.lock().unwrap().push(String::from_utf8_lossy(&buf[..len]).to_string());
-                let body = if n == 0 {
-                    r#"{"ok":false,"description":"Bad Request: can't parse entities: nope"}"#
-                } else {
-                    r#"{"ok":true,"result":{"message_id":42}}"#
-                };
-                let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
-                s.write_all(resp.as_bytes()).await.unwrap();
-            }
-        });
-        let ch = Telegram { api: RwLock::new(Some(Api::with_host(&format!("http://{addr}"), "T"))), ..Default::default() };
-        let id = ch.send("5", &OutMessage::text("**hi**")).await.unwrap();
-        assert_eq!(id, "42");
-        let seen = seen.lock().unwrap();
-        assert!(seen[0].contains("parse_mode") && seen[0].contains("<b>hi</b>"));
-        assert!(!seen[1].contains("parse_mode") && seen[1].contains("**hi**"));
-    }
-}
+mod tests;
