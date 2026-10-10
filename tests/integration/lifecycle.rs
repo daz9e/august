@@ -338,3 +338,64 @@ async fn hooks_watch_extensions_launch_and_can_block_change_or_limit_them() {
     chat.ask("/extensions", "❌ weather — crashed").await;
 }
 
+/// Reads what its setup built.
+const BUILT: &str = r#"
+from sdk import August
+
+a = August("Built weather")
+a.tools["weather"] = lambda i: "built: " + open("built.txt").read()
+a.run()
+"#;
+
+/// Judges setup steps (`setup:step`): no `rm`, whatever the extension asks.
+const JUDGE: &str = r#"
+from sdk import August
+
+a = August("Judges setup steps")
+def step(d):
+    if d["command"][0] == "rm":
+        return {"block": f"no rm in setup of {d['extension']} (step {d['index']}/{d['total']})"}
+a.on("setup:step", step)
+a.run()
+"#;
+
+#[tokio::test]
+async fn setup_steps_build_an_extension_before_it_starts_and_hooks_judge_each_step() {
+    if !have_python() {
+        return;
+    }
+    let fake = Fake::llm(llm()).await;
+    let build = r#"{"command": ["python3", "main.py"],
+        "setup": [["python3", "-c", "open('built.txt', 'a').write('x')"], ["python3", "-c", "print('setup ran')"]]}"#;
+    let risky = r#"{"command": ["python3", "main.py"], "setup": [["rm", "-rf", "nothing-here"]]}"#;
+    let broken = r#"{"command": ["python3", "main.py"], "setup": [["python3", "-c", "import sys; print('bad build'); sys.exit(4)"]]}"#;
+    let home = [
+        ("config/extensions/judge.json", EARLY),
+        ("extensions/judge/extension.json", r#"{"command": ["python3", "main.py"]}"#),
+        ("extensions/judge/main.py", JUDGE),
+        ("extensions/judge/sdk.py", SDK),
+        ("extensions/weather/extension.json", build),
+        ("extensions/weather/main.py", BUILT),
+        ("extensions/weather/sdk.py", SDK),
+        ("extensions/risky/extension.json", risky),
+        ("extensions/broken/extension.json", broken),
+    ];
+    let mut gw = august(&fake, Setup { home: &home, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+
+    // Built on install, then started; the build's output is in setup's log.
+    chat.ask("what's the weather?", "Result: built: x").await;
+    let status = chat.ask("/extensions", "risky").await;
+    assert!(status.contains("❌ risky — launch blocked: setup step 1 blocked: no rm in setup of risky (step 1/1)"), "{status}");
+    assert!(status.contains("❌ broken — launch blocked: setup step 1 (python3 -c"), "{status}");
+    assert!(status.contains("failed with code 4: bad build"), "{status}");
+    let log = std::fs::read_to_string(gw.home.join("logs/extensions/setup.log")).unwrap();
+    assert!(log.contains("weather: setup 2/2: python3 -c") && log.contains("weather: setup ran"), "{log}");
+
+    // A plain restart doesn't build again; asking does.
+    gw.restart().await;
+    let mut chat = gw.chat().await;
+    chat.ask("what's the weather?", "Result: built: x").await;
+    chat.ask("/setup weather", "✅ weather").await;
+    chat.ask("what's the weather?", "Result: built: xx").await;
+}

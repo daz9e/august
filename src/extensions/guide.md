@@ -362,8 +362,14 @@ runs its `command` in the folder and speaks the same protocol over stdin/stdout
 (newline-delimited JSON; see the types at the end for the methods):
 
 ```json
-{ "command": ["python3", "main.py"], "env": { "MODE": "fast" } }
+{ "command": ["python3", "main.py"], "env": { "MODE": "fast" },
+  "setup": [["pip", "install", "-r", "requirements.txt"]] }
 ```
+
+`setup` (the default `setup` extension): commands run in the folder before it starts, when
+it is new, when its files changed, or on `/setup <name>` — build it, download it, install
+its dependencies. A failed step keeps it from starting with the step's output; `setup:step`
+hooks may change or block each step.
 
 ## Permissions
 
