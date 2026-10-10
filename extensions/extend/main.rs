@@ -74,7 +74,8 @@ async fn main() {
                     Ok(status) => status,
                     Err(e) => {
                         let log = august.call("extension_logs", json!({"name": name, "lines": 30})).await.unwrap_or_default();
-                        bail!("saved, but it failed to start:\n{e:#}\n\nIts log:\n{}", log.as_str().unwrap_or_default());
+                        let path = PathBuf::from(std::env::var("AUGUST_HOME").unwrap_or_default()).join(format!("logs/extensions/{name}.log"));
+                        bail!("saved, but it failed to start:\n{e:#}\n\nIts log ({}):\n{}", path.display(), log.as_str().unwrap_or_default());
                     }
                 };
                 let list = august.call("extensions", json!({})).await?;

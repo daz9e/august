@@ -9,8 +9,10 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Output kept to explain a failed step.
-const TAIL: usize = 2_000;
+/// Output kept to explain a failed step: its start (compilers put the first error there) and
+/// its end; all of it is in this extension's log.
+const HEAD: usize = 2_000;
+const TAIL: usize = 1_000;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -121,12 +123,27 @@ async fn run(ctx: &august_ext::Ctx, name: &str, dir: &Path, steps: &[Vec<String>
             eprintln!("{name}: {line}");
         }
         if !out.status.success() {
-            let tail: String = text.chars().rev().take(TAIL).collect::<Vec<_>>().into_iter().rev().collect();
             let code = out.status.code().map_or("a signal".into(), |c| format!("code {c}"));
-            return Err(format!("setup step {index} ({}) failed with {code}: {}", argv.join(" "), tail.trim()));
+            let log = PathBuf::from(std::env::var("AUGUST_HOME").unwrap_or_default()).join("logs/extensions/setup.log");
+            return Err(format!(
+                "setup step {index} ({}) failed with {code}: {}\n(all of its output: lines starting `{name}:` in {})",
+                argv.join(" "),
+                excerpt(text.trim()),
+                log.display()
+            ));
         }
     }
     Ok(())
+}
+
+/// `text` cut to its first HEAD and last TAIL characters.
+fn excerpt(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= HEAD + TAIL {
+        return text.to_string();
+    }
+    let (head, tail): (String, String) = (chars[..HEAD].iter().collect(), chars[chars.len() - TAIL..].iter().collect());
+    format!("{head}\n[… {} characters …]\n{tail}", chars.len() - HEAD - TAIL)
 }
 
 fn blocked(data: &Value) -> Option<String> {

@@ -412,7 +412,8 @@ async fn the_agent_installs_an_extension_in_any_language_and_august_sets_it_up()
             "sdk.py": SDK,
         });
         if text.contains("broken") {
-            reply_tool("save_extension", json!({"name": "weather", "files": files(r#"["python3", "-c", "import sys; print('no compiler'); sys.exit(2)"]"#)}))
+            let noisy = r#"["python3", "-c", "import sys; print('error: the first error'); print('help: a hint\\n' * 400); sys.exit(2)"]"#;
+            reply_tool("save_extension", json!({"name": "weather", "files": files(noisy)}))
         } else if text.contains("install") {
             reply_tool("save_extension", json!({"name": "weather", "files": files(r#"["python3", "-c", "open('built.txt', 'w').write('by setup')"]"#)}))
         } else if text.contains("escape") {
@@ -445,7 +446,11 @@ async fn the_agent_installs_an_extension_in_any_language_and_august_sets_it_up()
     chat.say("make it broken").await;
     chat.press(&chat.question().await.button("Allow")).await;
     let failed = chat.wait_for("failed to start").await;
-    assert!(failed.text.contains("setup step 1") && failed.text.contains("no compiler"), "{}", failed.text);
+    // A long build output keeps its start, where compilers put the first error, and says
+    // where all of it and the extension's own log are.
+    assert!(failed.text.contains("setup step 1") && failed.text.contains("error: the first error"), "{}", failed.text);
+    assert!(failed.text.contains("characters …]") && failed.text.contains("logs/extensions/setup.log"), "{}", failed.text);
+    assert!(failed.text.contains("logs/extensions/weather.log"), "{}", failed.text);
 
     // Files stay inside the extension's folder.
     chat.say("escape the folder").await;
