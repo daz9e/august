@@ -458,3 +458,47 @@ async fn the_agent_installs_an_extension_in_any_language_and_august_sets_it_up()
     chat.wait_for("stay inside the extension's folder").await;
     assert!(!gw.home.join("extensions/evil.py").exists());
 }
+
+/// Starts a helper process of its own and writes its pid to `child.txt`.
+const PARENT: &str = r#"
+import os, subprocess
+from sdk import August
+
+child = subprocess.Popen(["sleep", "600"])
+open("child.txt", "w").write(str(child.pid))
+a = August("Runs a helper process")
+a.commands["die"] = lambda _: os._exit(1)
+a.run()
+"#;
+
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill").args(["-0", pid]).status().is_ok_and(|s| s.success())
+}
+
+#[tokio::test]
+async fn processes_an_extension_started_die_with_it() {
+    if !have_python() {
+        return;
+    }
+    let fake = Fake::llm(llm()).await;
+    let home = [
+        ("extensions/parent/extension.json", r#"{"command": ["python3", "main.py"]}"#),
+        ("extensions/parent/main.py", PARENT),
+        ("extensions/parent/sdk.py", SDK),
+    ];
+    let gw = august(&fake, Setup { home: &home, ..Default::default() }).await;
+    let mut chat = gw.chat().await;
+    chat.ask("/extensions", "parent").await;
+    let pid = std::fs::read_to_string(gw.home.join("extensions/parent/child.txt")).unwrap();
+    assert!(alive(&pid), "the helper is running");
+
+    // The extension crashes on its own: its helper does not outlive it.
+    chat.say("/die").await;
+    for _ in 0..50 {
+        if !alive(&pid) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("helper {pid} outlived its extension");
+}

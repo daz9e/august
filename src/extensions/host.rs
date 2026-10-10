@@ -215,6 +215,11 @@ impl Host {
             tokio::spawn(async move {
                 let code = child.wait().await.ok().and_then(|s| s.code());
                 exited.store(true, Ordering::SeqCst);
+                // What it started dies with it, so a restart doesn't find the old ones running.
+                if pid > 0 {
+                    // SAFETY: plain syscall on the extension's own process group; it may be gone.
+                    unsafe { libc::killpg(pid, libc::SIGKILL) };
+                }
                 code
             })
         };
