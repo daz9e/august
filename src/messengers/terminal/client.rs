@@ -128,7 +128,7 @@ impl Screen {
                 self.open.pop_front();
                 ToAugust::Press { button }
             }
-            None => ToAugust::Text { text: line.to_string() },
+            None => ToAugust::Text { text: line.to_string(), reply_to: None },
         }
     }
 }
@@ -192,7 +192,7 @@ pub async fn run_with(first: Option<&str>) -> Result<()> {
     println!("august · terminal {thread} · /help lists commands, /exit quits.");
     let screen = Arc::new(Mutex::new(Screen::default()));
     match first {
-        Some(line) => write.write_all(send(&ToAugust::Text { text: line.into() }).as_bytes()).await?,
+        Some(line) => write.write_all(send(&ToAugust::Text { text: line.into(), reply_to: None }).as_bytes()).await?,
         None => screen.lock().unwrap().prompt(),
     }
 

@@ -709,11 +709,12 @@ impl August {
         self.changed();
     }
 
-    /// Hands August what came in to `thread` (of a messenger this extension registered) from
-    /// `user`.
-    pub async fn inbound(&self, thread: &Thread, user: &messenger::User, kind: &messenger::InboundKind) -> Result<()> {
+    /// Hands August what came in to `thread` (of a messenger this extension registered, at
+    /// `place`) from `user`.
+    pub async fn inbound(&self, thread: &Thread, place: &messenger::Place, user: &messenger::User, kind: &messenger::InboundKind) -> Result<()> {
         let mut params = serde_json::to_value(kind)?;
         params["thread"] = json!(thread);
+        params["place"] = serde_json::to_value(place)?;
         params["user"] = serde_json::to_value(user)?;
         self.0.link.call("inbound", params).await.map(drop)
     }
@@ -889,6 +890,8 @@ impl August {
             }
             "messenger_commands" => m.set_commands(&serde_json::from_value::<Vec<messenger::CommandSpec>>(p["commands"].clone())?).await.map(|_| Value::Null)?,
             "messenger_threads" => json!(m.threads().await),
+            "messenger_open_thread" => json!(m.open_thread(p["parent"].as_str().unwrap_or_default(), p["title"].as_str().unwrap_or_default()).await?),
+            "messenger_action" => m.action(thread, p["action"].as_str().unwrap_or_default(), p["args"].clone()).await?,
             "messenger_download" => {
                 use base64::Engine;
                 let bytes = m.download(&serde_json::from_value(p["file"].clone())?).await?;

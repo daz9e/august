@@ -6,7 +6,8 @@
 //!
 //! Protocol, one JSON object per line:
 //! - client → August: `{"type":"hello"}` first, then `{"type":"text","text":...}` (a
-//!   message or `/command`) and `{"type":"press","button":...}`.
+//!   message or `/command`; an optional `"reply_to":{"id":...,"text":...}` quotes one of
+//!   August's messages) and `{"type":"press","button":...}`.
 //! - August → client: `{"type":"hello","thread":...}`, `{"type":"send","id":...,"text":...,
 //!   "buttons":[[{"id":...,"label":...}]],"files":[path...]}` (button rows; files with the
 //!   text as caption), `{"type":"edit","id":...,"text":...,"buttons":[[...]]}` and
@@ -32,7 +33,11 @@ pub const ID: &str = "cli";
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ToAugust {
     Hello,
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<super::Quote>,
+    },
     Press { button: String },
 }
 
@@ -108,17 +113,19 @@ impl Clients {
         let user = User { id: format!("terminal-{id}"), name: std::env::var("USER").unwrap_or_else(|_| "you".into()) };
         while let Ok(Some(line)) = lines.next_line().await {
             let kind = match serde_json::from_str::<ToAugust>(&line) {
-                Ok(ToAugust::Text { text }) => match super::parse_command(&text, None) {
+                Ok(ToAugust::Text { text, reply_to }) => match super::parse_command(&text, None) {
                     Some((name, args)) => InboundKind::Command { name, args },
                     None => {
                         let id = format!("in-{}", self.next_message.fetch_add(1, Ordering::Relaxed));
-                        InboundKind::Message { id, text: text.trim().to_string(), files: Vec::new() }
+                        // Everything a terminal shows from the other side is August's.
+                        let reply_to = reply_to.map(|q| super::Quote { mine: true, ..q });
+                        InboundKind::Message { id, text: text.trim().to_string(), files: Vec::new(), reply_to, addressed: true }
                     }
                 },
                 Ok(ToAugust::Press { button }) => InboundKind::Press { button },
                 Ok(ToAugust::Hello) | Err(_) => continue,
             };
-            bus.publish(Inbound { thread: thread.clone(), user: user.clone(), kind });
+            bus.publish(Inbound { thread: thread.clone(), place: Default::default(), user: user.clone(), kind });
         }
         self.clients.lock().unwrap().remove(&id);
         writer.abort();
@@ -152,11 +159,10 @@ impl Messenger for Terminal {
                 reactions: false,
                 reply: false,
                 threads: true,
+                open_thread: false,
             },
-            extra: serde_json::json!({
-                "buttons": "shown numbered; the user answers with the number",
-                "threads": "one per open terminal window",
-            }),
+            notes: "Buttons are shown numbered; the user answers with the number. One thread per open terminal window.".into(),
+            actions: Vec::new(),
         }
     }
 

@@ -77,16 +77,66 @@ pub struct User {
     pub name: String,
 }
 
+/// What kind of place a thread is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaceKind {
+    /// A private chat with one person.
+    #[default]
+    Dm,
+    /// A chat of several people.
+    Group,
+    /// A broadcast channel.
+    Channel,
+    /// A thread (topic) inside another place, its `parent`.
+    Thread,
+}
+
+/// Where a thread is, as the messenger tells it with what comes in from there.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Place {
+    pub kind: PlaceKind,
+    /// The thread id of the place this one is in (a thread's chat or channel).
+    pub parent: Option<String>,
+    /// Its name, if it has one (a group's or a topic's title).
+    pub title: Option<String>,
+}
+
+/// A message another one answers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Quote {
+    pub id: String,
+    /// Its text (or caption), possibly cut short.
+    #[serde(default)]
+    pub text: String,
+    /// August sent it.
+    #[serde(default)]
+    pub mine: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum InboundKind {
     /// A message: its id in the messenger, text (or a caption) and any attached files.
+    /// `addressed`: meant for August (always in a private chat; in a group when August is
+    /// mentioned or replied to). August answers only what is addressed to it.
     Message {
         id: String,
         text: String,
         #[serde(default)]
         files: Vec<Attachment>,
+        #[serde(default)]
+        reply_to: Option<Quote>,
+        #[serde(default = "yes")]
+        addressed: bool,
     },
+    /// The user changed the text of their message `id`.
+    Edited { id: String, text: String },
     /// The user reacted to message `message` with `emoji` (an empty one: took it back).
     Reaction { message: String, emoji: String },
     /// `/name args` (without the slash).
@@ -104,9 +154,23 @@ pub struct Description {
     /// Human name, e.g. "Telegram".
     pub name: String,
     pub capabilities: Capabilities,
-    /// Anything else the messenger offers, free form.
+    /// What else to know about it, in prose for the agent and the user (e.g. how buttons
+    /// are shown, upload limits).
     #[serde(default)]
-    pub extra: serde_json::Value,
+    pub notes: String,
+    /// What it can do beyond the common contract (pin a message, start a poll, ...), called
+    /// with `Messenger::action`; the arguments are checked against `input_schema` first.
+    #[serde(default)]
+    pub actions: Vec<Action>,
+}
+
+/// An action of one messenger, described like a tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Action {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema of its arguments (`thread` is given apart).
+    pub input_schema: serde_json::Value,
 }
 
 /// What a messenger can do; what it leaves out it can't.
@@ -143,6 +207,8 @@ pub struct Capabilities {
     pub reply: bool,
     /// More than one thread (several chats or windows).
     pub threads: bool,
+    /// August can open a new thread inside a place (`Messenger::open_thread`).
+    pub open_thread: bool,
 }
 
 /// An entry of the command menu.
@@ -182,6 +248,15 @@ pub trait Messenger: Send + Sync {
     /// Fetches the contents of an inbound attachment.
     async fn download(&self, _file: &Attachment) -> Result<Vec<u8>> {
         bail!("this messenger has no attachments")
+    }
+    /// Opens a thread titled `title` inside thread `parent` (where `capabilities.open_thread`);
+    /// returns its id.
+    async fn open_thread(&self, _parent: &str, _title: &str) -> Result<String> {
+        bail!("this messenger can't open threads")
+    }
+    /// Runs one of the actions it describes, with arguments already checked; its result.
+    async fn action(&self, _thread: &str, name: &str, _args: serde_json::Value) -> Result<serde_json::Value> {
+        bail!("this messenger has no action `{name}`")
     }
 }
 

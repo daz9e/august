@@ -77,6 +77,15 @@ impl Messenger for Remote {
         self.call("messenger_commands", json!({"commands": commands}), CALL_TIMEOUT).await.map(drop)
     }
 
+    async fn open_thread(&self, parent: &str, title: &str) -> Result<String> {
+        let v = self.call("messenger_open_thread", json!({"parent": parent, "title": title}), CALL_TIMEOUT).await?;
+        Ok(v.as_str().unwrap_or_default().to_string())
+    }
+
+    async fn action(&self, thread: &str, name: &str, args: Value) -> Result<Value> {
+        self.call("messenger_action", json!({"thread": thread, "action": name, "args": args}), CALL_TIMEOUT).await
+    }
+
     async fn download(&self, file: &Attachment) -> Result<Vec<u8>> {
         let v = self.call("messenger_download", json!({"file": file}), FILE_TIMEOUT).await?;
         Ok(base64::engine::general_purpose::STANDARD.decode(v.as_str().unwrap_or_default())?)

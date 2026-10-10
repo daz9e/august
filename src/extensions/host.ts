@@ -250,6 +250,8 @@ const api = {
   edit: (thread: Thread, id: string, message: Message) => call("edit", { thread, id, message }),
   delete: (thread: Thread, id: string) => call("delete", { thread, id }),
   react: (thread: Thread, id: string, emoji: string) => call("react", { thread, id, emoji }),
+  openThread: (thread: Thread, title: string) => call("open_thread", { thread, title }),
+  action: (thread: Thread, action: string, args: object = {}) => call("action", { thread, action, args }),
   download: (thread: Thread, file: any, path: string) => call("download", { thread, file, path }),
   listen: (thread: Thread, opts: { buttons?: string[]; text?: boolean; ttl?: number } = {}) =>
     call("listen", { thread, buttons: opts.buttons ?? [], text: opts.text ?? false, ttl_ms: opts.ttl ?? 600_000 }),

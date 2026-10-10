@@ -1,5 +1,6 @@
 //! The Telegram messenger against a fake Bot API: replies as HTML, questions as inline
-//! buttons whose presses come back, the command menu, and strangers turned away. Features
+//! buttons whose presses come back, the command menu, strangers turned away, group chatter
+//! left unanswered, its own action (pin) and forum topics. Features
 //! themselves are tested through the terminal messenger; this is the adapter.
 
 use crate::support::*;
@@ -80,8 +81,16 @@ async fn reactions_go_both_ways() {
         "user": {"id": OWNER, "is_bot": false, "first_name": "Owner"},
         "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": "👍"}],
     }});
-    let fake = Fake::start(vec![message(1, json!({"text": "hi"})), reaction], HashMap::new(), Some(Box::new(|_| reply_text("ok")))).await;
-    let _gw = august(&fake, Setup { telegram: true, home: &[("extensions/react/index.ts", REACT)], ..Default::default() }).await;
+    let fake = Fake::start(Vec::new(), HashMap::new(), Some(Box::new(|_| reply_text("ok")))).await;
+    let gw = august(&fake, Setup { telegram: true, home: &[("extensions/react/index.ts", REACT)], ..Default::default() }).await;
+    // Its hooks see only what comes in once it runs.
+    let log = gw.home.join("logs/extensions/react.log");
+    let start = std::time::Instant::now();
+    while !std::fs::read_to_string(&log).unwrap_or_default().contains("running") {
+        assert!(start.elapsed() < TIMEOUT, "react did not start");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    fake.push_updates(vec![message(1, json!({"text": "hi"})), reaction]);
 
     // August reacts to the user's message…
     fake.wait_for(TIMEOUT, |f| !f.calls("setMessageReaction").is_empty()).await;
@@ -126,4 +135,57 @@ async fn login_connects_the_bot_and_pairs_the_owner() {
     // Now the owner talks to August in Telegram.
     fake.push_updates(vec![message(2, json!({"text": "hello"}))]);
     fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("hello from August"))).await;
+}
+
+#[tokio::test]
+async fn in_a_group_only_what_is_addressed_is_answered() {
+    let group = |id: i64, text: &str| {
+        let mut u = message(id, json!({"text": text}));
+        u["message"]["chat"] = json!({"id": -100, "type": "supergroup", "title": "Family"});
+        u
+    };
+    let llm: Llm = Box::new(|_| reply_text("answered"));
+    let fake = Fake::start(vec![group(1, "dinner at 8?"), group(2, "@AugustBot what's the weather")], HashMap::new(), Some(llm)).await;
+    let _gw = august(&fake, Setup { telegram: true, ..Default::default() }).await;
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("answered"))).await;
+    let requests = fake.llm_requests();
+    assert_eq!(requests.len(), 1);
+    let seen = requests[0].to_string();
+    assert!(seen.contains("what's the weather") && !seen.contains("dinner at 8"), "{seen}");
+}
+
+#[tokio::test]
+async fn the_agent_uses_telegram_actions_and_opens_topics() {
+    let llm: Llm = Box::new(|req| {
+        let msgs = req["messages"].as_array().unwrap();
+        let results: Vec<String> = msgs.iter().filter(|m| m["role"] == "tool").map(|m| m["content"].to_string()).collect();
+        let call = |name: &str, args: serde_json::Value| reply_tool(name, args);
+        match results.len() {
+            0 => call("messengers", json!({})),
+            1 => {
+                assert!(results[0].contains("action pin") && results[0].contains("open_thread"), "{}", results[0]);
+                call("messenger_action", json!({"messenger": "telegram", "thread": "5", "action": "pin", "args": {}}))
+            }
+            2 => {
+                assert!(results[1].contains("missing `message`"), "{}", results[1]);
+                call("messenger_action", json!({"messenger": "telegram", "thread": "5", "action": "pin", "args": {"message": "1"}}))
+            }
+            3 => call("open_thread", json!({"messenger": "telegram", "thread": "5", "title": "Trip"})),
+            4 => {
+                assert!(results[3].contains("5/77"), "{}", results[3]);
+                call("send_message", json!({"messenger": "telegram", "thread": "5/77", "text": "plans go here"}))
+            }
+            _ => reply_text("all set"),
+        }
+    });
+    let fake = Fake::start(vec![message(1, json!({"text": "pin this and start a topic"}))], HashMap::new(), Some(llm)).await;
+    let _gw = august(&fake, Setup { telegram: true, ..Default::default() }).await;
+    fake.wait_for(TIMEOUT, |f| f.sent_texts().iter().any(|t| t.contains("all set"))).await;
+
+    let pins = fake.calls("pinChatMessage");
+    assert_eq!(pins.len(), 1, "the call with bad arguments never reaches Telegram");
+    assert_eq!(pins[0].json()["message_id"], 1);
+    assert_eq!(fake.calls("createForumTopic")[0].json()["name"], "Trip");
+    let topic = fake.calls("sendMessage").into_iter().map(|r| r.json()).find(|m| m["text"].as_str().is_some_and(|t| t.contains("plans go here"))).unwrap();
+    assert_eq!((topic["chat_id"].as_i64(), topic["message_thread_id"].as_i64()), (Some(5), Some(77)));
 }

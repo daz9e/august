@@ -77,4 +77,10 @@ impl Messenger for Hooked {
     async fn download(&self, file: &Attachment) -> Result<Vec<u8>> {
         self.inner.download(file).await
     }
+    async fn open_thread(&self, parent: &str, title: &str) -> Result<String> {
+        self.inner.open_thread(parent, title).await
+    }
+    async fn action(&self, thread: &str, name: &str, args: Value) -> Result<Value> {
+        self.inner.action(thread, name, args).await
+    }
 }

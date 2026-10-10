@@ -37,12 +37,14 @@ impl Thread {
 }
 
 pub use august_ext::messenger::{
-    Attachment, Button, Capabilities, CommandSpec, Description, FileKind, InboundKind, OutMessage, User, parse_command,
+    Action, Attachment, Button, Capabilities, CommandSpec, Description, FileKind, InboundKind, OutMessage, Place, PlaceKind, Quote, User,
+    parse_command,
 };
 
 #[derive(Debug, Clone)]
 pub struct Inbound {
     pub thread: Thread,
+    pub place: Place,
     pub user: User,
     pub kind: InboundKind,
 }
@@ -78,6 +80,14 @@ pub trait Messenger: Send + Sync {
     async fn set_commands(&self, commands: &[CommandSpec]) -> Result<()>;
     /// Fetches the contents of an inbound attachment.
     async fn download(&self, file: &Attachment) -> Result<Vec<u8>>;
+    /// Opens a thread titled `title` inside `parent` (where `capabilities.open_thread`).
+    async fn open_thread(&self, _parent: &str, _title: &str) -> Result<String> {
+        anyhow::bail!("this messenger can't open threads")
+    }
+    /// Runs one of `describe().actions`; the arguments are checked by then.
+    async fn action(&self, _thread: &str, name: &str, _args: serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("this messenger has no action `{name}`")
+    }
 }
 
 /// The messengers built into the core: the terminal. The rest come from extensions.

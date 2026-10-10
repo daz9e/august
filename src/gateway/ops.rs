@@ -33,13 +33,15 @@ pub const OPS: &[Op] = &[
     op("tools", None, "Every agent tool: {name, description, parameters, owner}"),
     op("commands", None, "Every slash command: {name, description, owner}"),
     op("status", None, "{provider, model, workspace, busy} (busy: of `thread`, if given)"),
-    op("messengers", MESSAGING, "Every messenger with its capabilities and threads"),
+    op("messengers", MESSAGING, "Every messenger with its capabilities, notes, actions and threads (each with its place: dm|group|channel|thread, parent, title)"),
     op("send", MESSAGING, "Send {thread, message}; returns its id"),
     op("edit", MESSAGING, "Replace a sent message {thread, id, message}"),
     op("delete", MESSAGING, "Delete a sent message {thread, id}"),
     op("react", MESSAGING, "React to a message {thread, id, emoji}"),
+    op("open_thread", MESSAGING, "Open a thread titled {title} inside {thread} (where the messenger can `open_thread`); returns the new thread"),
+    op("action", MESSAGING, "Run one of the messenger's described {action}s in {thread} with {args} (checked against its schema); returns its result"),
     op("download", MESSAGING, "Save attachment {file} of a message in {thread} (one of `message_in`'s `files`) to {path} (relative: in the workspace); returns {path, size}"),
-    op("inbound", None, "Hand in what came to {thread} of a messenger you offer from {user: {id, name}}: {kind: message|command|press|reaction, ...}"),
+    op("inbound", None, "Hand in what came to {thread} of a messenger you offer from {user: {id, name}} at {place: {kind: dm|group|channel|thread, parent, title}}: {kind: message|edited|command|press|reaction, ...}"),
     op("listen", MESSAGING, "Listen in {thread} for {buttons, text}; returns a listener id. With {secret} a text taken is deleted from the chat"),
     op("next", MESSAGING, "What {listener} took"),
     op("prompt", MESSAGING, "Hand {thread} a message as if the user sent it"),
@@ -171,10 +173,26 @@ impl Gateway {
                     _ => m.react(&t.id, arg("id")?, p["emoji"].as_str().unwrap_or("")).await.map(|_| Value::Null)?,
                 }
             }
+            "open_thread" => {
+                let t = thread(p)?;
+                let id = self.messenger(&t)?.open_thread(&t.id, arg("title")?).await?;
+                json!({"messenger": t.messenger, "id": id})
+            }
+            "action" => {
+                let t = thread(p)?;
+                let m = self.messenger(&t)?;
+                let name = arg("action")?;
+                let d = m.describe();
+                let spec = d.actions.iter().find(|a| a.name == name).ok_or_else(|| anyhow!("{} has no action `{name}`", d.name))?;
+                let args = if p["args"].is_null() { json!({}) } else { p["args"].clone() };
+                crate::extensions::check(&spec.input_schema, &args).map_err(|e| anyhow!("`{name}` arguments: {e}"))?;
+                m.action(&t.id, name, args).await?
+            }
             "inbound" => {
                 let t = thread(p)?;
                 anyhow::ensure!(self.ext.messenger_owner(&t.messenger).await.as_deref() == Some(ext), "`{}` is not a messenger you offer", t.messenger);
-                let ev = crate::messengers::Inbound { thread: t, user: serde_json::from_value(p["user"].clone())?, kind: serde_json::from_value(p.clone())? };
+                let place = if p["place"].is_null() { Default::default() } else { serde_json::from_value(p["place"].clone()).map_err(|e| anyhow!("bad `place`: {e}"))? };
+                let ev = crate::messengers::Inbound { thread: t, place, user: serde_json::from_value(p["user"].clone())?, kind: serde_json::from_value(p.clone())? };
                 let gw = self.clone();
                 tokio::spawn(async move {
                     if let Err(e) = gw.handle(ev).await {
@@ -192,13 +210,14 @@ impl Gateway {
             "prompt" => {
                 let t = thread(p)?;
                 let m = self.messenger(&t)?;
-                let (gw, text) = (self.clone(), arg("text")?.to_string());
                 let source = p["source"].as_str().map(String::from).unwrap_or_else(|| caller.clone());
-                let deliver = p["deliver"].as_str().unwrap_or("steer").to_string();
-                anyhow::ensure!(["steer", "followUp", "nextTurn"].contains(&deliver.as_str()), "`deliver` is steer, followUp or nextTurn");
+                let deliver = p["deliver"].as_str().unwrap_or("steer");
+                anyhow::ensure!(["steer", "followUp", "nextTurn"].contains(&deliver), "`deliver` is steer, followUp or nextTurn");
+                let message = json!({"text": arg("text")?, "source": source, "deliver": deliver});
+                let gw = self.clone();
                 // Not awaited: the caller may be inside a turn of that very thread.
                 tokio::spawn(async move {
-                    if let Err(e) = gw.deliver(m, t, None, text, json!([]), &source, &deliver).await {
+                    if let Err(e) = gw.deliver(m, t, message).await {
                         eprintln!("gateway: {e:#}");
                     }
                 });
@@ -523,14 +542,16 @@ impl Gateway {
                     ids.push(t.id.clone());
                 }
             }
+            let places = self.places.lock().unwrap().clone();
             let threads: Vec<Value> = ids
                 .into_iter()
                 .map(|id| {
                     let thread = Thread::new(&d.id, &id);
-                    json!({"id": id, "active": active.as_ref() == Some(&thread), "last_seen": seen.get(&thread)})
+                    let place = places.get(&thread).cloned().unwrap_or_default();
+                    json!({"id": id, "active": active.as_ref() == Some(&thread), "last_seen": seen.get(&thread), "place": place})
                 })
                 .collect();
-            out.push(json!({"id": d.id, "name": d.name, "capabilities": d.capabilities, "extra": d.extra, "threads": threads}));
+            out.push(json!({"id": d.id, "name": d.name, "capabilities": d.capabilities, "notes": d.notes, "actions": d.actions, "threads": threads}));
         }
         Value::Array(out)
     }

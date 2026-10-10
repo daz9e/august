@@ -1,6 +1,6 @@
 //! How August talks to the user: who it is and how its replies are shown (the start of the
 //! system prompt), the time on each message, who a message is from when not the user
-//! (`[from <source>]`), and what happens to a message sent while it works (acknowledged,
+//! (`[from <source>]`), the message one answers (quoted), and what happens to a message sent while it works (acknowledged,
 //! marked for the model).
 
 use august_ext::August;
@@ -57,12 +57,21 @@ async fn main() {
 
     august.on("message_in", move |data, ctx| async move {
         let text = data["text"].as_str().unwrap_or_default();
+        let text = &match data["reply_to"]["text"].as_str().filter(|q| !q.trim().is_empty()) {
+            Some(quote) => {
+                let whose = if data["reply_to"]["mine"] == true { "your" } else { "a" };
+                let quoted: String = quote.lines().map(|l| format!("> {l}\n")).collect();
+                format!("(replying to {whose} message)\n{quoted}\n{text}")
+            }
+            None => text.to_string(),
+        };
         let from = match data["source"].as_str() {
             Some(s) if s != "user" => format!("[from {s}] "),
             _ => String::new(),
         };
         if data["steer"] != true {
-            return Ok((!from.is_empty()).then(|| json!({"text": format!("{from}{text}")})));
+            let changed = !from.is_empty() || !data["reply_to"].is_null();
+            return Ok(changed.then(|| json!({"text": format!("{from}{text}")})));
         }
         if from.is_empty() {
             ctx.send("↪️ Got it, I'll take this into account.").await?;

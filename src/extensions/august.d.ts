@@ -16,6 +16,10 @@ declare module "august" {
    *  it its own way, degrading what it can't show. */
   export type OutMessage = string | { text: string; buttons?: Button[] | Button[][]; files?: string[]; reply_to?: string };
 
+  /** Where a thread is: a private chat, a group, a channel, or a thread (topic) inside
+   *  `parent` (a thread id of the same messenger). */
+  export type Place = { kind: "dm" | "group" | "channel" | "thread"; parent: string | null; title: string | null };
+
   /** What a messenger says about itself. */
   export interface Messenger {
     id: string;
@@ -24,11 +28,15 @@ declare module "august" {
       markdown: boolean; max_len: number; buttons: number; edit: boolean; edit_interval_ms: number;
       files_in: boolean; files_out: boolean; images: boolean; audio_in: boolean;
       commands: boolean; presence: boolean; delete: boolean; reactions: boolean; reply: boolean; threads: boolean;
+      /** It can open a thread inside one of its threads (`august.openThread`). */
+      open_thread: boolean;
     };
-    /** Anything else it offers, free form. */
-    extra: Record<string, unknown>;
+    /** What else to know about it, in prose. */
+    notes: string;
+    /** What this messenger alone can do, described like tools; run with `august.action`. */
+    actions: { name: string; description: string; input_schema: object }[];
     /** Threads it knows of; `active` is the one the user wrote in last. */
-    threads: { id: string; active: boolean; /** Unix ms of the last message from it. */ last_seen: number | null }[];
+    threads: { id: string; active: boolean; /** Unix ms of the last message from it. */ last_seen: number | null; place: Place }[];
   }
 
   /** What a listener took: a button press or a text message; or why nothing came. */
@@ -183,6 +191,13 @@ declare module "august" {
       deliver: "steer" | "followUp" | "nextTurn";
       /** It would join the turn running now instead of starting one. */
       steer: boolean;
+      /** Meant for August (false: e.g. group chatter without a mention). Nothing runs for
+       *  a message left unaddressed; set it to true to have the agent answer. */
+      addressed: boolean;
+      /** The message it answers (`conversation` quotes it for the agent). `mine`: August sent it. */
+      reply_to?: { id: string; text: string; mine: boolean } | null;
+      /** Where it was written (messages from a messenger). */
+      place?: Place;
     };
     /** A turn is about to start; `system` is the base system prompt (empty unless a
      *  sub-agent's; the `conversation` extension writes August's). */
@@ -242,6 +257,8 @@ declare module "august" {
     turn_settled: {};
     /** The user reacted to `message` with `emoji` (empty: took it back). Observe only. */
     reaction: { message: string; emoji: string };
+    /** The user changed the text of their message `id`. Observe only. */
+    message_edited: { id: string; text: string };
     /** An extension started, failed, crashed or was turned off (observe only; background).
      *  `error` says why it failed or crashed (the last lines it wrote to stderr). */
     extension_state: { name: string; state: "running" | "failed" | "disabled"; error: string | null };
@@ -290,7 +307,7 @@ declare module "august" {
     /** `handled: true` swallows the message (optionally answering with `reply`). */
     /** `images` are shown to the model (a message with images starts its own turn);
      *  `deliver` changes how it reaches the agent. */
-    message_in: { text?: string; handled?: boolean; reply?: string; files?: any[]; images?: { path: string; mime: string }[]; deliver?: "steer" | "followUp" | "nextTurn"; steer?: boolean };
+    message_in: { text?: string; handled?: boolean; reply?: string; files?: any[]; images?: { path: string; mime: string }[]; deliver?: "steer" | "followUp" | "nextTurn"; steer?: boolean; addressed?: boolean };
     before_turn: { text?: string; system?: string };
     /** Changed fields replace the message's; `block: true` drops it. */
     message_out: { text?: string; buttons?: { id: string; label: string }[][]; files?: string[]; block?: boolean };
@@ -305,6 +322,7 @@ declare module "august" {
     config_changed: void;
     stop: void;
     reaction: void;
+    message_edited: void;
     shutdown: void;
     /** `model` switches to another one instead; `block` (a reason) refuses the switch. */
     model_select: { model?: string; block?: string };
@@ -431,6 +449,11 @@ declare module "august" {
     delete(thread: Thread, id: string): Promise<void>;
     /** Sets August's emoji reaction on any message, the user's too (empty removes it). */
     react(thread: Thread, id: string, emoji: string): Promise<void>;
+    /** Opens a thread titled `title` inside `thread` (where `capabilities.open_thread`). */
+    openThread(thread: Thread, title: string): Promise<{ messenger: string; id: string }>;
+    /** Runs one of the messenger's `actions` in `thread`; `args` are checked against its
+     *  `input_schema`. Resolves to its result. */
+    action(thread: Thread, action: string, args?: object): Promise<any>;
     /** Saves an attachment of a message in `thread` (one of `message_in`'s `files`) to
      *  `path` (relative: in the workspace). */
     download(thread: Thread, file: any, path: string): Promise<{ path: string; size: number }>;

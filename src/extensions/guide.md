@@ -179,8 +179,17 @@ in `hooks.order` gets it.
 
 Messengers and messages — August's primitives, usable for any thread:
 - `await august.messengers()` lists every messenger with what it can do (`capabilities`:
-  Markdown, buttons, edits, files, images, audio, threads, ...; plus free-form `extra`) and
-  its threads, the one the user wrote in last marked `active`.
+  Markdown, buttons, edits, files, images, audio, threads, ...), `notes` in prose, its own
+  `actions` (described like tools) and its threads with their `place` (`dm`, `group`,
+  `channel`, or a `thread` inside a `parent`), the one the user wrote in last marked `active`.
+- What only one messenger can do (pin a message, ...) is one of its `actions`:
+  `await august.action(thread, "pin", { message: id })`, the arguments checked against its
+  schema. `await august.openThread(thread, "Title")` opens a thread inside one (a forum
+  topic) where `capabilities.open_thread`.
+- A message in a group may not be meant for August: `message_in` has `addressed: false`
+  then, and nothing runs unless a hook sets it to true. `reply_to` `{ id, text, mine }` is the
+  message it answers (the default `conversation` extension quotes it for the agent). An edit of the user's message arrives as the
+  `message_edited` event `{ id, text }`.
 - `await august.send(thread, { text, buttons: [{ id, label }] })` sends a message (a plain
   string works too) and returns its id; `august.edit(thread, id, message)` replaces it.
   `ctx.send(message)` sends to `ctx.thread`. A message can also carry button rows

@@ -44,6 +44,8 @@ pub struct Gateway {
     listeners: StdMutex<HashMap<u64, tokio::sync::oneshot::Receiver<waits::Reply>>>,
     /// When each thread last sent something (Unix milliseconds).
     activity: StdMutex<HashMap<Thread, i64>>,
+    /// Where each thread is, as its messenger last told.
+    places: StdMutex<HashMap<Thread, crate::messengers::Place>>,
     provider: RwLock<Arc<dyn LlmProvider>>,
     /// `(provider, model)` in use.
     model: RwLock<(String, String)>,
@@ -92,6 +94,7 @@ impl Gateway {
             turns: Default::default(),
             listeners: Default::default(),
             activity: Default::default(),
+            places: Default::default(),
             provider: RwLock::new(provider),
             model: RwLock::new(model),
             workspace,
@@ -203,21 +206,34 @@ impl Gateway {
         Ok(Some(data))
     }
 
-    /// Hands the chat a message from `source` (`user`, or e.g. `ext:goal`) after the
-    /// `message_in` hook, which may change its text, add `images` (`[{path, mime}]`) or its
+    /// Hands the chat `message` after the `message_in` hook: `{text, source, deliver}` and
+    /// optionally the messenger's `id`, `files` (attachments, for hooks to `download`),
+    /// `reply_to` (the message it answers), `addressed` (false: not meant for August, so
+    /// nothing runs unless a hook sets it) and `place`. `source` is `user`, or e.g.
+    /// `ext:goal`. The hook may change its text, add `images` (`[{path, mime}]`) or its
     /// `deliver`: `steer` joins the running turn or starts one, `followUp` runs as its own
     /// turn after the current one, `nextTurn` waits for the next turn without starting one.
-    /// `files` are the messenger's attachments, for hooks to `download`.
-    pub(super) async fn deliver(self: &Arc<Self>, channel: Arc<dyn Messenger>, thread: Thread, message: Option<String>, text: String, files: Value, source: &str, deliver: &str) -> Result<()> {
+    pub(super) async fn deliver(self: &Arc<Self>, channel: Arc<dyn Messenger>, thread: Thread, mut message: Value) -> Result<()> {
         let state = self.chat(&thread).await?;
         let intake = state.intake.lock().await;
+        let deliver = message["deliver"].as_str().unwrap_or("steer").to_string();
         // ponytail: the turn may end while `message_in` runs; then a message marked as
         // steering runs as the next turn. Hold the turn's end on intake if that matters.
-        let steer = deliver == "steer" && state.inbox.steers();
-        let data = serde_json::json!({"id": message, "text": text, "files": files, "source": source, "deliver": deliver, "steer": steer});
-        let Some(data) = self.message_in(&channel, &thread, data).await? else {
+        message["steer"] = (deliver == "steer" && state.inbox.steers()).into();
+        if message["addressed"].is_null() {
+            message["addressed"] = true.into();
+        }
+        if message["files"].is_null() {
+            message["files"] = serde_json::json!([]);
+        }
+        let Some(data) = self.message_in(&channel, &thread, message).await? else {
             return Ok(());
         };
+        // ponytail: what isn't addressed is dropped, not kept as context; stash it for the
+        // next turn if group chats need the conversation around a question.
+        if data["addressed"] == false {
+            return Ok(());
+        }
         let text = data["text"].as_str().unwrap_or_default().to_string();
         let images: Vec<Block> = data["images"].as_array().into_iter().flatten().filter_map(|i| {
             Some(Block::Image { media_type: i["mime"].as_str()?.into(), path: i["path"].as_str()?.into() })
@@ -225,7 +241,7 @@ impl Gateway {
         if text.is_empty() && images.is_empty() {
             return Ok(());
         }
-        match data["deliver"].as_str().unwrap_or(deliver) {
+        match data["deliver"].as_str().unwrap_or(&deliver) {
             "nextTurn" => return Ok(state.inbox.stash(&text)),
             // While a turn runs, plain text goes to it instead of waiting for it to end.
             "steer" if images.is_empty() && state.inbox.offer(&text) => return Ok(()),
@@ -244,7 +260,10 @@ impl Gateway {
             return Ok(());
         };
         let chat = ev.thread.id.clone();
-        self.activity.lock().unwrap().insert(ev.thread.clone(), chrono::Utc::now().timestamp_millis());
+        self.places.lock().unwrap().insert(ev.thread.clone(), ev.place.clone());
+        if !matches!(ev.kind, InboundKind::Message { addressed: false, .. }) {
+            self.activity.lock().unwrap().insert(ev.thread.clone(), chrono::Utc::now().timestamp_millis());
+        }
         // What something waits for (the answer to a question) goes there first.
         if let Some(secret) = self.waits.offer(&ev) {
             if secret && let InboundKind::Message { id, .. } = &ev.kind {
@@ -262,10 +281,19 @@ impl Gateway {
                     self.ext.emit("reaction", data, &extensions::Origin::thread(ev.thread.clone())).await;
                 }
             }
+            InboundKind::Edited { id, text } => {
+                if self.ext.listens("message_edited") {
+                    let data = serde_json::json!({"id": id, "text": text});
+                    self.ext.emit("message_edited", data, &extensions::Origin::thread(ev.thread.clone())).await;
+                }
+            }
             InboundKind::Message { text, files, .. } if text.is_empty() && files.is_empty() => {}
-            InboundKind::Message { id: message, text, files } => {
-                let files = serde_json::to_value(files)?;
-                self.deliver(channel, ev.thread, Some(message), text, files, "user", "steer").await?;
+            InboundKind::Message { id: message, text, files, reply_to, addressed } => {
+                let message = serde_json::json!({
+                    "id": message, "text": text, "files": files, "source": "user", "deliver": "steer",
+                    "reply_to": reply_to, "addressed": addressed, "place": ev.place,
+                });
+                self.deliver(channel, ev.thread, message).await?;
             }
         }
         Ok(())

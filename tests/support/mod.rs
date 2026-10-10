@@ -195,6 +195,7 @@ async fn handle(State(s): State<Arc<Inner>>, method: Method, uri: Uri, headers: 
             let id = params["file_id"].as_str().unwrap_or("");
             ok(json!({"file_id": id, "file_path": id}))
         }
+        "createForumTopic" => ok(json!({"message_thread_id": 77, "name": params["name"]})),
         "sendMessage" | "sendPhoto" | "sendDocument" => {
             ok(json!({"message_id": s.next_id.fetch_add(1, Ordering::SeqCst)}))
         }
@@ -454,6 +455,11 @@ impl Chat {
     /// Sends a message (or a `/command`).
     pub async fn say(&mut self, text: &str) {
         self.put(json!({"type": "text", "text": text})).await;
+    }
+
+    /// Sends a message answering `to` (quoting it).
+    pub async fn reply(&mut self, to: &Msg, text: &str) {
+        self.put(json!({"type": "text", "text": text, "reply_to": {"id": to.id, "text": to.text}})).await;
     }
 
     pub async fn press(&mut self, button: &str) {

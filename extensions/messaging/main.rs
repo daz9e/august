@@ -1,12 +1,24 @@
 //! The agent's own use of the messenger primitives: see which messengers and threads there
 //! are (`messengers`), write to any of them (`send_message`), e.g. from the terminal to
-//! the user's Telegram, and hand the user a file from the workspace (`send_file`).
+//! the user's Telegram, hand the user a file from the workspace (`send_file`), open a thread
+//! (`open_thread`) and use what one messenger alone can do (`messenger_action`).
 
 use anyhow::bail;
 use august_ext::{August, Thread, str_arg};
 use serde_json::{Value, json};
 
-/// One line per messenger: what it can do and its threads, the active one starred.
+/// A thread's place, e.g. ` (group "Family")`; nothing for a private chat.
+fn place(p: &Value) -> String {
+    let kind = p["kind"].as_str().unwrap_or("dm");
+    if kind == "dm" {
+        return String::new();
+    }
+    let title = p["title"].as_str().map(|t| format!(" \"{t}\"")).unwrap_or_default();
+    let parent = p["parent"].as_str().map(|t| format!(" in {t}")).unwrap_or_default();
+    format!(" ({kind}{title}{parent})")
+}
+
+/// Per messenger: what it can do, its notes, actions and threads, the active one starred.
 fn describe(all: &Value) -> String {
     let lines: Vec<String> = all
         .as_array()
@@ -14,7 +26,7 @@ fn describe(all: &Value) -> String {
         .flatten()
         .map(|m| {
             let c = &m["capabilities"];
-            let can: Vec<&str> = [("buttons", c["buttons"].as_u64().unwrap_or(0) > 0), ("files", c["files_out"] == true), ("images", c["images"] == true), ("reactions", c["reactions"] == true)]
+            let can: Vec<&str> = [("buttons", c["buttons"].as_u64().unwrap_or(0) > 0), ("files", c["files_out"] == true), ("images", c["images"] == true), ("reactions", c["reactions"] == true), ("open_thread", c["open_thread"] == true)]
                 .into_iter()
                 .filter_map(|(name, has)| has.then_some(name))
                 .collect();
@@ -22,9 +34,16 @@ fn describe(all: &Value) -> String {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|t| format!("{}{}", t["id"].as_str().unwrap_or("?"), if t["active"] == true { "*" } else { "" }))
+                .map(|t| format!("{}{}{}", t["id"].as_str().unwrap_or("?"), place(&t["place"]), if t["active"] == true { "*" } else { "" }))
                 .collect();
-            format!("{} ({}; {}) threads: {}", m["id"].as_str().unwrap_or("?"), m["name"].as_str().unwrap_or(""), can.join(", "), threads.join(", "))
+            let mut out = format!("{} ({}; {}) threads: {}", m["id"].as_str().unwrap_or("?"), m["name"].as_str().unwrap_or(""), can.join(", "), threads.join(", "));
+            if let Some(notes) = m["notes"].as_str().filter(|n| !n.is_empty()) {
+                out += &format!("\n  {notes}");
+            }
+            for a in m["actions"].as_array().into_iter().flatten() {
+                out += &format!("\n  action {}: {} args {}", a["name"].as_str().unwrap_or("?"), a["description"].as_str().unwrap_or(""), a["input_schema"]);
+            }
+            out
         })
         .collect();
     format!("{}\n(* = where the user wrote last)", lines.join("\n"))
@@ -74,6 +93,56 @@ async fn main() {
                 }
                 august.send(&thread, text, &[]).await?;
                 Ok(format!("sent to {}", thread.key()))
+            }
+        },
+    );
+    let me = august.clone();
+    august.register_tool(
+        "open_thread",
+        "Open a new thread (e.g. a forum topic) inside a thread of a messenger that can \
+         (`open_thread` in `messengers`), to keep a task's conversation apart; returns its id.",
+        json!({
+            "type": "object",
+            "properties": {
+                "messenger": {"type": "string"},
+                "thread": {"type": "string", "description": "the thread to open it in"},
+                "title": {"type": "string"}
+            },
+            "required": ["messenger", "thread", "title"],
+            "additionalProperties": false
+        }),
+        move |input, _| {
+            let august = me.clone();
+            async move {
+                let thread = json!({"messenger": str_arg(&input, "messenger"), "id": str_arg(&input, "thread")});
+                let opened = august.call("open_thread", json!({"thread": thread, "title": str_arg(&input, "title")})).await?;
+                Ok(format!("opened thread {}", opened["id"].as_str().unwrap_or("?")))
+            }
+        },
+    );
+    let me = august.clone();
+    august.register_tool(
+        "messenger_action",
+        "Do something only one messenger can (pin a message, ...): an action `messengers` lists \
+         for it, with arguments matching its schema.",
+        json!({
+            "type": "object",
+            "properties": {
+                "messenger": {"type": "string"},
+                "thread": {"type": "string"},
+                "action": {"type": "string"},
+                "args": {"type": "object"}
+            },
+            "required": ["messenger", "thread", "action"],
+            "additionalProperties": false
+        }),
+        move |input, _| {
+            let august = me.clone();
+            async move {
+                let thread = json!({"messenger": str_arg(&input, "messenger"), "id": str_arg(&input, "thread")});
+                let params = json!({"thread": thread, "action": str_arg(&input, "action"), "args": input["args"]});
+                let result = august.call("action", params).await?;
+                Ok(if result.is_null() { "done".to_string() } else { result.to_string() })
             }
         },
     );

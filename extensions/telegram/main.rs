@@ -1,6 +1,7 @@
 //! `telegram`: August in Telegram, as a bot. Long polling, Markdown → HTML, inline buttons
 //! in rows, edits for streaming, uploads as photos or documents, reactions both ways, an
-//! allowlist of user ids (others are turned away) and groups only when addressed.
+//! allowlist of user ids (others are turned away), groups (a message is addressed when the
+//! bot is mentioned or replied to) and forum topics as threads (`<chat>/<topic>`).
 //!
 //! Connecting is the account `telegram` (`/login telegram`, `august connect telegram`): the
 //! bot token from @BotFather, then the owner pairs by messaging the bot. The token is a
@@ -15,8 +16,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use api::Api;
 use async_trait::async_trait;
 use august_ext::messenger::{
-    Attachment, Button, Capabilities, CommandSpec, Description, FileKind, InboundKind, Messenger, OutMessage, User,
-    parse_command,
+    Action, Attachment, Button, Capabilities, CommandSpec, Description, FileKind, InboundKind, Messenger, OutMessage, Place,
+    PlaceKind, Quote, User, parse_command,
 };
 use august_ext::{August, Login, Signed, Thread};
 use serde_json::{Value, json};
@@ -47,12 +48,50 @@ struct Bot {
     username: String,
 }
 
-/// What came in to chat `chat` from `user`.
+/// What came in to `thread` (a chat, or `<chat>/<topic>`) at `place` from `user`.
 #[derive(Debug)]
 struct Event {
-    chat: i64,
+    thread: String,
+    place: Place,
     user: User,
     kind: InboundKind,
+}
+
+/// The thread of message `m`: its chat, or the forum topic in it.
+fn thread_of(m: &Value) -> String {
+    let chat = m["chat"]["id"].as_i64().unwrap_or(0);
+    match m["message_thread_id"].as_i64().filter(|_| m["is_topic_message"] == true) {
+        Some(topic) => format!("{chat}/{topic}"),
+        None => chat.to_string(),
+    }
+}
+
+/// Where message `m` was written.
+fn place_of(m: &Value) -> Place {
+    let chat = &m["chat"];
+    let title = chat["title"].as_str().map(str::to_string);
+    if m["is_topic_message"] == true {
+        // A topic's messages answer the message that created it, which carries its name.
+        let topic = m["reply_to_message"]["forum_topic_created"]["name"].as_str().map(str::to_string);
+        return Place { kind: PlaceKind::Thread, parent: chat["id"].as_i64().map(|c| c.to_string()), title: topic.or(title) };
+    }
+    let kind = match chat["type"].as_str() {
+        Some("private") => PlaceKind::Dm,
+        Some("channel") => PlaceKind::Channel,
+        _ => PlaceKind::Group,
+    };
+    Place { kind, parent: None, title }
+}
+
+/// The message `m` answers, unless that is only its topic's start.
+fn quote_of(m: &Value, bot: &Bot) -> Option<Quote> {
+    let r = &m["reply_to_message"];
+    let id = r["message_id"].as_i64()?;
+    if r["forum_topic_created"].is_object() || m["message_thread_id"].as_i64() == Some(id) && m["is_topic_message"] == true {
+        return None;
+    }
+    let text: String = r["text"].as_str().or(r["caption"].as_str()).unwrap_or("").chars().take(1000).collect();
+    Some(Quote { id: id.to_string(), text, mine: r["from"]["id"].as_i64() == Some(bot.id) })
 }
 
 #[derive(Debug)]
@@ -87,7 +126,8 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
             return Parsed::Deny(chat, user, display_name(&cb["from"]));
         }
         let press = Event {
-            chat,
+            thread: thread_of(&cb["message"]),
+            place: place_of(&cb["message"]),
             user: User {
                 id: user.to_string(),
                 name: display_name(&cb["from"]),
@@ -104,14 +144,17 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
             return Parsed::Ignore;
         }
         let emoji = r["new_reaction"].as_array().into_iter().flatten().find_map(|e| e["emoji"].as_str()).unwrap_or("");
+        // ponytail: reactions don't say their topic, so they land in the chat's thread.
         return Parsed::Event(Event {
-            chat,
+            thread: chat.to_string(),
+            place: place_of(r),
             user: User { id: user.to_string(), name: display_name(&r["user"]) },
             kind: InboundKind::Reaction { message: message.to_string(), emoji: emoji.to_string() },
         });
     }
 
-    let m = &u["message"];
+    let edited = u["edited_message"].is_object();
+    let m = if edited { &u["edited_message"] } else { &u["message"] };
     let (Some(chat), Some(user)) = (m["chat"]["id"].as_i64(), m["from"]["id"].as_i64()) else {
         return Parsed::Ignore;
     };
@@ -129,15 +172,14 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
     let mentioned = text.to_ascii_lowercase().contains(&mention);
     let replied_to_bot = m["reply_to_message"]["from"]["id"].as_i64() == Some(bot.id);
     let command = files.is_empty().then(|| parse_command(text, Some(&bot.username))).flatten();
-    // In groups the bot only reacts when addressed.
-    if !private && !(mentioned || replied_to_bot || command.is_some()) {
-        return Parsed::Ignore;
-    }
+    let addressed = private || mentioned || replied_to_bot;
     if !allowed.contains(&user) {
-        return Parsed::Deny(chat, user, display_name(&m["from"]));
+        // Strangers chatting in a group aren't turned away, only ignored.
+        return if addressed || command.is_some() { Parsed::Deny(chat, user, display_name(&m["from"])) } else { Parsed::Ignore };
     }
 
     let kind = match command {
+        Some(_) if edited => return Parsed::Ignore,
         Some((name, args)) => InboundKind::Command { name, args },
         None => {
             let cleaned = if mentioned {
@@ -147,11 +189,17 @@ fn parse_update(u: &Value, bot: &Bot, allowed: &[i64]) -> Parsed {
             } else {
                 text.to_string()
             };
-            InboundKind::Message { id: m["message_id"].to_string(), text: cleaned.trim().to_string(), files }
+            let (id, text) = (m["message_id"].to_string(), cleaned.trim().to_string());
+            if edited {
+                InboundKind::Edited { id, text }
+            } else {
+                InboundKind::Message { id, text, files, reply_to: quote_of(m, bot), addressed }
+            }
         }
     };
     Parsed::Event(Event {
-        chat,
+        thread: thread_of(m),
+        place: place_of(m),
         user: User {
             id: user.to_string(),
             name: display_name(&m["from"]),
@@ -232,7 +280,7 @@ impl Telegram {
             bail!("file is larger than the 50 MB Telegram lets bots upload");
         }
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
-        let mut params = json!({"chat_id": chat_id(chat)});
+        let mut params = target(chat);
         if !caption.is_empty() {
             params["caption"] = caption.chars().take(MAX_CAPTION).collect::<String>().into();
         }
@@ -269,8 +317,19 @@ impl Telegram {
     }
 }
 
-fn chat_id(chat: &str) -> Value {
+/// The chat of a thread (`<chat>` or `<chat>/<topic>`).
+fn chat_id(thread: &str) -> Value {
+    let chat = thread.split_once('/').map_or(thread, |(c, _)| c);
     chat.parse::<i64>().map(Value::from).unwrap_or_else(|_| chat.into())
+}
+
+/// Where to post in a thread: its chat, and its topic if it is one.
+fn target(thread: &str) -> Value {
+    let mut params = json!({"chat_id": chat_id(thread)});
+    if let Some(topic) = thread.split_once('/').and_then(|(_, t)| t.parse::<i64>().ok()) {
+        params["message_thread_id"] = topic.into();
+    }
+    params
 }
 
 fn markup(rows: &[Vec<Button>]) -> Option<Value> {
@@ -308,12 +367,27 @@ fn description() -> Description {
             reactions: true,
             reply: true,
             threads: true,
+            // Topics, in groups that are forums.
+            open_thread: true,
         },
-        extra: json!({
-            "groups": "the bot answers in groups only when mentioned, replied to or given a command",
-            "max_download_mb": MAX_DOWNLOAD / 1024 / 1024,
-            "max_upload_mb": MAX_UPLOAD / 1024 / 1024,
-        }),
+        notes: format!(
+            "In groups a message is addressed to August when the bot is mentioned or replied to. Forum topics are \
+             threads of their own. Files: up to {} MB in, {} MB out.",
+            MAX_DOWNLOAD / 1024 / 1024,
+            MAX_UPLOAD / 1024 / 1024
+        ),
+        actions: vec![Action {
+            name: "pin".into(),
+            description: "Pin a message in the chat (the bot must be allowed to pin there).".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "the message id"},
+                    "quiet": {"type": "boolean", "description": "don't notify the members"}
+                },
+                "required": ["message"]
+            }),
+        }],
     }
 }
 
@@ -330,12 +404,10 @@ impl Messenger for Telegram {
         }
         let api = self.api()?;
         let (markdown, buttons) = (message.text.as_str(), &message.buttons);
-        let mut params = json!({
-            "chat_id": chat_id(chat),
-            "text": markdown::to_html(markdown),
-            "parse_mode": "HTML",
-            "link_preview_options": {"is_disabled": true},
-        });
+        let mut params = target(chat);
+        params["text"] = markdown::to_html(markdown).into();
+        params["parse_mode"] = "HTML".into();
+        params["link_preview_options"] = json!({"is_disabled": true});
         if let Some(to) = message.reply_to.as_deref().and_then(|id| id.parse::<i64>().ok()) {
             params["reply_parameters"] = json!({"message_id": to, "allow_sending_without_reply": true});
         }
@@ -399,10 +471,11 @@ impl Messenger for Telegram {
         let Ok(api) = self.api() else { return };
         if busy {
             // Telegram shows "typing…" for about five seconds per call.
-            let id = chat_id(chat);
+            let mut params = target(chat);
+            params["action"] = "typing".into();
             let task = tokio::spawn(async move {
                 loop {
-                    api.call("sendChatAction", json!({"chat_id": id, "action": "typing"})).await.ok();
+                    api.call("sendChatAction", params.clone()).await.ok();
                     tokio::time::sleep(Duration::from_secs(4)).await;
                 }
             });
@@ -425,6 +498,24 @@ impl Messenger for Telegram {
     async fn set_commands(&self, commands: &[CommandSpec]) -> Result<()> {
         let list: Vec<Value> = commands.iter().map(|c| json!({"command": c.name, "description": c.description})).collect();
         self.api()?.call("setMyCommands", json!({"commands": list})).await.map(drop)
+    }
+
+    async fn open_thread(&self, parent: &str, title: &str) -> Result<String> {
+        let topic = self.api()?.call("createForumTopic", json!({"chat_id": chat_id(parent), "name": title})).await?;
+        let id = topic["message_thread_id"].as_i64().context("no message_thread_id")?;
+        Ok(format!("{}/{id}", chat_id(parent)))
+    }
+
+    async fn action(&self, thread: &str, name: &str, args: Value) -> Result<Value> {
+        match name {
+            "pin" => {
+                let message = args["message"].as_str().and_then(|m| m.parse::<i64>().ok()).context("bad message id")?;
+                let params = json!({"chat_id": chat_id(thread), "message_id": message, "disable_notification": args["quiet"] == true});
+                self.api()?.call("pinChatMessage", params).await?;
+                Ok(Value::Null)
+            }
+            other => bail!("Telegram has no action `{other}`"),
+        }
     }
 
     async fn download(&self, file: &Attachment) -> Result<Vec<u8>> {
@@ -522,8 +613,8 @@ async fn poll(august: August, tg: Arc<Telegram>, api: Api, bot: Bot) {
                 api.call("answerCallbackQuery", json!({"callback_query_id": callback})).await.ok();
             }
             eprintln!("{} ({}): {:?}", event.user.name, event.user.id, event.kind);
-            let thread = Thread { messenger: ID.into(), id: event.chat.to_string() };
-            if let Err(e) = august.inbound(&thread, &event.user, &event.kind).await {
+            let thread = Thread { messenger: ID.into(), id: event.thread };
+            if let Err(e) = august.inbound(&thread, &event.place, &event.user, &event.kind).await {
                 eprintln!("could not hand in a message: {e:#}");
             }
         }
@@ -684,11 +775,44 @@ mod tests {
     }
 
     #[test]
-    fn groups_need_a_mention() {
-        assert!(matches!(parse_update(&msg("supergroup", "hi all", 7), &bot(), &[7]), Parsed::Ignore));
+    fn groups_mark_what_is_addressed() {
+        let Parsed::Event(e) = parse_update(&msg("supergroup", "hi all", 7), &bot(), &[7]) else { panic!() };
+        assert!(matches!(e.kind, InboundKind::Message { addressed: false, .. }));
+        assert_eq!(e.place.kind, PlaceKind::Group);
         let Parsed::Event(e) = parse_update(&msg("supergroup", "@augustbot hi", 7), &bot(), &[7]) else { panic!() };
-        assert!(matches!(e.kind, InboundKind::Message { ref text, .. } if text == "hi"));
-        assert!(matches!(parse_update(&msg("group", "/new@OtherBot", 7), &bot(), &[7]), Parsed::Ignore));
+        assert!(matches!(e.kind, InboundKind::Message { ref text, addressed: true, .. } if text == "hi"));
+        // A command for another bot is chatter too.
+        let Parsed::Event(e) = parse_update(&msg("group", "/new@OtherBot", 7), &bot(), &[7]) else { panic!() };
+        assert!(matches!(e.kind, InboundKind::Message { addressed: false, .. }));
+        // Strangers chatting in a group are ignored, not turned away.
+        assert!(matches!(parse_update(&msg("group", "hi all", 8), &bot(), &[7]), Parsed::Ignore));
+    }
+
+    #[test]
+    fn topics_are_threads_and_replies_quote() {
+        let mut u = msg("supergroup", "and flights?", 7);
+        u["message"]["is_topic_message"] = json!(true);
+        u["message"]["message_thread_id"] = json!(3);
+        u["message"]["reply_to_message"] = json!({"message_id": 3, "forum_topic_created": {"name": "Trip"}, "from": {"id": 99}});
+        let Parsed::Event(e) = parse_update(&u, &bot(), &[7]) else { panic!() };
+        assert_eq!(e.thread, "5/3");
+        assert_eq!(e.place, Place { kind: PlaceKind::Thread, parent: Some("5".into()), title: Some("Trip".into()) });
+        // The topic's start is no quote, but the bot opened it, so it is addressed.
+        assert!(matches!(e.kind, InboundKind::Message { reply_to: None, addressed: true, .. }));
+
+        u["message"]["reply_to_message"] = json!({"message_id": 9, "text": "Book it?", "from": {"id": 99}});
+        let Parsed::Event(e) = parse_update(&u, &bot(), &[7]) else { panic!() };
+        let InboundKind::Message { reply_to: Some(q), .. } = e.kind else { panic!() };
+        assert_eq!((q.id.as_str(), q.text.as_str(), q.mine), ("9", "Book it?", true));
+    }
+
+    #[test]
+    fn edits() {
+        let mut u = msg("private", "hi there", 7);
+        u["edited_message"] = u["message"].take();
+        u["edited_message"]["message_id"] = json!(4);
+        let Parsed::Event(e) = parse_update(&u, &bot(), &[7]) else { panic!() };
+        assert!(matches!(e.kind, InboundKind::Edited { ref id, ref text } if id == "4" && text == "hi there"));
     }
 
     #[test]

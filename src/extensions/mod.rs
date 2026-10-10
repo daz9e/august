@@ -38,7 +38,7 @@ const OBSERVER_TIMEOUT: Duration = Duration::from_secs(3600);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Events whose handlers only observe: what they return is ignored.
-const OBSERVERS: &[&str] = &["turn_end", "turn_settled", "turn_event", "llm_result", "session_changed", "reaction", "extension_state", "extension_output", "config_changed", "stop"];
+const OBSERVERS: &[&str] = &["turn_end", "turn_settled", "turn_event", "llm_result", "session_changed", "reaction", "message_edited", "extension_state", "extension_output", "config_changed", "stop"];
 /// How deep events extensions emit may nest (a handler emitting another, ...).
 const MAX_DEPTH: u32 = 8;
 const ENTRIES: [&str; 3] = ["index.ts", "index.js", "index.mjs"];
@@ -1262,11 +1262,11 @@ fn ctx_json(origin: &Origin) -> Value {
     })
 }
 
-/// Checks event data against its declared schema.
+/// Checks event data (or a messenger action's arguments) against its declared schema.
 // ponytail: only the top level (required keys, property types); a full JSON Schema validator
 // when contracts need nested checks.
-fn check(schema: &Value, data: &Value) -> Result<()> {
-    let Some(fields) = data.as_object() else { anyhow::bail!("event data must be an object") };
+pub(crate) fn check(schema: &Value, data: &Value) -> Result<()> {
+    let Some(fields) = data.as_object() else { anyhow::bail!("must be an object") };
     for key in schema["required"].as_array().into_iter().flatten().filter_map(Value::as_str) {
         anyhow::ensure!(fields.contains_key(key), "missing `{key}`");
     }
