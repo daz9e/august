@@ -38,6 +38,14 @@ impl Gateway {
             Some(Err(e)) => Some(format!("⚠️ /{name} failed: {e}")),
             // The emergency brake works even with no extension running to own it.
             None if name == "stop" => Some(format!("Stopped {} turn(s).", self.stop(id).await)),
+            // So is the list of what can be typed.
+            None if name == "help" => {
+                let mut s = String::from("/help — List commands\n/stop — Cancel the current task\n");
+                for (c, _) in self.command_list().into_iter().filter(|(c, _)| c.name != "stop") {
+                    s += &format!("/{} — {}\n", c.name, c.description);
+                }
+                Some(s)
+            }
             None => Some(format!("Unknown command /{name}. Try /help.")),
         };
         if let Some(reply) = reply {

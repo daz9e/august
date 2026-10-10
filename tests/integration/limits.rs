@@ -49,7 +49,7 @@ async fn stop_works_with_the_commands_extension_off() {
     let home = [("config/extensions/commands.json", r#"{"enabled": false}"#)];
     let gw = august(&fake, Setup { home: &home, ..Default::default() }).await;
     let mut chat = gw.chat().await;
-    chat.ask("/help", "Unknown command /help").await;
+    chat.ask("/help", "/stop — Cancel the current task").await;
     chat.say("start a long job").await;
     let ask = chat.question().await;
     chat.press(&ask.button("Allow")).await;
