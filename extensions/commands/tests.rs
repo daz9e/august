@@ -44,24 +44,66 @@ async fn stop_says_stopping_until_nothing_runs() {
     assert_eq!(fake.calls("status").len(), 3);
 }
 
-#[tokio::test]
-async fn model_and_models_show_and_switch() {
+/// Signed in to `opencode` (active) and `chatgpt`, not to `openai`; both offer `gpt-5.5`.
+async fn two_providers() -> FakeAugust {
     let fake = commands().await;
-    fake.on("status", |_| Ok(json!({"provider": "openai", "model": "gpt", "workspace": "/ws", "busy": false})));
-    fake.on("model_set", |p| match p["model"].as_str() {
-        Some("bad") => Err(anyhow::anyhow!("no model `bad`")),
-        _ => Ok(json!({"provider": "openai", "model": "other-model"})),
+    fake.on("status", |_| Ok(json!({"provider": "opencode", "model": "big-pickle", "workspace": "/ws", "busy": false})));
+    fake.on("accounts", |_| {
+        Ok(json!([
+            {"id": "openai", "providers": ["openai"], "status": "none"},
+            {"id": "chatgpt", "providers": ["chatgpt"], "status": "connected"},
+            {"id": "opencode", "providers": ["opencode"], "status": "connected"},
+        ]))
     });
-    fake.on("models", |_| Ok(json!((0..70).map(|i| json!({"id": format!("m{i}")})).collect::<Vec<_>>())));
+    fake.on("models", |p| {
+        let ids: Vec<String> = match p["provider"].as_str() {
+            Some("opencode") => ["gpt-5.5", "big-pickle"].into_iter().map(String::from).chain((0..50).map(|i| format!("m{i}"))).collect(),
+            Some("chatgpt") => vec!["gpt-5.5".into(), "gpt-5.4".into()],
+            other => panic!("listed models of {other:?}"),
+        };
+        Ok(json!(ids.iter().map(|id| json!({"id": id})).collect::<Vec<_>>()))
+    });
+    fake.on("model_set", |p| match p["model"].as_str().unwrap().split_once(':') {
+        Some((provider, model)) => Ok(json!({"provider": provider, "model": model})),
+        None => Err(anyhow::anyhow!("no model `{}`", p["model"].as_str().unwrap())),
+    });
+    fake
+}
 
-    assert_eq!(run(&fake, "model", "").await, "Current model: `openai · gpt`\nChange with `/model <id>`.");
-    assert_eq!(run(&fake, "model", "other-model").await, "Now using `openai · other-model` (applies to the next message).");
+#[tokio::test]
+async fn model_switches_to_the_provider_that_offers_it() {
+    let fake = two_providers().await;
+    assert_eq!(run(&fake, "model", "").await, "Current model: `opencode · big-pickle`\nChange with `/model <id>`.");
+    assert_eq!(run(&fake, "model", "gpt-5.4").await, "Now using `chatgpt · gpt-5.4` (applies to the next message).");
+    assert_eq!(run(&fake, "model", "opencode:gpt-5.5").await, "Now using `opencode · gpt-5.5` (applies to the next message).");
+    // Listed nowhere: the core decides.
     assert!(run(&fake, "model", "bad").await.starts_with("Could not switch model: no model `bad`"));
-    assert_eq!(run(&fake, "status", "").await, "Model: `openai · gpt`\nWorkspace: `/ws`\nBusy: no");
+    assert_eq!(run(&fake, "status", "").await, "Model: `opencode · big-pickle`\nWorkspace: `/ws`\nBusy: no");
+}
 
-    assert_eq!(run(&fake, "models", "m6").await, "m6\nm60\nm61\nm62\nm63\nm64\nm65\nm66\nm67\nm68\nm69");
+#[tokio::test]
+async fn a_model_several_providers_offer_asks_which() {
+    let fake = two_providers().await;
+    let switch = tokio::spawn({
+        let fake = fake.clone();
+        async move { run(&fake, "model", "gpt-5.5").await }
+    });
+    let ask = fake.wait_sent("more than one provider").await;
+    let labels: Vec<&str> = ask.buttons.iter().map(|b| b.label.as_str()).collect();
+    assert_eq!(labels, ["opencode", "chatgpt"], "the active provider first");
+    fake.press("1", &ask.buttons[1].id);
+    assert_eq!(switch.await.unwrap(), "Now using `chatgpt · gpt-5.5` (applies to the next message).");
+}
+
+#[tokio::test]
+async fn models_lists_every_signed_in_provider() {
+    let fake = two_providers().await;
+    let all = run(&fake, "models", "").await;
+    assert!(all.starts_with("**opencode**: gpt-5.5, big-pickle, m0"), "{all}");
+    assert!(all.contains("… 12 more"), "{all}");
+    assert!(all.contains("**chatgpt**: gpt-5.5, gpt-5.4\n"), "{all}");
+    assert_eq!(run(&fake, "models", "gpt-5.4").await, "**chatgpt**: gpt-5.4\n\nSwitch with `/model <id>` or `/model <provider>:<id>`.");
     assert_eq!(run(&fake, "models", "zzz").await, "No models match.");
-    assert!(run(&fake, "models", "").await.starts_with("70 models; narrow with `/models <filter>`"));
 }
 
 #[tokio::test]

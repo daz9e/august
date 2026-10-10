@@ -10,7 +10,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("stop", "Cancel the current task"),
     ("queue", "Run a message as its own turn after the current one"),
     ("model", "Show or change the model: /model <id> or <provider>:<id>"),
-    ("models", "List the models of the current provider: /models [filter]"),
+    ("models", "List the models of every provider you are signed in to: /models [filter]"),
     ("login", "Sign in to an account (a model provider: then use it): /login [account]"),
     ("logout", "Sign out of an account: /logout [account]"),
     ("status", "Show provider, model and workspace"),
@@ -59,18 +59,27 @@ async fn command(august: &August, name: &str, args: &str, ctx: &Ctx) -> Result<S
             let s = august.call("status", mine(json!({}))).await?;
             format!("Current model: `{} · {}`\nChange with `/model <id>`.", str(&s["provider"]), str(&s["model"]))
         }
-        "model" => match august.call("model_set", mine(json!({"model": args}))).await {
-            Ok(m) => format!("Now using `{} · {}` (applies to the next message).", str(&m["provider"]), str(&m["model"])),
-            Err(e) => format!("Could not switch model: {e:#}"),
-        },
-        "models" => {
-            let list = august.call("models", mine(json!({}))).await?;
-            let ids: Vec<&str> = list.as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).filter(|id| id.contains(args)).collect();
-            match ids.len() {
-                0 => "No models match.".into(),
-                n if n > 60 => format!("{n} models; narrow with `/models <filter>`. First ones:\n{}", ids[..60].join("\n")),
-                _ => ids.join("\n"),
+        "model" => {
+            let Some(spec) = resolve_model(august, ctx, args).await? else {
+                return Ok("Cancelled.".into());
+            };
+            match august.call("model_set", mine(json!({"model": spec}))).await {
+                Ok(m) => format!("Now using `{} · {}` (applies to the next message).", str(&m["provider"]), str(&m["model"])),
+                Err(e) => format!("Could not switch model: {e:#}"),
             }
+        }
+        "models" => {
+            let mut s = String::new();
+            for (provider, ids) in catalog(august).await? {
+                let ids: Vec<&String> = ids.iter().filter(|id| id.contains(args)).collect();
+                if ids.is_empty() {
+                    continue;
+                }
+                let shown: Vec<&str> = ids.iter().take(40).map(|id| id.as_str()).collect();
+                let more = if ids.len() > shown.len() { format!(", … {} more (narrow with `/models <filter>`)", ids.len() - shown.len()) } else { String::new() };
+                s += &format!("**{provider}**: {}{more}\n\n", shown.join(", "));
+            }
+            if s.is_empty() { "No models match.".into() } else { format!("{s}Switch with `/model <id>` or `/model <provider>:<id>`.") }
         }
         "login" | "logout" => {
             let Some(a) = pick_account(august, ctx, name, args).await? else {
@@ -130,6 +139,45 @@ async fn command(august: &August, name: &str, args: &str, ctx: &Ctx) -> Result<S
         }
         "reload" => format!("Extensions reloaded.\n{}", status(&august.call("extensions_reload", mine(json!({}))).await?)),
         _ => unreachable!("not one of ours: {name}"),
+    })
+}
+
+/// Providers the user can use (one of their accounts is connected), the active one first:
+/// each with its models (a provider that can't list them is left out).
+async fn catalog(august: &August) -> Result<Vec<(String, Vec<String>)>> {
+    let active = august.call("status", mine(json!({}))).await?["provider"].as_str().unwrap_or_default().to_string();
+    let accounts = august.call("accounts", mine(json!({}))).await?;
+    let mut providers: Vec<String> = vec![active];
+    for a in accounts.as_array().into_iter().flatten().filter(|a| a["status"] == "connected") {
+        providers.extend(a["providers"].as_array().into_iter().flatten().filter_map(|p| p.as_str().map(String::from)));
+    }
+    let mut seen = std::collections::HashSet::new();
+    providers.retain(|p| !p.is_empty() && seen.insert(p.clone()));
+    let mut out = Vec::new();
+    for p in providers {
+        if let Ok(list) = august.call("models", mine(json!({"provider": p}))).await {
+            out.push((p, list.as_array().into_iter().flatten().filter_map(|m| m["id"].as_str().map(String::from)).collect()));
+        }
+    }
+    Ok(out)
+}
+
+/// What `/model <args>` switches to: `provider:model` as given, else the provider offering
+/// that model (asked which, when several do). `None`: the user didn't pick.
+async fn resolve_model(august: &August, ctx: &Ctx, args: &str) -> Result<Option<String>> {
+    let catalog = catalog(august).await?;
+    if args.split_once(':').is_some_and(|(p, _)| catalog.iter().any(|(id, _)| id == p)) {
+        return Ok(Some(args.into()));
+    }
+    let holders: Vec<String> = catalog.into_iter().filter(|(_, ids)| ids.iter().any(|id| id == args)).map(|(p, _)| p).collect();
+    Ok(match holders.len() {
+        // Not listed anywhere: the active provider may still take it.
+        0 => Some(args.into()),
+        1 => Some(format!("{}:{args}", holders[0])),
+        _ => {
+            let question = format!("`{args}` is offered by more than one provider. Which one?");
+            ctx.ask(&question, &holders, std::time::Duration::from_secs(300)).await?.map(|p| format!("{p}:{args}"))
+        }
     })
 }
 
