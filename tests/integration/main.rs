@@ -7,6 +7,7 @@ mod support;
 mod claude_cli;
 mod media;
 mod extensions;
+mod lifecycle;
 mod memory;
 mod messaging;
 mod compaction;

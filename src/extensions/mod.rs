@@ -6,16 +6,19 @@
 //! the gateway down.
 
 mod host;
+mod logs;
 
 pub use host::{AccountInfo, ProviderInfo, RpcError};
+pub use logs::tail as log_tail;
 
 use crate::llm::ToolSpec;
 use crate::messengers::Thread;
 use anyhow::Result;
 use async_trait::async_trait;
-use host::Host;
+use host::{Exit, Host};
+use logs::Log;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
@@ -34,13 +37,13 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
 const OBSERVER_TIMEOUT: Duration = Duration::from_secs(3600);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(600);
-/// Restarts after a crash before an extension stays down until `/reload`.
-const MAX_RESTARTS: u32 = 3;
 /// Events whose handlers only observe: what they return is ignored.
-const OBSERVERS: &[&str] = &["turn_end", "turn_settled", "turn_event", "llm_result", "session_changed", "reaction", "extension_state", "config_changed", "stop"];
+const OBSERVERS: &[&str] = &["turn_end", "turn_settled", "turn_event", "llm_result", "session_changed", "reaction", "extension_state", "extension_output", "config_changed", "stop"];
 /// How deep events extensions emit may nest (a handler emitting another, ...).
 const MAX_DEPTH: u32 = 8;
 const ENTRIES: [&str; 3] = ["index.ts", "index.js", "index.mjs"];
+/// A folder with this file is an extension in any language: `{command: [argv], env}`.
+const MANIFEST: &str = "extension.json";
 
 /// What extensions can ask of August: the operations of the core's table.
 #[async_trait]
@@ -68,6 +71,8 @@ impl Origin {
 
 #[derive(Clone)]
 enum State {
+    /// Being launched: its `extension_launch` hooks, the process, its `extension_ready` hooks.
+    Starting,
     Running(Arc<Host>),
     Failed(String),
     Disabled,
@@ -78,6 +83,8 @@ enum State {
 enum Launch {
     /// A TypeScript or JavaScript entry file, run by bun through `host.ts`.
     Script(PathBuf),
+    /// A folder with `extension.json`: its `command`, in any language.
+    Command(PathBuf),
     /// A default extension's binary; `dir` is its folder (state files).
     Binary { exe: PathBuf, dir: PathBuf },
 }
@@ -86,8 +93,53 @@ impl Launch {
     fn dir(&self) -> PathBuf {
         match self {
             Launch::Script(entry) => entry.parent().unwrap_or(Path::new(".")).to_path_buf(),
-            Launch::Binary { dir, .. } => dir.clone(),
+            Launch::Command(dir) | Launch::Binary { dir, .. } => dir.clone(),
         }
+    }
+
+    /// What tells whether it changed since it last ran: its folder, or a default's binary.
+    fn source(&self) -> PathBuf {
+        match self {
+            Launch::Binary { exe, .. } => exe.clone(),
+            other => other.dir(),
+        }
+    }
+}
+
+/// The process to start: its argv, extra environment and folder.
+struct Spec {
+    command: Vec<String>,
+    env: serde_json::Map<String, Value>,
+    dir: PathBuf,
+}
+
+impl Spec {
+    fn json(&self) -> (Value, Value) {
+        (json!(self.command), Value::Object(self.env.clone()))
+    }
+
+    /// Takes `command` and `env` as `extension_launch` hooks left them.
+    fn update(&mut self, data: &Value) -> Result<(), String> {
+        let command: Option<Vec<String>> = data["command"].as_array().and_then(|a| a.iter().map(|x| x.as_str().map(String::from)).collect());
+        self.command = command.filter(|c| !c.is_empty()).ok_or("`command` must be a non-empty list of strings")?;
+        let env = data["env"].as_object().cloned().unwrap_or_default();
+        if env.values().any(|v| !v.is_string()) {
+            return Err("`env` values must be strings".into());
+        }
+        self.env = env;
+        Ok(())
+    }
+
+    fn command(&self) -> tokio::process::Command {
+        // A relative program (`./weather`) is the extension's own, in its folder.
+        let program = Path::new(&self.command[0]);
+        let program = if program.components().count() > 1 && program.is_relative() { self.dir.join(program) } else { program.to_path_buf() };
+        let mut c = tokio::process::Command::new(program);
+        c.args(&self.command[1..]).current_dir(&self.dir);
+        for (k, v) in &self.env {
+            c.env(k, v.as_str().unwrap_or_default());
+        }
+        c
     }
 }
 
@@ -97,8 +149,80 @@ struct Slot {
     state: State,
     /// Identifies the process; exits of replaced processes are ignored.
     generation: u64,
+    /// Restarts since it last ran stably.
     restarts: u32,
+    /// Why it is in its state: `start`, `install`, `exit`, `hang`, ...
+    reason: String,
+    /// Nobody will restart it (until /reload, a save or an enable).
+    gave_up: bool,
+    /// What its health check last said when not ok: `(status, detail)`.
+    health: Option<(String, String)>,
 }
+
+impl Slot {
+    fn new(name: String, launch: Launch, state: State, reason: &str) -> Self {
+        Slot { name, launch, state, generation: 0, restarts: 0, reason: reason.into(), gave_up: false, health: None }
+    }
+}
+
+/// How the core watches an extension: `august.supervise` in `august.json`, overridden per
+/// extension by `supervise` in its own settings file.
+struct Supervise {
+    ping_interval: Duration,
+    ping_timeout: Duration,
+    ping_misses: u32,
+    max_restarts: u32,
+    stable_after: Duration,
+}
+
+fn supervise(name: &str) -> Supervise {
+    let global = crate::config::get("august.supervise").unwrap_or_default();
+    let own = crate::config::unit("extensions", name).map(|v| v["supervise"].clone()).unwrap_or_default();
+    let num = |k: &str, default: u64| own[k].as_u64().or(global[k].as_u64()).unwrap_or(default);
+    Supervise {
+        ping_interval: Duration::from_millis(num("ping_interval_ms", 30_000).max(100)),
+        ping_timeout: Duration::from_millis(num("ping_timeout_ms", 10_000).max(100)),
+        ping_misses: num("ping_misses", 2).max(1) as u32,
+        max_restarts: num("max_restarts", 5) as u32,
+        stable_after: Duration::from_millis(num("stable_after_ms", 600_000)),
+    }
+}
+
+/// `(size, modified)` of every file under `src` (or of `src` itself), by relative path.
+// ponytail: metadata, not contents; skips hidden folders and the usual build and dependency
+// caches (`target`, `node_modules`, `__pycache__`), so a setup's outputs don't count as changes.
+fn fingerprint(src: &Path) -> std::collections::BTreeMap<String, (u64, u128)> {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, (u64, u128)>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().filter_map(|e| e.ok()) {
+            let (path, name) = (e.path(), e.file_name().to_string_lossy().to_string());
+            let Ok(meta) = e.metadata() else { continue };
+            if meta.is_dir() {
+                if !name.starts_with('.') && !["target", "node_modules", "__pycache__"].contains(&name.as_str()) {
+                    walk(root, &path, out);
+                }
+            } else if let Ok(rel) = path.strip_prefix(root) {
+                out.insert(rel.to_string_lossy().into(), stamp(&meta));
+            }
+        }
+    }
+    fn stamp(meta: &std::fs::Metadata) -> (u64, u128) {
+        let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+        (meta.len(), modified)
+    }
+    let mut out = std::collections::BTreeMap::new();
+    match std::fs::metadata(src) {
+        Ok(m) if m.is_dir() => walk(src, src, &mut out),
+        Ok(m) => {
+            out.insert(src.file_name().unwrap_or_default().to_string_lossy().into(), stamp(&m));
+        }
+        Err(_) => {}
+    }
+    out
+}
+
+/// Events only extensions with `admin` may hook: their handlers can keep any extension from
+/// running, or read what it writes.
+const GUARDED: &[&str] = &["extension_launch", "extension_ready", "extension_exit", "extension_output"];
 
 pub struct Extensions {
     dir: PathBuf,
@@ -121,22 +245,20 @@ pub fn valid_name(name: &str) -> bool {
     crate::config::valid_name(name)
 }
 
-/// `$AUGUST_BUN`, `bun` on PATH, or the usual install locations.
+/// `$AUGUST_BUN`, or `bun` on PATH (the gateway's PATH includes the login shell's).
 fn find_bun() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("AUGUST_BUN") {
         return Some(PathBuf::from(p));
     }
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).map(|d| d.join("bun")).collect::<Vec<_>>())
-        .unwrap_or_default()
-        .into_iter()
-        .chain([home.join(".bun/bin/bun"), "/opt/homebrew/bin/bun".into(), "/usr/local/bin/bun".into()])
-        .find(|p| p.is_file())
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path).map(|d| d.join("bun")).find(|p| p.is_file())
 }
 
-fn entry_of(folder: &Path) -> Option<PathBuf> {
-    ENTRIES.iter().map(|e| folder.join(e)).find(|p| p.is_file())
+fn entry_of(folder: &Path) -> Option<Launch> {
+    if folder.join(MANIFEST).is_file() {
+        return Some(Launch::Command(folder.to_path_buf()));
+    }
+    ENTRIES.iter().map(|e| folder.join(e)).find(|p| p.is_file()).map(Launch::Script)
 }
 
 /// Names of the properties a settings schema marks `"secret": true`.
@@ -182,6 +304,50 @@ fn shipped() -> Vec<String> {
     names
 }
 
+/// Defaults, and extensions marked `early`, start before the rest.
+fn early(name: &str, launch: &Launch) -> bool {
+    matches!(launch, Launch::Binary { .. }) || crate::config::unit("extensions", name).is_ok_and(|v| v["early"] == true)
+}
+
+/// Why a hook chain stopped something.
+fn block_text(data: &Value) -> String {
+    data["block"].as_str().filter(|s| !s.is_empty()).unwrap_or("by a hook").to_string()
+}
+
+/// What an extension registered, as hooks (`extension_ready`) see it.
+fn manifest_json(m: &host::Manifest) -> Value {
+    json!({
+        "summary": m.summary,
+        "details": m.details,
+        "tools": m.tools.iter().map(|t| json!({"name": t.name, "description": t.description, "parameters": t.input_schema})).collect::<Vec<_>>(),
+        "commands": m.commands.iter().map(|(n, d)| json!({"name": n, "description": d})).collect::<Vec<_>>(),
+        "hooks": m.events,
+        "needs": m.needs,
+        "settings": m.settings,
+        "emits": m.emits.iter().map(|d| json!({"name": d.name, "description": d.description, "observe": d.observe})).collect::<Vec<_>>(),
+        "replaces": m.replaces,
+        "takes": m.takes,
+        "accounts": m.accounts.iter().map(|a| &a.id).collect::<Vec<_>>(),
+        "providers": m.providers.iter().map(|p| &p.id).collect::<Vec<_>>(),
+        "messengers": m.messengers.iter().map(|d| &d.id).collect::<Vec<_>>(),
+    })
+}
+
+/// `(memory KB, CPU %)` of every process group, summed over its processes.
+fn usage() -> HashMap<i32, (u64, f64)> {
+    let out = std::process::Command::new("ps").args(["-axo", "pgid=,rss=,%cpu="]).output();
+    let mut all: HashMap<i32, (u64, f64)> = HashMap::new();
+    for line in out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default().lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if let [pgid, rss, cpu] = f[..] {
+            let e = all.entry(pgid.parse().unwrap_or(0)).or_default();
+            e.0 += rss.parse::<u64>().unwrap_or(0);
+            e.1 += cpu.parse::<f64>().unwrap_or(0.0);
+        }
+    }
+    all
+}
+
 fn stopped(data: &Value) -> bool {
     let block = &data["block"];
     block == true || block.as_str().is_some_and(|s| !s.is_empty()) || data["handled"] == true
@@ -221,8 +387,8 @@ impl Extensions {
         let mut found: Vec<(String, Launch)> = Vec::new();
         for e in std::fs::read_dir(&self.dir).into_iter().flatten().filter_map(|e| e.ok()) {
             let name = e.file_name().to_string_lossy().to_string();
-            if valid_name(&name) && let Some(entry) = entry_of(&e.path()) {
-                found.push((name, Launch::Script(entry)));
+            if valid_name(&name) && let Some(launch) = entry_of(&e.path()) {
+                found.push((name, launch));
             }
         }
         for name in shipped() {
@@ -264,70 +430,207 @@ impl Extensions {
         Ok((bun, host))
     }
 
-    async fn spawn(&self, name: &str, launch: &Launch) -> (u64, State) {
-        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let command = match launch {
-            Launch::Script(entry) => match self.runtime() {
-                Ok((bun, host_ts)) => {
-                    let mut c = tokio::process::Command::new(bun);
-                    c.arg("run").arg(host_ts).arg(entry).arg(name).current_dir(launch.dir());
-                    c
-                }
-                Err(e) => return (generation, State::Failed(e)),
-            },
+    /// The process `launch` stands for, before hooks change it.
+    fn spec(&self, name: &str, launch: &Launch) -> Result<Spec, String> {
+        let text = |p: &Path| p.display().to_string();
+        match launch {
+            Launch::Script(entry) => {
+                let (bun, host) = self.runtime()?;
+                Ok(Spec { command: vec![text(&bun), "run".into(), text(&host), text(entry), name.into()], env: Default::default(), dir: launch.dir() })
+            }
+            Launch::Command(dir) => {
+                let file = dir.join(MANIFEST);
+                let read = std::fs::read_to_string(&file).map_err(|e| format!("could not read {}: {e}", file.display()))?;
+                let v: Value = serde_json::from_str(&read).map_err(|e| format!("{MANIFEST}: {e}"))?;
+                let mut spec = Spec { command: Vec::new(), env: Default::default(), dir: dir.clone() };
+                spec.update(&v).map_err(|e| format!("{MANIFEST}: {e}"))?;
+                Ok(spec)
+            }
             Launch::Binary { exe, dir } => {
                 if !exe.is_file() {
-                    return (generation, State::Failed(format!("{} is missing; build it with `cargo build`", exe.display())));
+                    return Err(format!("{} is missing; build it with `cargo build`", exe.display()));
                 }
-                let mut c = tokio::process::Command::new(exe);
-                c.current_dir(dir).env("AUGUST_EXTENSION_DIR", dir).env("AUGUST_EXTENSIONS", &self.dir).env("AUGUST_HOME", crate::config::home());
-                c
+                let mut env = serde_json::Map::new();
+                env.insert("AUGUST_EXTENSION_DIR".into(), json!(text(dir)));
+                env.insert("AUGUST_EXTENSIONS".into(), json!(text(&self.dir)));
+                Ok(Spec { command: vec![text(exe)], env, dir: dir.clone() })
             }
-        };
-        let core = self.core.read().unwrap().clone();
-        let (me, n) = (self.me.clone(), name.to_string());
-        let on_exit = Box::new(move |tail: String| {
-            if let Some(me) = me.upgrade() {
-                me.crashed(&n, generation, tail);
-            }
-        });
-        let state = match Host::start(command, name, core, on_exit).await {
-            Ok(h) => State::Running(Arc::new(h)),
-            Err(e) => State::Failed(e),
-        };
-        (generation, state)
+        }
     }
 
-    /// Restarts a crashed extension with a growing delay, up to `MAX_RESTARTS` times.
-    fn crashed(&self, name: &str, generation: u64, tail: String) {
-        let restarts = {
+    /// Where the core remembers what each extension looked like when it last started.
+    fn launched_file(&self) -> PathBuf {
+        self.dir.join(".runtime/launched.json")
+    }
+
+    fn launched(&self) -> Value {
+        std::fs::read_to_string(self.launched_file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(|| json!({}))
+    }
+
+    fn remember(&self, name: &str, print: &std::collections::BTreeMap<String, (u64, u128)>) {
+        let mut all = self.launched();
+        all[name] = json!(print.iter().map(|(k, (len, at))| (k.clone(), json!([len, at.to_string()]))).collect::<serde_json::Map<_, _>>());
+        std::fs::create_dir_all(self.dir.join(".runtime")).ok();
+        std::fs::write(self.launched_file(), all.to_string()).ok();
+    }
+
+    /// Launches `name`: its `extension_launch` hooks, the process, its `extension_ready`
+    /// hooks. A first launch is `install`, one with changed files `update`; else `reason`.
+    async fn launch_one(&self, name: &str, launch: &Launch, reason: &str) -> (u64, State, String) {
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let log = Arc::new(Log::new(name));
+        let print = fingerprint(&launch.source());
+        let before = self.launched()[name].as_object().cloned();
+        let (reason, changed): (&str, Vec<String>) = match &before {
+            None => ("install", print.keys().cloned().collect()),
+            Some(b) => {
+                let was = |k: &str| b.get(k).map(|v| (v[0].as_u64().unwrap_or(0), v[1].as_str().unwrap_or("").to_string()));
+                let mut changed: Vec<String> = print.iter().filter(|(k, (len, at))| was(k) != Some((*len, at.to_string()))).map(|(k, _)| k.clone()).collect();
+                changed.extend(b.keys().filter(|k| !print.contains_key(*k)).cloned());
+                (if changed.is_empty() { reason } else { "update" }, changed)
+            }
+        };
+        let failed = |e: String| {
+            log.note(&format!("failed to start: {e}"));
+            (generation, State::Failed(e), reason.to_string())
+        };
+        log.note(&format!("launching ({reason})"));
+        self.tell(json!({"name": name, "state": "starting", "reason": reason, "error": null, "restarts": null, "final": false}));
+
+        let mut spec = match self.spec(name, launch) {
+            Ok(s) => s,
+            Err(e) => return failed(e),
+        };
+        let (command, env) = spec.json();
+        let data = json!({"name": name, "dir": spec.dir, "command": command, "env": env, "reason": reason, "changed": changed});
+        let data = self.emit("extension_launch", data, &Origin::default()).await;
+        if stopped(&data) {
+            return failed(format!("launch blocked: {}", block_text(&data)));
+        }
+        if let Err(e) = spec.update(&data) {
+            return failed(format!("an extension_launch hook left {e}"));
+        }
+        log.note(&format!("command: {}", spec.command.join(" ")));
+
+        let core = self.core.read().unwrap().clone();
+        let (me, n) = (self.me.clone(), name.to_string());
+        let on_exit = Box::new(move |exit: Exit| {
+            if let Some(me) = me.upgrade() {
+                me.crashed(&n, generation, exit);
+            }
+        });
+        let me = self.me.clone();
+        let n = name.to_string();
+        let on_line = Arc::new(move |line: String| {
+            if let Some(me) = me.upgrade().filter(|me| me.listens("extension_output")) {
+                me.emit_later("extension_output", json!({"name": n, "line": line}));
+            }
+        });
+        let host = match Host::start(spec.command(), name, core, log.clone(), on_line, on_exit).await {
+            Ok(h) => Arc::new(h),
+            Err(e) => return failed(e),
+        };
+
+        // Pending: it runs, but gets nothing until its `extension_ready` hooks let it in.
+        // ponytail: calls it makes during its own setup already run with what it declared.
+        let manifest = manifest_json(&host.manifest());
+        let data = json!({"name": name, "reason": reason, "changed": changed, "manifest": manifest});
+        let data = self.emit("extension_ready", data, &Origin::default()).await;
+        if stopped(&data) {
+            let why = format!("blocked: {}", block_text(&data));
+            host.stop("blocked", &why);
+            log.note(&why);
+            return (generation, State::Failed(why), reason.to_string());
+        }
+        if let Some(needs) = data["needs"].as_array() {
+            host.limit_needs(needs.iter().filter_map(|n| n.as_str().map(String::from)).collect());
+        }
+        self.remember(name, &print);
+        self.watch(name.to_string(), generation, Arc::downgrade(&host));
+        (generation, State::Running(host), reason.to_string())
+    }
+
+    /// Puts what a launch gave into `name`'s slot and says so.
+    fn put(&self, name: &str, launch: &Launch, (generation, state, reason): (u64, State, String), restarts: u32) {
+        {
+            let mut slots = self.slots.write().unwrap();
+            let slot = Slot { generation, state, restarts, ..Slot::new(name.into(), launch.clone(), State::Disabled, &reason) };
+            match slots.iter_mut().find(|s| s.name == name) {
+                Some(s) => *s = slot,
+                None => {
+                    slots.push(slot);
+                    slots.sort_by(|a, b| a.name.cmp(&b.name));
+                }
+            }
+        }
+        self.announce(name);
+    }
+
+    /// The process of `name` ended: the `extension_exit` hooks and the restart policy decide
+    /// whether and when it starts again (backoff 1, 2, 4, … s up to 60 s; `max_restarts` in
+    /// a row, then it stays down until `/reload`).
+    fn crashed(&self, name: &str, generation: u64, exit: Exit) {
+        if exit.reason == "blocked" {
+            return; // its `extension_ready` hooks refused it; nothing to restart
+        }
+        let policy = supervise(name);
+        let (restarts, uptime) = {
             let mut slots = self.slots.write().unwrap();
             let Some(slot) = slots.iter_mut().find(|s| s.name == name && s.generation == generation) else {
                 return; // replaced by a reload
             };
-            eprintln!("extension {name}: crashed");
-            slot.state = State::Failed(format!("crashed: {tail}"));
-            slot.restarts
+            let uptime = match &slot.state {
+                State::Running(h) => h.started.elapsed(),
+                _ => Duration::ZERO,
+            };
+            if uptime >= policy.stable_after {
+                slot.restarts = 0;
+            }
+            let what = match exit.reason.as_str() {
+                "exit" => "crashed",
+                "hang" => "hung",
+                "unhealthy" => "unhealthy",
+                _ => "failed to start",
+            };
+            eprintln!("extension {name}: {what}");
+            slot.state = State::Failed(format!("{what}: {}", exit.error));
+            slot.reason = exit.reason.clone();
+            slot.health = None;
+            (slot.restarts, uptime)
         };
-        self.announce(name);
-        if restarts >= MAX_RESTARTS {
-            eprintln!("extension {name}: crashed {restarts} times, not restarting until /reload");
-            return;
-        }
         let (me, name) = (self.me.clone(), name.to_string());
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(1 << restarts)).await;
             let Some(me) = me.upgrade() else { return };
-            let Some(launch) = me.slot_launch(&name, generation) else { return };
-            let (new_gen, state) = me.spawn(&name, &launch).await;
-            let replaced = {
+            let data = json!({"name": name, "reason": exit.reason, "code": exit.code, "error": exit.error, "restarts": restarts, "uptime_ms": uptime.as_millis() as u64});
+            let data = me.emit("extension_exit", data, &Origin::default()).await;
+            let give_up = data["restart"] == false || restarts >= policy.max_restarts;
+            {
                 let mut slots = me.slots.write().unwrap();
-                let slot = slots.iter_mut().find(|s| s.name == name && s.generation == generation);
-                slot.map(|slot| *slot = Slot { name: name.clone(), launch, state, generation: new_gen, restarts: restarts + 1 }).is_some()
+                if let Some(slot) = slots.iter_mut().find(|s| s.name == name && s.generation == generation) {
+                    slot.gave_up = give_up;
+                }
+            }
+            me.announce(&name);
+            if give_up {
+                eprintln!("extension {name}: not restarting until /reload");
+                return;
+            }
+            let backoff = Duration::from_secs(1 << restarts.min(6)).min(Duration::from_secs(60));
+            tokio::time::sleep(data["delay_ms"].as_u64().map(Duration::from_millis).unwrap_or(backoff)).await;
+            let Some(launch) = me.slot_launch(&name, generation) else { return };
+            let launched = me.launch_one(&name, &launch, "restart").await;
+            let start_error = match &launched.1 {
+                State::Failed(e) => Some(e.clone()),
+                _ => None,
             };
-            if replaced {
-                eprintln!("extension {name}: restarted");
-                me.announce(&name);
+            let new_generation = launched.0;
+            if me.slot_launch(&name, generation).is_none() {
+                return; // reloaded meanwhile
+            }
+            me.put(&name, &launch, launched, restarts + 1);
+            eprintln!("extension {name}: restarted");
+            if let Some(error) = start_error {
+                me.crashed(&name, new_generation, Exit { reason: "start".into(), error, code: None });
             }
         });
     }
@@ -337,41 +640,145 @@ impl Extensions {
         slots.iter().find(|s| s.name == name && s.generation == generation).map(|s| s.launch.clone())
     }
 
+    fn is_current(&self, name: &str, generation: u64) -> bool {
+        self.slot_launch(name, generation).is_some()
+    }
+
+    /// Asks a running extension how it is doing every `ping_interval`. Any reply means it is
+    /// alive (one without a check of its own answers `unknown method`); no reply
+    /// `ping_misses` times in a row means it hangs, and `failed` that many times means it is
+    /// broken inside: either way it is killed and goes the way of a crash.
+    fn watch(&self, name: String, generation: u64, host: Weak<Host>) {
+        let me = self.me.clone();
+        tokio::spawn(async move {
+            let (mut misses, mut failures) = (0, 0);
+            loop {
+                tokio::time::sleep(supervise(&name).ping_interval).await;
+                let (Some(me), Some(host)) = (me.upgrade(), host.upgrade()) else { return };
+                if !me.is_current(&name, generation) {
+                    return;
+                }
+                let policy = supervise(&name);
+                match host.request_with("health", json!({}), policy.ping_timeout, None).await {
+                    Err(e) if e.kind.as_deref() == Some("timeout") => {
+                        misses += 1;
+                        if misses >= policy.ping_misses {
+                            host.stop("hang", &format!("no reply to {misses} health checks"));
+                            return;
+                        }
+                    }
+                    Err(e) if e.message == "the extension process exited" => return,
+                    Err(_) => {
+                        (misses, failures) = (0, 0);
+                        me.set_health(&name, generation, None);
+                    }
+                    Ok(v) => {
+                        misses = 0;
+                        let detail = v["detail"].as_str().unwrap_or_default().to_string();
+                        match v["status"].as_str().unwrap_or("ok") {
+                            "failed" => {
+                                failures += 1;
+                                if failures >= policy.ping_misses {
+                                    host.stop("unhealthy", if detail.is_empty() { "its health check failed" } else { &detail });
+                                    return;
+                                }
+                                me.set_health(&name, generation, Some(("failed".into(), detail)));
+                            }
+                            "degraded" => {
+                                failures = 0;
+                                me.set_health(&name, generation, Some(("degraded".into(), detail)));
+                            }
+                            _ => {
+                                failures = 0;
+                                me.set_health(&name, generation, None);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn set_health(&self, name: &str, generation: u64, health: Option<(String, String)>) {
+        let changed = {
+            let mut slots = self.slots.write().unwrap();
+            let Some(slot) = slots.iter_mut().find(|s| s.name == name && s.generation == generation) else { return };
+            let changed = slot.health != health;
+            if changed {
+                slot.reason = if health.is_some() { "unhealthy".into() } else { "recovered".into() };
+                slot.health = health;
+            }
+            changed
+        };
+        if changed {
+            self.announce(name);
+        }
+    }
+
+    /// Asks `name` how it is doing now: `{status, detail}` (`hung` when it doesn't answer).
+    pub async fn check_health(&self, name: &str) -> Result<Value> {
+        let host = self.running().into_iter().find(|(n, _)| n == name).map(|(_, h)| h);
+        let host = host.ok_or_else(|| anyhow::anyhow!("extension {name} is not running"))?;
+        Ok(match host.request_with("health", json!({}), supervise(name).ping_timeout, None).await {
+            Ok(v) => json!({"status": v["status"].as_str().unwrap_or("ok"), "detail": v["detail"]}),
+            Err(e) if e.kind.as_deref() == Some("timeout") => json!({"status": "hung", "detail": e.message}),
+            Err(_) => json!({"status": "ok", "detail": "it has no health check of its own"}),
+        })
+    }
+
+    /// Stops every extension and starts what is on disk now (the gateway starting up).
+    pub async fn start_all(&self) -> String {
+        self.restart_all(None, "start").await
+    }
+
     /// Stops every extension and starts what is on disk now. Returns the status report.
     pub async fn reload(&self) -> String {
-        self.reload_except(None).await
+        self.restart_all(None, "reload").await
     }
 
     /// Like `reload`, but extension `keep` (the one asking, mid-call) runs on as it is.
     pub async fn reload_except(&self, keep: Option<&str>) -> String {
+        self.restart_all(keep, "reload").await
+    }
+
+    /// Starts in two waves: the defaults and extensions marked `early` (in their settings),
+    /// then the rest, so hooks on launching (`extension_launch`, `extension_ready`) are in
+    /// place before the extensions they watch start.
+    async fn restart_all(&self, keep: Option<&str>, reason: &str) -> String {
         let (kept, old): (Vec<_>, Vec<_>) = self.running().into_iter().partition(|(name, _)| Some(name.as_str()) == keep);
         shut_down(old.into_iter().map(|(_, h)| h).collect()).await;
-        let kept: Option<(u64, State)> = kept.into_iter().next().and_then(|(name, _)| {
-            let slots = self.slots.read().unwrap();
-            slots.iter().find(|s| s.name == name).map(|s| (s.generation, s.state.clone()))
-        });
         if let Err(e) = self.prepare_defaults() {
             eprintln!("could not prepare default extensions: {e}");
         }
         let found = self.discover();
-        let started = futures_util::future::join_all(found.iter().map(|(name, launch)| {
-            let kept = kept.clone().filter(|_| Some(name.as_str()) == keep);
-            async move {
-                match (kept, enabled(name)) {
-                    (Some(kept), _) => kept,
-                    (None, false) => (0, State::Disabled),
-                    (None, true) => self.spawn(name, launch).await,
-                }
-            }
-        }))
-        .await;
-        let slots = found
-            .into_iter()
-            .zip(started)
-            .map(|((name, launch), (generation, state))| Slot { name, launch, state, generation, restarts: 0 })
+        let kept: Option<(u64, State)> = kept.into_iter().next().and_then(|(name, _)| {
+            let slots = self.slots.read().unwrap();
+            slots.iter().find(|s| s.name == name).map(|s| (s.generation, s.state.clone()))
+        });
+        let slots: Vec<Slot> = found
+            .iter()
+            .map(|(name, launch)| match (&kept, Some(name.as_str()) == keep, enabled(name)) {
+                (Some((generation, state)), true, _) => Slot { generation: *generation, ..Slot::new(name.clone(), launch.clone(), state.clone(), "kept") },
+                (_, _, false) => Slot::new(name.clone(), launch.clone(), State::Disabled, "disable"),
+                _ => Slot::new(name.clone(), launch.clone(), State::Starting, reason),
+            })
             .collect();
         *self.slots.write().unwrap() = slots; // old processes are killed as they drop
-        for name in self.slots.read().unwrap().iter().map(|s| s.name.clone()) {
+        for early_wave in [true, false] {
+            let wave: Vec<&(String, Launch)> = found
+                .iter()
+                .filter(|(name, launch)| {
+                    let starting = self.slots.read().unwrap().iter().any(|s| &s.name == name && matches!(s.state, State::Starting));
+                    starting && early(name, launch) == early_wave
+                })
+                .collect();
+            futures_util::future::join_all(wave.into_iter().map(|(name, launch)| async move {
+                let launched = self.launch_one(name, launch, reason).await;
+                self.put(name, launch, launched, 0);
+            }))
+            .await;
+        }
+        for name in self.slots.read().unwrap().iter().filter(|s| matches!(s.state, State::Disabled)).map(|s| s.name.clone()) {
             self.announce(&name);
         }
         self.status()
@@ -382,17 +789,16 @@ impl Extensions {
         let launch = self.launch(name)?;
         crate::config::set(&format!("extensions.{name}.enabled"), Value::Null)?;
         shut_down(self.running().into_iter().filter(|(n, _)| n == name).map(|(_, h)| h).collect()).await;
-        let (generation, state) = self.spawn(name, &launch).await;
-        let ok = matches!(state, State::Running(_));
-        let slot = Slot { name: name.to_string(), launch, state, generation, restarts: 0 };
         {
             let mut slots = self.slots.write().unwrap();
-            slots.retain(|s| s.name != name);
-            slots.push(slot);
+            slots.retain(|s| s.name != name); // the process is killed as it drops
+            slots.push(Slot::new(name.into(), launch.clone(), State::Starting, "enable"));
             slots.sort_by(|a, b| a.name.cmp(&b.name));
         }
+        let launched = self.launch_one(name, &launch, "enable").await;
+        let ok = matches!(launched.1, State::Running(_));
+        self.put(name, &launch, launched, 0);
         let line = self.line(name);
-        self.announce(name);
         if let Some(core) = self.core.read().unwrap().clone() {
             core.changed();
         }
@@ -415,7 +821,7 @@ impl Extensions {
         {
             let mut slots = self.slots.write().unwrap();
             slots.retain(|s| s.name != name); // the process is killed as it drops
-            slots.push(Slot { name: name.to_string(), launch, state: State::Disabled, generation: 0, restarts: 0 });
+            slots.push(Slot::new(name.into(), launch, State::Disabled, "disable"));
             slots.sort_by(|a, b| a.name.cmp(&b.name));
         }
         self.announce(name);
@@ -427,16 +833,28 @@ impl Extensions {
         let data = {
             let slots = self.slots.read().unwrap();
             let Some(slot) = slots.iter().find(|s| s.name == name) else { return };
-            let e = self.entry(slot, &HashSet::new());
-            json!({"name": name, "state": e["state"], "error": e["error"]})
+            let e = self.entry(slot, &HashSet::new(), &HashMap::new());
+            json!({"name": name, "state": e["state"], "reason": e["reason"], "error": e["error"], "detail": e["health"]["detail"],
+                   "restarts": e["restarts"], "final": e["final"]})
         };
-        if !self.listens("extension_state") {
-            return;
+        Log::new(name).note(&format!("{} ({})", data["state"].as_str().unwrap_or(""), data["reason"].as_str().unwrap_or("")));
+        eprintln!("extension {name}: {} ({})", data["state"].as_str().unwrap_or(""), data["reason"].as_str().unwrap_or(""));
+        self.tell(data);
+    }
+
+    /// Sends `extension_state` with `data` to whoever listens.
+    fn tell(&self, data: Value) {
+        if self.listens("extension_state") {
+            self.emit_later("extension_state", data);
         }
+    }
+
+    /// Runs `event` through its handlers in the background.
+    fn emit_later(&self, event: &'static str, data: Value) {
         let me = self.me.clone();
         tokio::spawn(async move {
             if let Some(me) = me.upgrade() {
-                me.emit("extension_state", data, &Origin::default()).await;
+                me.emit(event, data, &Origin::default()).await;
             }
         });
     }
@@ -448,7 +866,19 @@ impl Extensions {
             .iter()
             .filter_map(|s| match &s.state {
                 State::Running(h) => Some((s.name.clone(), h.clone())),
-                State::Failed(_) | State::Disabled => None,
+                State::Starting | State::Failed(_) | State::Disabled => None,
+            })
+            .collect()
+    }
+
+    /// Running extensions that may hook `event` (only those with `admin` the guarded ones).
+    fn hookers(&self, event: &str) -> Vec<(String, Arc<Host>)> {
+        let guarded = GUARDED.contains(&event);
+        self.running()
+            .into_iter()
+            .filter(|(_, h)| {
+                let m = h.manifest();
+                m.events.iter().any(|e| e == event) && (!guarded || m.needs.iter().any(|n| n == "admin"))
             })
             .collect()
     }
@@ -522,7 +952,7 @@ impl Extensions {
 
     /// True when some extension handles `event` (so callers can skip building its data).
     pub fn listens(&self, event: &str) -> bool {
-        self.running().iter().any(|(_, h)| h.manifest().events.iter().any(|e| e == event))
+        !self.hookers(event).is_empty()
     }
 
     /// Runs `event` through every extension that handles it. Mutating events form a chain in
@@ -531,7 +961,7 @@ impl Extensions {
     /// result stops the chain. Observe-only events reach every handler at once and come back
     /// unchanged. Failing handlers are skipped.
     pub async fn emit(&self, event: &str, mut data: Value, chat: &Origin) -> Value {
-        let mut hosts: Vec<_> = self.running().into_iter().filter(|(_, h)| h.manifest().events.iter().any(|e| e == event)).collect();
+        let mut hosts = self.hookers(event);
         let observe = self.observes(event);
         if observe {
             futures_util::future::join_all(hosts.iter().map(|(n, h)| hook(n, h, event, &data, chat, observe))).await;
@@ -672,8 +1102,12 @@ impl Extensions {
         Some(host.request("command", params, COMMAND_TIMEOUT).await.map(|v| v.as_str().map(String::from)))
     }
 
-    fn entry(&self, slot: &Slot, builtin: &HashSet<String>) -> Value {
+    /// One extension as `list` shows it; `usage` is `(memory KB, CPU %)` by process group.
+    fn entry(&self, slot: &Slot, builtin: &HashSet<String>, usage: &HashMap<i32, (u64, f64)>) -> Value {
+        let degraded = slot.health.as_ref().is_some_and(|(s, _)| s == "degraded");
         let (state, error) = match &slot.state {
+            State::Starting => ("starting", None),
+            State::Running(_) if degraded => ("degraded", None),
             State::Running(_) => ("running", None),
             State::Failed(e) => ("failed", Some(e.trim().to_string())),
             State::Disabled => ("disabled", None),
@@ -681,10 +1115,20 @@ impl Extensions {
         let origin = crate::config::unit("extensions", &slot.name).ok().and_then(|v| v["origin"].as_str().map(String::from));
         let origin = origin.unwrap_or_else(|| match slot.launch {
             Launch::Binary { .. } => "default".into(),
-            Launch::Script(_) => "user".into(),
+            Launch::Script(_) | Launch::Command(_) => "user".into(),
         });
-        let mut v = json!({"name": slot.name, "state": state, "error": error, "origin": origin});
+        let mut v = json!({"name": slot.name, "state": state, "error": error, "origin": origin, "reason": slot.reason,
+                           "restarts": slot.restarts, "final": slot.gave_up});
+        if let Some((status, detail)) = &slot.health {
+            v["health"] = json!({"status": status, "detail": detail});
+        }
         if let State::Running(h) = &slot.state {
+            v["pid"] = json!(h.pid());
+            v["uptime_s"] = json!(h.started.elapsed().as_secs());
+            if let Some((kb, cpu)) = usage.get(&h.pid()) {
+                v["memory_kb"] = json!(kb);
+                v["cpu"] = json!((cpu * 10.0).round() / 10.0);
+            }
             let m = h.manifest();
             v["summary"] = json!(m.summary);
             v["details"] = json!(m.details);
@@ -710,14 +1154,15 @@ impl Extensions {
 
     fn line(&self, name: &str) -> String {
         let slots = self.slots.read().unwrap();
-        slots.iter().find(|s| s.name == name).map(|s| status_line(&self.entry(s, &builtin_tools()))).unwrap_or_default()
+        slots.iter().find(|s| s.name == name).map(|s| status_line(&self.entry(s, &builtin_tools(), &HashMap::new()))).unwrap_or_default()
     }
 
-    /// Every extension in name order: `{name, state: running|failed|disabled, error, tools,
-    /// replaces, commands, hooks, needs, takes, sections, events}`.
+    /// Every extension in name order: `{name, state: starting|running|degraded|failed|disabled,
+    /// reason, error, restarts, final, health, pid, uptime_s, memory_kb, cpu, tools, replaces,
+    /// commands, hooks, needs, takes, sections, events}`.
     pub fn list(&self) -> Value {
-        let builtin = builtin_tools();
-        Value::Array(self.slots.read().unwrap().iter().map(|s| self.entry(s, &builtin)).collect())
+        let (builtin, usage) = (builtin_tools(), usage());
+        Value::Array(self.slots.read().unwrap().iter().map(|s| self.entry(s, &builtin, &usage)).collect())
     }
 
     /// One line per extension, as `/extensions` shows them.
@@ -740,6 +1185,7 @@ fn status_line(e: &Value) -> String {
     match e["state"].as_str() {
         Some("failed") => format!("❌ {name} — {}", e["error"].as_str().unwrap_or("")),
         Some("disabled") => format!("⏸ {name} — disabled"),
+        Some("starting") => format!("⏳ {name} — starting"),
         _ => {
             let list = |k: &str, prefix: &str| -> Vec<String> {
                 e[k].as_array().into_iter().flatten().filter_map(|x| x.as_str().or(x["name"].as_str())).map(|s| format!("{prefix}{s}")).collect()
@@ -763,7 +1209,10 @@ fn status_line(e: &Value) -> String {
             if parts.is_empty() {
                 parts.push("registers nothing".into());
             }
-            format!("✅ {name} — {}", parts.join("; "))
+            match e["health"]["detail"].as_str() {
+                Some(detail) if e["state"] == "degraded" => format!("⚠️ {name} — degraded: {detail}; {}", parts.join("; ")),
+                _ => format!("✅ {name} — {}", parts.join("; ")),
+            }
         }
     }
 }
@@ -791,6 +1240,9 @@ async fn hook(name: &str, host: &Host, event: &str, data: &Value, chat: &Origin,
     let params = json!({"name": event, "data": data, "ctx": ctx_json(chat)});
     let default = match event {
         "message_in" => MESSAGE_TIMEOUT,
+        // A launch hook may build the extension; ready and exit hooks may ask the user.
+        "extension_launch" => Duration::from_secs(900),
+        "extension_ready" | "extension_exit" => Duration::from_secs(300),
         // Nobody waits for these: let them finish what they started (a fork, a judge).
         _ if observe && event != "stop" => OBSERVER_TIMEOUT,
         _ => EVENT_TIMEOUT,

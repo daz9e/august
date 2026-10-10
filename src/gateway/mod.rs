@@ -111,7 +111,7 @@ impl Gateway {
         let bus: Bus<Inbound> = Bus::new(256);
         let mut events = bus.subscribe();
         let mut tasks = tokio::task::JoinSet::new();
-        eprintln!("{}", self.ext.reload().await);
+        eprintln!("{}", self.ext.start_all().await);
         self.publish_commands().await;
         for ch in self.channels.values() {
             let (ch, bus) = (ch.clone(), bus.clone());

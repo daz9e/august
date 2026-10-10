@@ -4,10 +4,17 @@ use august::{cli, gateway, messengers};
 
 use anyhow::Result;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     dotenvy::dotenv().ok();
+    if std::env::args().nth(1).as_deref() == Some("gateway") {
+        let path = august::util::login_path();
+        // SAFETY: before the runtime starts, no other thread reads the environment.
+        unsafe { std::env::set_var("PATH", path) };
+    }
+    tokio::runtime::Runtime::new()?.block_on(run())
+}
 
+async fn run() -> Result<()> {
     let Some(cmd) = std::env::args().nth(1) else {
         return messengers::terminal::client::run().await;
     };

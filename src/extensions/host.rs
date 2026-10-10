@@ -3,6 +3,7 @@
 //! directions.
 
 use super::Core;
+use super::logs::Log;
 use crate::llm::ToolSpec;
 use crate::gateway::ops;
 use crate::messengers::Thread;
@@ -10,15 +11,25 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex, RwLock, RwLockReadGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex, oneshot};
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 /// The version of the protocol this August speaks (`ready.protocol`).
 pub const PROTOCOL: u64 = 2;
+/// How an extension process ended after a successful start.
+pub struct Exit {
+    /// `exit`, or what the core stopped it for (`hang`, `unhealthy`).
+    pub reason: String,
+    /// Why, for people: the stderr tail, or the core's reason for stopping it.
+    pub error: String,
+    pub code: Option<i32>,
+}
+
 /// Stderr lines kept to explain a failed start or a crash.
 const TAIL_LINES: usize = 20;
 
@@ -128,8 +139,31 @@ pub struct Host {
     manifest: Arc<RwLock<Manifest>>,
     busy: Busy,
     streams: Streams,
-    /// Killed when the host is dropped.
-    _child: Child,
+    /// Its process group (the process leads one), killed when the host is dropped.
+    pid: i32,
+    exited: Arc<AtomicBool>,
+    /// Why the core stopped it, when it did: `(reason, error)`.
+    stopped: Arc<StdMutex<Option<(String, String)>>>,
+    /// The permissions it may have, when a hook narrowed what it declared.
+    limit: Arc<RwLock<Option<Vec<String>>>>,
+    pub started: Instant,
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        if !self.exited.load(Ordering::SeqCst) {
+            // SAFETY: plain syscall; the group is the extension's own (`process_group(0)`).
+            unsafe { libc::killpg(self.pid, libc::SIGKILL) };
+        }
+    }
+}
+
+/// `m` with its needs cut down to `limit`.
+fn limited(mut m: Manifest, limit: &RwLock<Option<Vec<String>>>) -> Manifest {
+    if let Some(l) = &*limit.read().unwrap() {
+        m.needs.retain(|n| l.contains(n));
+    }
+    m
 }
 
 async fn write_line(stdin: &Mutex<ChildStdin>, msg: &Value) -> std::io::Result<()> {
@@ -145,13 +179,16 @@ fn tail_text(tail: &Tail) -> String {
 }
 
 impl Host {
-    /// Starts the extension and waits until it has registered everything. `on_exit` runs
-    /// (with the last stderr lines) if the process dies after a successful start.
+    /// Starts the extension in a process group of its own and waits until it has registered
+    /// everything. Its stderr goes to `log` and `on_line`; `on_exit` runs if the process ends
+    /// after a successful start.
     pub async fn start(
         mut command: Command,
         name: &str,
         core: Option<Arc<dyn Core>>,
-        on_exit: Box<dyn FnOnce(String) + Send>,
+        log: Arc<Log>,
+        on_line: Arc<dyn Fn(String) + Send + Sync>,
+        on_exit: Box<dyn FnOnce(Exit) + Send>,
     ) -> Result<Host, String> {
         let program = command.as_std().get_program().to_string_lossy().to_string();
         let mut child = command
@@ -160,20 +197,35 @@ impl Host {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
+            .process_group(0)
             .spawn()
-            .map_err(|e| format!("could not run {program}: {e}"))?;
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => format!("`{program}` was not found: is it installed and on PATH?"),
+                _ => format!("could not run `{program}`: {e}"),
+            })?;
+        let pid = child.id().map_or(0, |p| p as i32);
+        log.note(&format!("started, pid {pid}"));
         let stdin = Arc::new(Mutex::new(child.stdin.take().expect("piped stdin")));
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
 
+        let exited: Arc<AtomicBool> = Arc::default();
+        let waited = {
+            let exited = exited.clone();
+            tokio::spawn(async move {
+                let code = child.wait().await.ok().and_then(|s| s.code());
+                exited.store(true, Ordering::SeqCst);
+                code
+            })
+        };
         let tail: Tail = Arc::default();
         let stderr_done = {
-            let (tail, name) = (tail.clone(), name.to_string());
+            let (tail, log) = (tail.clone(), log.clone());
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    eprintln!("extension {name}: {line}");
+                    log.line(&line);
+                    on_line(line.clone());
                     let mut t = tail.lock().unwrap();
                     if t.len() == TAIL_LINES {
                         t.pop_front();
@@ -185,25 +237,28 @@ impl Host {
 
         let waiting: Waiting = Arc::default();
         let manifest: Arc<RwLock<Manifest>> = Arc::default();
+        let stopped: Arc<StdMutex<Option<(String, String)>>> = Arc::default();
+        let limit: Arc<RwLock<Option<Vec<String>>>> = Arc::default();
         let busy: Busy = Arc::default();
         let streams: Streams = Arc::default();
         let (ready_tx, ready_rx) = oneshot::channel::<()>();
         {
             let (stdin, waiting, tail, name) = (stdin.clone(), waiting.clone(), tail.clone(), name.to_string());
             let (manifest, busy, streams) = (manifest.clone(), busy.clone(), streams.clone());
+            let (stopped, limit, log) = (stopped.clone(), limit.clone(), log.clone());
             tokio::spawn(async move {
                 let mut ready_tx = Some(ready_tx);
                 let mut lines = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-                        eprintln!("extension {name}: {line}");
+                        log.line(&line);
                         continue;
                     };
                     match msg["method"].as_str() {
                         // `ready` once started, `manifest` when it registers more later.
                         // A `manifest` during setup only tells what it needs so far.
                         Some(m @ ("ready" | "manifest")) => {
-                            *manifest.write().unwrap() = parse_manifest(&msg["params"]);
+                            *manifest.write().unwrap() = limited(parse_manifest(&msg["params"]), &limit);
                             if m == "ready"
                                 && let Some(tx) = ready_tx.take()
                             {
@@ -255,8 +310,16 @@ impl Host {
                     tx.send(Err("the extension process exited".to_string().into())).ok();
                 }
                 stderr_done.await.ok();
+                let code = waited.await.ok().flatten();
+                let by_core = stopped.lock().unwrap().take();
+                let why = by_core.as_ref().map_or_else(String::new, |(_, e)| format!(": {e}"));
+                let (reason, error) = by_core.unwrap_or_else(|| ("exit".into(), tail_text(&tail)));
+                log.note(&match code {
+                    Some(c) => format!("exited with code {c} ({reason}{why})"),
+                    None => format!("ended by a signal ({reason}{why})"),
+                });
                 if ready_tx.is_none() {
-                    on_exit(tail_text(&tail));
+                    on_exit(Exit { reason, error, code });
                 }
             });
         }
@@ -270,18 +333,38 @@ impl Host {
             }
             Ok(Err(_)) => {
                 // Exited before registering; give stderr a moment to drain.
-                let _ = child.wait().await;
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 let tail = tail_text(&tail);
                 return Err(if tail.is_empty() { "the extension exited during startup".into() } else { tail });
             }
-            Err(_) => return Err(format!("did not start within {} s", START_TIMEOUT.as_secs())),
+            Err(_) => {
+                // SAFETY: plain syscall on the extension's own process group.
+                unsafe { libc::killpg(pid, libc::SIGKILL) };
+                return Err(format!("did not start within {} s", START_TIMEOUT.as_secs()));
+            }
         }
-        Ok(Host { stdin, waiting, next_id: AtomicU64::new(1), manifest, busy, streams, _child: child })
+        Ok(Host { stdin, waiting, next_id: AtomicU64::new(1), manifest, busy, streams, pid, exited, stopped, limit, started: Instant::now() })
     }
 
     pub fn manifest(&self) -> RwLockReadGuard<'_, Manifest> {
         self.manifest.read().unwrap()
+    }
+
+    pub fn pid(&self) -> i32 {
+        self.pid
+    }
+
+    /// Kills its process group; it then ends as `reason` (`hang`, `unhealthy`) with `error`.
+    pub fn stop(&self, reason: &str, error: &str) {
+        *self.stopped.lock().unwrap() = Some((reason.into(), error.into()));
+        // SAFETY: plain syscall on the extension's own process group.
+        unsafe { libc::killpg(self.pid, libc::SIGKILL) };
+    }
+
+    /// From now on it has at most these permissions, whatever it declares.
+    pub fn limit_needs(&self, needs: Vec<String>) {
+        self.manifest.write().unwrap().needs.retain(|n| needs.contains(n));
+        *self.limit.write().unwrap() = Some(needs);
     }
 
     pub async fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
@@ -348,7 +431,7 @@ impl Host {
         let r = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err("the extension process exited".to_string().into()),
-            Err(_) => return Err(format!("timed out after {} s", timeout.as_secs()).into()),
+            Err(_) => return Err(RpcError { message: format!("timed out after {} s", timeout.as_secs()), kind: Some("timeout".into()) }),
         };
         guard.done = true;
         r

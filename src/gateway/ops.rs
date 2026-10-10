@@ -78,6 +78,8 @@ pub const OPS: &[Op] = &[
     op("extension_enable", Some("admin"), "(Re)start {name} and keep it enabled; returns its status line, fails with its error"),
     op("extension_disable", Some("admin"), "Stop {name} and keep it disabled"),
     op("extensions_reload", Some("admin"), "Restart every extension but the caller"),
+    op("extension_logs", Some("admin"), "The last {lines} (default 100) lines of extension {name}'s log: its stderr and the core's notes, also while it is down"),
+    op("extension_health", Some("admin"), "Ask extension {name} how it is doing now: {status: ok|degraded|failed|hung, detail}"),
     op("settings", None, "The calling extension's settings, schema defaults filled in"),
     op("settings_set", None, "Set {path, value} in the calling extension's settings (null deletes)"),
     op("config_list", Some("config"), "Every known setting under {prefix} (default all): [{path, description, type, default, value, secret}]; secrets masked"),
@@ -357,6 +359,12 @@ impl Gateway {
                 self.publish_commands().await;
                 Value::Null
             }
+            "extension_logs" => {
+                let name = arg("name")?;
+                anyhow::ensure!(extensions::valid_name(name), "bad extension name `{name}`");
+                json!(extensions::log_tail(name, p["lines"].as_u64().unwrap_or(100) as usize))
+            }
+            "extension_health" => self.ext.check_health(arg("name")?).await?,
             "extensions_reload" => {
                 self.ext.reload_except(Some(ext)).await;
                 self.publish_commands().await;

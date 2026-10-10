@@ -187,6 +187,7 @@ fn status_line(e: &Value) -> String {
     match e["state"].as_str() {
         Some("failed") => format!("❌ {name} — {}", str(&e["error"])),
         Some("disabled") => format!("⏸ {name} — disabled"),
+        Some("starting") => format!("⏳ {name} — starting"),
         _ => {
             let mut parts = Vec::new();
             for (key, label, prefix) in [
@@ -206,7 +207,13 @@ fn status_line(e: &Value) -> String {
             if parts.is_empty() {
                 parts.push("registers nothing".into());
             }
-            format!("✅ {name} — {}", parts.join("; "))
+            if let Some(kb) = e["memory_kb"].as_u64() {
+                parts.push(format!("{:.1} MB", kb as f64 / 1024.0));
+            }
+            match e["health"]["detail"].as_str() {
+                Some(detail) if e["state"] == "degraded" => format!("⚠️ {name} — degraded: {detail}; {}", parts.join("; ")),
+                _ => format!("✅ {name} — {}", parts.join("; ")),
+            }
         }
     }
 }

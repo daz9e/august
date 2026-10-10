@@ -11,4 +11,4 @@ mod extensions;
 pub mod gateway;
 mod llm;
 mod tools;
-mod util;
+pub mod util;

@@ -327,8 +327,43 @@ user is told to sign in again.
 
 Where a call takes a thread, `"home"` is the user's home thread (set with `/home`, else the
 thread they wrote in last), e.g. `august.send("home", "...")` for reports nobody asked for.
-`extension_state { name, state, error }` tells when an extension started, failed, crashed or
-was turned off.
+`extension_state { name, state, reason, error, detail, restarts, final }` tells when an
+extension starts, runs, is degraded, fails, crashes or is turned off (`state`:
+`starting|running|degraded|failed|disabled`; `reason`: `install|update|start|reload|enable|
+restart|exit|hang|unhealthy|recovered|disable`; `final`: it won't be restarted).
+
+## Lifecycle
+
+August watches every extension. It asks `health` every 30 s: no answer twice → it hangs and
+is restarted; register `august.health(() => ({ status, detail }))` to say more — `degraded`
+when something outside is wrong (no key, no network; shown, not restarted), `failed` when
+something inside broke (a loop that stopped; restarted). A crash is restarted after 1, 2,
+4, … s, at most 5 times in a row. Each extension's stderr is logged by August
+(`logs/extensions/<name>.log`); `august.call("extension_logs", { name, lines })` reads it.
+
+Hooks on other extensions' lives need `admin`:
+- `extension_launch` `{ name, dir, command, env, reason, changed }`: before its process
+  starts (`reason` `install`/`update` when it is new or its files changed, with the
+  `changed` files). Return `{ command, env }` to start it otherwise (a sandbox, secrets in
+  the environment), `{ block: "why" }` to keep it from starting. May take long (a build).
+- `extension_ready` `{ name, reason, changed, manifest }`: it started and registered
+  (`manifest`: its tools, hooks, needs, ...) but gets nothing yet. `{ block }` stops it,
+  `{ needs: [...] }` limits its permissions.
+- `extension_exit` `{ name, reason: exit|hang|unhealthy, code, error, restarts, uptime_ms }`:
+  its process ended. `{ restart: false }` keeps it down, `{ delay_ms }` sets the pause.
+- `extension_output` `{ name, line }` (observe): every line it writes to stderr.
+Mark a watcher `early` (`/config extensions.<name>.early true`) so it starts before the
+extensions it watches.
+
+## Any language
+
+A folder with `extension.json` instead of `index.ts` is an extension in any language: August
+runs its `command` in the folder and speaks the same protocol over stdin/stdout
+(newline-delimited JSON; see the types at the end for the methods):
+
+```json
+{ "command": ["python3", "main.py"], "env": { "MODE": "fast" } }
+```
 
 ## Permissions
 
@@ -341,7 +376,7 @@ refuses the rest: `august.needs("messaging", "turns")` in its setup.
 - `models`: `august.model.set`;
 - `sessions`: `august.sessions.*`, `august.search`;
 - `config`: `august.config.get/set` (any unit's settings);
-- `admin`: `august.extensions.*` (other extensions: list, enable, disable, reload; a reload restarts every extension but yours).
+- `admin`: `august.extensions.*` (other extensions: list, enable, disable, reload; a reload restarts every extension but yours), their logs and health (`extension_logs`, `extension_health`), and hooks on their lives (`extension_launch`, `extension_ready`, `extension_exit`, `extension_output`).
 - `user`: act for the user, as a slash command does: `august.call(op, { ...params, as_user: true })`
   counts as the user's (hooks see `by: "user"`, and it may turn extensions on and off).
 

@@ -50,3 +50,24 @@ pub fn human_size(bytes: u64) -> String {
         b => format!("{b} B"),
     }
 }
+
+/// PATH for the gateway: its own, then what the user's login shell adds. A background service
+/// starts with launchd's short PATH; this way what runs in the user's terminal runs here too.
+pub fn login_path() -> String {
+    let own = std::env::var("PATH").unwrap_or_default();
+    let Ok(shell) = std::env::var("SHELL") else { return own };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new(shell).args(["-lc", "printf %s \"$PATH\""]).stdin(std::process::Stdio::null()).output();
+        tx.send(out.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned())).ok();
+    });
+    // A profile that hangs must not keep August from starting.
+    let Ok(Some(theirs)) = rx.recv_timeout(std::time::Duration::from_secs(3)) else { return own };
+    let mut dirs: Vec<&str> = own.split(':').filter(|d| !d.is_empty()).collect();
+    for d in theirs.split(':') {
+        if !d.is_empty() && !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    }
+    dirs.join(":")
+}
