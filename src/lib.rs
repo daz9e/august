@@ -6,6 +6,7 @@ mod agent;
 pub mod messengers;
 pub mod cli;
 mod config;
+pub use config::Root;
 mod db;
 mod extensions;
 pub mod gateway;

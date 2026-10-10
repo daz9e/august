@@ -14,14 +14,16 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::Write;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::oneshot;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::{mpsc, oneshot};
+
+/// What August writes to the extension, what it writes to August, and the queue of its lines.
+type Io = (Box<dyn AsyncRead + Send + Unpin>, Box<dyn AsyncWrite + Send + Unpin>, mpsc::UnboundedReceiver<String>);
 
 type Fut<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
 type ToolFn = Arc<dyn Fn(Value, Ctx) -> Fut<String> + Send + Sync>;
@@ -36,16 +38,15 @@ type HookFn = Arc<dyn Fn(Value, Ctx) -> Fut<Option<Value>> + Send + Sync>;
 type HealthFn = Arc<dyn Fn() -> Fut<Value> + Send + Sync>;
 
 struct Link {
-    out: Mutex<std::io::Stdout>,
+    /// Lines for August, written out in order once the extension runs.
+    out: mpsc::UnboundedSender<String>,
     next_id: AtomicU64,
     waiting: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
 }
 
 impl Link {
     fn write(&self, msg: &Value) {
-        let mut out = self.out.lock().unwrap();
-        writeln!(out, "{msg}").ok();
-        out.flush().ok();
+        self.out.send(msg.to_string()).ok();
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value> {
@@ -380,8 +381,12 @@ struct Inner {
     running: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
     /// Set once `ready` was sent; later changes send a new manifest.
     started: AtomicBool,
+    /// Its environment, as August started it.
+    env: HashMap<String, String>,
     dir: PathBuf,
     workspace: PathBuf,
+    /// Taken by `run`.
+    io: Mutex<Option<Io>>,
 }
 
 /// The extension: register tools, commands and hooks, then `run()`. Clones share it, so
@@ -396,10 +401,19 @@ impl Default for August {
 }
 
 impl August {
+    /// The extension August started as a process: the protocol on stdin/stdout, the
+    /// process's environment.
     pub fn new() -> Self {
-        let env = |k: &str| PathBuf::from(std::env::var(k).unwrap_or_default());
+        Self::over(std::env::vars().collect(), tokio::io::stdin(), tokio::io::stdout())
+    }
+
+    /// The extension speaking the protocol over `read` and `write` (e.g. hosted in the same
+    /// process), with environment `env`.
+    pub fn over(env: HashMap<String, String>, read: impl AsyncRead + Send + Unpin + 'static, write: impl AsyncWrite + Send + Unpin + 'static) -> Self {
+        let path = |k: &str| PathBuf::from(env.get(k).cloned().unwrap_or_default());
+        let (out, lines) = mpsc::unbounded_channel();
         August(Arc::new(Inner {
-            link: Arc::new(Link { out: Mutex::new(std::io::stdout()), next_id: AtomicU64::new(1), waiting: Mutex::default() }),
+            link: Arc::new(Link { out, next_id: AtomicU64::new(1), waiting: Mutex::default() }),
             tools: RwLock::default(),
             commands: RwLock::default(),
             accounts: RwLock::default(),
@@ -417,9 +431,16 @@ impl August {
             timeouts: RwLock::default(),
             running: Mutex::default(),
             started: AtomicBool::new(false),
-            dir: env("AUGUST_EXTENSION_DIR"),
-            workspace: env("AUGUST_WORKSPACE"),
+            dir: path("AUGUST_EXTENSION_DIR"),
+            workspace: path("AUGUST_WORKSPACE"),
+            io: Mutex::new(Some((Box::new(read), Box::new(write), lines))),
+            env,
         }))
+    }
+
+    /// An environment variable August started it with, unless unset or empty.
+    pub fn env(&self, key: &str) -> Option<String> {
+        self.0.env.get(key).filter(|v| !v.is_empty()).cloned()
     }
 
     /// The extension's own folder; keep state files here.
@@ -901,12 +922,21 @@ impl August {
         })
     }
 
-    /// Announces what is registered and serves August until it closes stdin.
+    /// Announces what is registered and serves August until it closes the link.
     pub async fn run(self) {
         let link = self.0.link.clone();
+        let (read, mut write, mut out) = self.0.io.lock().unwrap().take().expect("an extension runs once");
+        tokio::spawn(async move {
+            while let Some(mut line) = out.recv().await {
+                line.push('\n');
+                if write.write_all(line.as_bytes()).await.is_err() || write.flush().await.is_err() {
+                    break;
+                }
+            }
+        });
         link.write(&json!({"method": "ready", "params": self.manifest()}));
         self.0.started.store(true, Ordering::SeqCst);
-        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        let mut lines = BufReader::new(read).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
             if msg["method"] == "cancel" {

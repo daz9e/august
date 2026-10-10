@@ -23,6 +23,7 @@ pub async fn run(cmd: &str, arg: Option<&str>) -> Result<()> {
 /// changes a setting; `null` deletes it. Takes effect when August next reads it (a running
 /// gateway: on restart, or right away for what it reads on each use).
 fn config_command(path: Option<&str>, value: Option<&str>) -> Result<()> {
+    let root = config::Root::new(config::home(), Default::default(), Default::default());
     let Some(path) = path else {
         println!("usage: august config <path> [value]");
         println!("paths: august.<field>, extensions.<name>.settings.<field>");
@@ -30,8 +31,8 @@ fn config_command(path: Option<&str>, value: Option<&str>) -> Result<()> {
         return Ok(());
     };
     if let Some(v) = value {
-        config::set(path, serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.into())))?;
+        root.set(path, serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.into())))?;
     }
-    println!("{}", serde_json::to_string_pretty(&config::get(path)?)?);
+    println!("{}", serde_json::to_string_pretty(&root.get(path)?)?);
     Ok(())
 }

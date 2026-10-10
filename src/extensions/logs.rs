@@ -4,7 +4,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 const MAX_BYTES: u64 = 1024 * 1024;
@@ -14,13 +14,14 @@ pub struct Log {
     file: Mutex<Option<File>>,
 }
 
-fn path(name: &str) -> PathBuf {
-    crate::config::home().join("logs/extensions").join(format!("{name}.log"))
+fn path(home: &Path, name: &str) -> PathBuf {
+    home.join("logs/extensions").join(format!("{name}.log"))
 }
 
 impl Log {
-    pub fn new(name: &str) -> Self {
-        Self { path: path(name), file: Mutex::new(None) }
+    /// The log of extension `name` of the August at `home`.
+    pub fn new(home: &Path, name: &str) -> Self {
+        Self { path: path(home, name), file: Mutex::new(None) }
     }
 
     /// A line the extension wrote.
@@ -46,8 +47,8 @@ impl Log {
 }
 
 /// The last `lines` lines of `name`'s log (reaching into the rotated file if needed).
-pub fn tail(name: &str, lines: usize) -> String {
-    let p = path(name);
+pub fn tail(home: &Path, name: &str, lines: usize) -> String {
+    let p = path(home, name);
     let read = |p: &PathBuf| std::fs::read_to_string(p).unwrap_or_default();
     let mut all: Vec<String> = read(&p.with_extension("log.1")).lines().chain(read(&p).lines()).map(String::from).collect();
     let skip = all.len().saturating_sub(lines);

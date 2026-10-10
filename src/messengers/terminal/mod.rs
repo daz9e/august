@@ -61,13 +61,24 @@ fn wire(rows: &[Vec<super::Button>]) -> Vec<Vec<WireButton>> {
     rows.iter().map(|r| r.iter().map(|b| WireButton { id: b.id.clone(), label: b.label.clone() }).collect()).collect()
 }
 
-/// Where terminals connect.
-pub fn socket_path() -> PathBuf {
-    crate::config::home().join("august.sock")
+/// Where terminals connect to the August at `home`.
+pub fn socket_in(home: &std::path::Path) -> PathBuf {
+    home.join("august.sock")
 }
 
-#[derive(Default)]
-pub struct Terminal(Arc<Clients>);
+/// Where terminals connect to this user's August.
+pub fn socket_path() -> PathBuf {
+    socket_in(&crate::config::home())
+}
+
+pub struct Terminal(Arc<Clients>, PathBuf);
+
+impl Terminal {
+    /// Listens for terminals on `socket`.
+    pub fn new(socket: PathBuf) -> Self {
+        Self(Arc::default(), socket)
+    }
+}
 
 #[derive(Default)]
 struct Clients {
@@ -173,15 +184,15 @@ impl Messenger for Terminal {
     }
 
     async fn run(&self, bus: Bus<Inbound>) -> Result<()> {
-        let path = socket_path();
+        let path = &self.1;
         if UnixStream::connect(&path).await.is_ok() {
             bail!("another August is already listening on {}", path.display());
         }
-        std::fs::remove_file(&path).ok();
-        std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-        let listener = UnixListener::bind(&path).with_context(|| format!("listen on {}", path.display()))?;
+        std::fs::remove_file(path).ok();
+        std::fs::create_dir_all(path.parent().unwrap_or(path))?;
+        let listener = UnixListener::bind(path).with_context(|| format!("listen on {}", path.display()))?;
         // Only this user may talk to the agent.
-        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
         loop {
             let (stream, _) = listener.accept().await?;
             let (clients, bus) = (self.0.clone(), bus.clone());

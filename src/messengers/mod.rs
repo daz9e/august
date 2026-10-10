@@ -91,6 +91,6 @@ pub trait Messenger: Send + Sync {
 }
 
 /// The messengers built into the core: the terminal. The rest come from extensions.
-pub fn builtin() -> Vec<Arc<dyn Messenger>> {
-    vec![Arc::new(terminal::Terminal::default())]
+pub fn builtin(root: &crate::config::Root) -> Vec<Arc<dyn Messenger>> {
+    vec![Arc::new(terminal::Terminal::new(terminal::socket_in(root.home())))]
 }

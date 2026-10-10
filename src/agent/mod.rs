@@ -17,10 +17,6 @@ use std::sync::Arc;
 
 /// Model calls one turn may make (override: `AUGUST_MAX_STEPS`).
 const MAX_STEPS: usize = 150;
-
-fn max_steps() -> usize {
-    std::env::var("AUGUST_MAX_STEPS").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(MAX_STEPS)
-}
 /// Tries of one model call when `llm_error` handlers keep asking for another.
 const MAX_ATTEMPTS: usize = 8;
 
@@ -218,12 +214,23 @@ impl Agent {
             return Ok(());
         }
         self.session_provider = match settings["model"].as_str() {
-            Some(m) => Some(crate::llm::providers::build_spec(m)?),
+            Some(m) => Some(self.build_spec(m)?),
             None => None,
         };
         self.settings = settings;
         self.snapshot = None;
         Ok(())
+    }
+
+    /// A provider for model `spec` (`provider:model`, or a model of the active provider).
+    fn build_spec(&self, spec: &str) -> Result<Arc<dyn LlmProvider>> {
+        let ext = self.tools.extensions().ok_or_else(|| anyhow::anyhow!("no extensions offer models"))?;
+        crate::llm::providers::build_spec(ext, spec)
+    }
+
+    fn max_steps(&self) -> usize {
+        let set = self.tools.extensions().and_then(|e| e.root().env("AUGUST_MAX_STEPS"));
+        set.and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(MAX_STEPS)
     }
 
     /// The model this session talks to.
@@ -298,7 +305,7 @@ impl Agent {
             }
             if let Some(m) = data["model"].as_str().filter(|m| *m != model) {
                 // ponytail: builds the provider on every such call; cache by spec if it costs.
-                provider = crate::llm::providers::build_spec(m)?;
+                provider = self.build_spec(m)?;
             }
             let effort = data["effort"].as_str();
             if (effort.is_some() || data["options"].is_object()) && let Some(p) = provider.tuned(effort, &data["options"]) {
@@ -379,7 +386,7 @@ impl Agent {
                 tokio::time::sleep(std::time::Duration::from_millis(ms.min(600_000))).await;
             }
             if let Some(m) = data["model"].as_str().filter(|m| *m != self.provider().name()) {
-                self.turn_provider = Some(crate::llm::providers::build_spec(m)?);
+                self.turn_provider = Some(self.build_spec(m)?);
             }
             error = Some(failed);
         }
@@ -477,7 +484,7 @@ impl Agent {
         self.history.push(user);
         let specs = self.specs();
 
-        let limit = max_steps();
+        let limit = self.max_steps();
         for step in 0..limit {
             if step > 0 {
                 on_event(Event::Step);

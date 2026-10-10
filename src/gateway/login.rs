@@ -40,10 +40,10 @@ impl Gateway {
 
     fn account_status(&self, ext: &str, a: &AccountInfo) -> Result<(String, Option<String>)> {
         if let Some(key) = &a.key {
-            if let Some(env) = key.env.as_deref().filter(|e| std::env::var(e).is_ok_and(|v| !v.is_empty())) {
+            if let Some(env) = key.env.as_deref().filter(|e| self.root().env(e).is_some()) {
                 return Ok(("connected".into(), Some(format!("key from ${env}"))));
             }
-            let saved = crate::config::secret(ext, &a.id)?.is_some();
+            let saved = self.root().secret(ext, &a.id)?.is_some();
             return Ok((if saved { "connected" } else { "none" }.into(), None));
         }
         let v: Value = self.db.kv_get(SCOPE, &format!("{ext}/{}", a.id))?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -78,7 +78,7 @@ impl Gateway {
             let value = self.ask(&thread, &format!("Send your {} for {}.", key.label, account.label), true, &[]).await?;
             let check = json!({"account": id, "key": value});
             self.ext.call_account(&ext, "account_check", check, &Origin::thread(thread.clone())).await.map_err(|e| anyhow!("the key was not accepted: {e}"))?;
-            crate::config::set_secret(&ext, id, Some(&value))?;
+            self.root().set_secret(&ext, id, Some(&value))?;
             return Ok(json!({"who": null}));
         }
         let session = self.next_login.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -94,7 +94,7 @@ impl Gateway {
     pub(super) async fn logout(&self, id: &str) -> Result<()> {
         let (ext, account) = self.find_account(id).ok_or_else(|| anyhow!("no account `{id}`"))?;
         if account.key.is_some() {
-            return crate::config::set_secret(&ext, id, None);
+            return self.root().set_secret(&ext, id, None);
         }
         self.ext.call_account(&ext, "logout", json!({"account": id}), &Origin::default()).await.map_err(|e| anyhow!(e))?;
         self.account_update(&ext, id, "none", None).await
@@ -122,7 +122,7 @@ impl Gateway {
             "login_open" => {
                 // At this machine's terminal the browser opens by itself.
                 if thread.messenger == "cli" {
-                    open_browser(&text("url"));
+                    open_browser(self.root(), &text("url"));
                 }
                 let note = Some(text("note")).filter(|n| !n.is_empty()).unwrap_or_else(|| "Open this link to sign in:".into());
                 self.messenger(&thread)?.send(&thread.id, &OutMessage::text(format!("{note}\n{}", text("url")))).await?;
@@ -203,8 +203,8 @@ fn query_of(url: &str) -> Result<Value> {
 }
 
 /// Opens `url` in this machine's browser (best effort; `AUGUST_OPEN_BROWSER=0`: never).
-fn open_browser(url: &str) {
-    if std::env::var("AUGUST_OPEN_BROWSER").is_ok_and(|v| v == "0") {
+fn open_browser(root: &crate::config::Root, url: &str) {
+    if root.env("AUGUST_OPEN_BROWSER").is_some_and(|v| v == "0") {
         return;
     }
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };

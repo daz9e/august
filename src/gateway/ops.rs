@@ -143,19 +143,19 @@ impl Gateway {
         let ms = |k: &str, default: u64| Duration::from_millis(p[k].as_u64().unwrap_or(default));
         Ok(match name {
             "ops" => Value::Array(OPS.iter().map(|o| json!({"name": o.name, "permission": o.permission, "about": o.about})).collect()),
-            "guide" => json!(extensions::guide()),
+            "guide" => json!(self.ext.guide()),
             "tools" => json!(self.tool_list()),
             "commands" => Value::Array(self.command_list().into_iter().map(|(c, owner)| json!({"name": c.name, "description": c.description, "owner": owner})).collect()),
             "status" => {
                 let busy = thread(p).ok().map(|t| self.turns.busy(&t));
                 let m = self.model.read().unwrap().clone();
-                json!({"provider": m.0, "model": m.1, "workspace": self.workspace, "busy": busy})
+                json!({"provider": m.0, "model": m.1, "workspace": self.workspace(), "busy": busy})
             }
             "messengers" => self.messengers().await,
             "download" => {
                 let t = thread(p)?;
                 let file: crate::messengers::Attachment = serde_json::from_value(p["file"].clone()).map_err(|e| anyhow!("bad `file`: {e}"))?;
-                let path = self.workspace.join(arg("path")?);
+                let path = self.workspace().join(arg("path")?);
                 let bytes = self.messenger(&t)?.download(&file).await?;
                 if let Some(dir) = path.parent() {
                     tokio::fs::create_dir_all(dir).await?;
@@ -253,7 +253,7 @@ impl Gateway {
                     None => None,
                 };
                 let provider = match model {
-                    Some(m) => providers::build_spec(&m)?,
+                    Some(m) => providers::build_spec(&self.ext, &m)?,
                     None => self.provider.read().unwrap().clone(),
                 };
                 let effort = p["effort"].as_str();
@@ -284,7 +284,7 @@ impl Gateway {
                     Some(id) => id.to_string(),
                     None => self.model.read().unwrap().0.clone(),
                 };
-                json!(crate::llm::remote::models(&id).await?.iter().map(|m| m.to_json()).collect::<Vec<_>>())
+                json!(crate::llm::remote::models(&self.ext, &id).await?.iter().map(|m| m.to_json()).collect::<Vec<_>>())
             }
             "accounts" => self.accounts()?,
             "login" => self.login(arg("account")?, thread(p)?).await?,
@@ -296,9 +296,9 @@ impl Gateway {
                 self.account_update(ext, arg("account")?, arg("status")?, p["who"].as_str()).await?;
                 Value::Null
             }
-            "secret_get" => json!(crate::config::secret(ext, arg("key")?)?),
+            "secret_get" => json!(self.root().secret(ext, arg("key")?)?),
             "secret_set" => {
-                crate::config::set_secret(ext, arg("key")?, p["value"].as_str())?;
+                self.root().set_secret(ext, arg("key")?, p["value"].as_str())?;
                 Value::Null
             }
             "login_ask" | "login_choose" | "login_open" | "login_progress" | "login_callback" | "login_wait" => self.login_step(ext, name, p).await?,
@@ -401,8 +401,8 @@ impl Gateway {
                 let name = arg("name")?;
                 // Whoever starts a new extension first installed it: the user, or the agent
                 // through an extension's tool. The core says so; the extension can't.
-                if self.ext.dir().join(name).is_dir() && crate::config::unit("extensions", name)?["origin"].is_null() {
-                    crate::config::set(&format!("extensions.{name}.origin"), json!(if caller == "user" { "user" } else { "agent" }))?;
+                if self.ext.dir().join(name).is_dir() && self.root().unit("extensions", name)?["origin"].is_null() {
+                    self.root().set(&format!("extensions.{name}.origin"), json!(if caller == "user" { "user" } else { "agent" }))?;
                 }
                 let line = self.ext.load(name).await?;
                 self.publish_commands().await;
@@ -416,7 +416,7 @@ impl Gateway {
             "extension_logs" => {
                 let name = arg("name")?;
                 anyhow::ensure!(extensions::valid_name(name), "bad extension name `{name}`");
-                json!(extensions::log_tail(name, p["lines"].as_u64().unwrap_or(100) as usize))
+                json!(self.ext.log_tail(name, p["lines"].as_u64().unwrap_or(100) as usize))
             }
             "extension_health" => self.ext.check_health(arg("name")?).await?,
             "extensions_reload" => {
@@ -425,7 +425,7 @@ impl Gateway {
                 self.ext.list()
             }
             "settings" => {
-                extensions::with_defaults(&self.ext.settings_schema(ext), &crate::config::unit("extensions", ext)?["settings"])
+                extensions::with_defaults(&self.ext.settings_schema(ext), &self.root().unit("extensions", ext)?["settings"])
             }
             "settings_set" => {
                 let path = format!("extensions.{}.settings.{}", ext, arg("path")?);
@@ -434,7 +434,7 @@ impl Gateway {
             }
             "config_list" => Value::Array(self.config_list(p["prefix"].as_str().unwrap_or(""))?),
             "config_get" => {
-                let (path, value) = (arg("path")?, crate::config::get(arg("path")?)?);
+                let (path, value) = (arg("path")?, self.root().get(arg("path")?)?);
                 let secret = self.secret_fields(path);
                 match crate::config::is_secret_path(path, &secret) && !value.is_null() {
                     true => json!(crate::config::MASK),
@@ -474,7 +474,7 @@ impl Gateway {
 
     /// The home thread: the one set with `/home`, else the one the user wrote in last.
     pub(super) fn home(&self) -> Result<Thread> {
-        if let Some((m, id)) = crate::config::app()?.home.as_deref().and_then(|h| h.split_once(':')) {
+        if let Some((m, id)) = self.root().app()?.home.as_deref().and_then(|h| h.split_once(':')) {
             return Ok(Thread::new(m, id));
         }
         let seen = self.activity.lock().unwrap();
@@ -492,10 +492,10 @@ impl Gateway {
 
     /// Every setting a schema describes or a file holds: August's own, then each extension's.
     fn config_list(&self, prefix: &str) -> Result<Vec<Value>> {
-        let mut units = vec![("august".to_string(), crate::config::app_schema(), crate::config::unit("august", "")?)];
+        let mut units = vec![("august".to_string(), crate::config::app_schema(), self.root().unit("august", "")?)];
         for e in self.ext.list().as_array().into_iter().flatten() {
             let name = e["name"].as_str().unwrap_or_default();
-            units.push((format!("extensions.{name}.settings"), self.ext.settings_schema(name), crate::config::get(&format!("extensions.{name}.settings"))?));
+            units.push((format!("extensions.{name}.settings"), self.ext.settings_schema(name), self.root().get(&format!("extensions.{name}.settings"))?));
         }
         let mut out = Vec::new();
         for (unit, schema, values) in units.into_iter().filter(|(u, ..)| u.starts_with(prefix) || prefix.starts_with(u.as_str())) {
@@ -518,7 +518,7 @@ impl Gateway {
 
     /// Changes a setting and tells extensions (`config_changed {path}`).
     pub(super) async fn set_config(&self, path: &str, value: Value) -> Result<()> {
-        crate::config::set(path, value)?;
+        self.root().set(path, value)?;
         if self.ext.listens("config_changed") {
             let ext = self.ext.clone();
             let data = json!({"path": path});
@@ -647,21 +647,21 @@ impl Gateway {
             model = data["model"].as_str().map(String::from).unwrap_or(model);
         }
         let ids: Vec<String> = self.ext.providers().into_iter().map(|(_, p)| p.id).collect();
-        let mut sel = providers::parse_spec(&model, &ids)?;
+        let mut sel = providers::parse_spec(self.root(), &model, &ids)?;
         anyhow::ensure!(!sel.provider.is_empty(), "no model provider is chosen yet: sign in to one with /login");
         anyhow::ensure!(ids.contains(&sel.provider), "no provider `{}` (have: {})", sel.provider, ids.join(", "));
         if sel.model.is_empty() {
-            sel.model = crate::llm::remote::default_model(&sel.provider).await?;
+            sel.model = crate::llm::remote::default_model(&self.ext, &sel.provider).await?;
         }
         let (provider_id, model) = (sel.provider.clone(), sel.model.clone());
         let previous = self.model.read().unwrap().1.clone();
         crate::agent::SessionStore::journal(&*self.db, &crate::db::Entry::new("model_change", json!({"model": model, "previous": previous})));
-        *self.provider.write().unwrap() = providers::build(sel);
+        *self.provider.write().unwrap() = providers::build(&self.ext, sel);
         *self.model.write().unwrap() = (provider_id.clone(), model.clone());
-        let mut cfg = crate::config::app()?;
+        let mut cfg = self.root().app()?;
         cfg.provider = Some(provider_id.clone());
         cfg.model = Some(model.clone());
-        crate::config::save_app(&cfg)?;
+        self.root().save_app(&cfg)?;
         Ok((provider_id, model))
     }
 }

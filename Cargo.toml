@@ -161,3 +161,7 @@ tempfile = "3"
 [[test]]
 name = "integration"
 path = "tests/integration/main.rs"
+
+[[test]]
+name = "core"
+path = "tests/core/main.rs"

@@ -11,8 +11,10 @@ mod waits;
 
 use crate::agent::{self, Agent};
 use crate::messengers::bus::Bus;
+use crate::config::Root;
 use crate::db::Db;
 use crate::extensions::{self, Extensions};
+pub use crate::extensions::{Io, Link};
 use crate::messengers::{Inbound, InboundKind, Messenger, OutMessage, Thread};
 use crate::llm::{Block, LlmProvider};
 use crate::llm::providers;
@@ -49,7 +51,6 @@ pub struct Gateway {
     provider: RwLock<Arc<dyn LlmProvider>>,
     /// `(provider, model)` in use.
     model: RwLock<(String, String)>,
-    workspace: PathBuf,
     pub db: Arc<Db>,
     ext: Arc<Extensions>,
     /// Numbers sub-agents.
@@ -83,7 +84,6 @@ impl Gateway {
         channels: Vec<Arc<dyn Messenger>>,
         provider: Arc<dyn LlmProvider>,
         model: (String, String),
-        workspace: PathBuf,
         db: Arc<Db>,
         ext: Arc<Extensions>,
     ) -> Arc<Self> {
@@ -97,7 +97,6 @@ impl Gateway {
             places: Default::default(),
             provider: RwLock::new(provider),
             model: RwLock::new(model),
-            workspace,
             db,
             ext,
             live: Default::default(),
@@ -145,6 +144,14 @@ impl Gateway {
         }
         dispatcher.await.ok();
         Ok(())
+    }
+
+    fn root(&self) -> &Root {
+        self.ext.root()
+    }
+
+    fn workspace(&self) -> &std::path::Path {
+        self.root().workspace()
     }
 
     /// Messenger `id`: a built-in one, or one an extension offers.
@@ -301,24 +308,40 @@ impl Gateway {
 
 }
 
-/// Runs the agent behind the built-in messengers and those of extensions (foreground).
-pub async fn serve() -> Result<()> {
-    start(crate::messengers::builtin()).await
+/// What a core is built from.
+pub struct Options {
+    pub root: Root,
+    /// The messengers built in (extensions add theirs).
+    pub messengers: Vec<Arc<dyn Messenger>>,
+    /// Where the default extensions' binaries are; `None`: no default extensions.
+    pub defaults: Option<PathBuf>,
+    /// Extensions reached over links of the embedder's, by name.
+    pub linked: Vec<(String, Link)>,
 }
 
-/// Runs the agent behind `chans` until they all stop.
-pub async fn start(chans: Vec<Arc<dyn Messenger>>) -> Result<()> {
-    let workspace = crate::config::workspace()?;
-    let selection = providers::selection()?;
-    let model = (selection.provider.clone(), selection.model.clone());
+/// Runs the agent behind the built-in messengers and those of extensions (foreground).
+pub async fn serve() -> Result<()> {
+    let root = Root::from_env()?;
+    let messengers = crate::messengers::builtin(&root);
+    let names = messengers.iter().map(|c| c.id().to_string()).collect::<Vec<_>>().join(", ");
+    let gw = build(Options { root: root.clone(), messengers, defaults: Some(extensions::bin_dir()), linked: Vec::new() })?;
+    let model = gw.model.read().unwrap().clone();
     let label = if model.0.is_empty() { "no model provider yet (/login)".to_string() } else { format!("{} · {}", model.0, model.1) };
-    let provider = providers::build(selection);
-    println!(
-        "august serving {} (and the extensions' messengers) · {label} · workspace {}",
-        chans.iter().map(|c| c.id().to_string()).collect::<Vec<_>>().join(", "),
-        workspace.display()
-    );
-    let ext = Extensions::new(extensions::dir());
-    crate::llm::remote::use_extensions(&ext);
-    Gateway::new(chans, provider, model, workspace, Db::open()?, ext).run().await
+    println!("august serving {names} (and the extensions' messengers) · {label} · workspace {}", root.workspace().display());
+    gw.run().await
+}
+
+/// A core built from `opts`, ready to `run`: the model chosen in its settings, its database
+/// in its home.
+pub fn build(opts: Options) -> Result<Arc<Gateway>> {
+    let selection = providers::selection(&opts.root)?;
+    let model = (selection.provider.clone(), selection.model.clone());
+    std::fs::create_dir_all(opts.root.home())?;
+    let db = Db::open_at(&opts.root.home().join("august.db"))?;
+    let ext = Extensions::new(opts.root, opts.defaults);
+    for (name, link) in opts.linked {
+        ext.link(&name, link);
+    }
+    let provider = providers::build(&ext, selection);
+    Ok(Gateway::new(opts.messengers, provider, model, db, ext))
 }

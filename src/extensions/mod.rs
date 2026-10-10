@@ -9,8 +9,8 @@ mod host;
 mod logs;
 
 pub use host::{AccountInfo, ProviderInfo, RpcError};
-pub use logs::tail as log_tail;
 
+use crate::config::Root;
 use crate::llm::ToolSpec;
 use crate::messengers::Thread;
 use anyhow::Result;
@@ -78,6 +78,12 @@ enum State {
     Disabled,
 }
 
+/// Both ends of a link to an extension: what it writes, and where August writes to it.
+pub type Io = (Box<dyn tokio::io::AsyncRead + Send + Unpin>, Box<dyn tokio::io::AsyncWrite + Send + Unpin>);
+/// Starts an extension August reaches over a link of the embedder's (e.g. one running in the
+/// same process) and returns that link; called at each start and restart.
+pub type Link = Arc<dyn Fn() -> Io + Send + Sync>;
+
 /// How an extension is started.
 #[derive(Clone)]
 enum Launch {
@@ -87,6 +93,8 @@ enum Launch {
     Command(PathBuf),
     /// A default extension's binary; `dir` is its folder (state files).
     Binary { exe: PathBuf, dir: PathBuf },
+    /// Reached over a link the embedder makes (`Extensions::link`).
+    Linked(Link),
 }
 
 impl Launch {
@@ -94,6 +102,7 @@ impl Launch {
         match self {
             Launch::Script(entry) => entry.parent().unwrap_or(Path::new(".")).to_path_buf(),
             Launch::Command(dir) | Launch::Binary { dir, .. } => dir.clone(),
+            Launch::Linked(_) => PathBuf::new(),
         }
     }
 
@@ -175,9 +184,9 @@ struct Supervise {
     stable_after: Duration,
 }
 
-fn supervise(name: &str) -> Supervise {
-    let global = crate::config::get("august.supervise").unwrap_or_default();
-    let own = crate::config::unit("extensions", name).map(|v| v["supervise"].clone()).unwrap_or_default();
+fn supervise(root: &Root, name: &str) -> Supervise {
+    let global = root.get("august.supervise").unwrap_or_default();
+    let own = root.unit("extensions", name).map(|v| v["supervise"].clone()).unwrap_or_default();
     let num = |k: &str, default: u64| own[k].as_u64().or(global[k].as_u64()).unwrap_or(default);
     Supervise {
         ping_interval: Duration::from_millis(num("ping_interval_ms", 30_000).max(100)),
@@ -225,20 +234,21 @@ fn fingerprint(src: &Path) -> std::collections::BTreeMap<String, (u64, u128)> {
 const GUARDED: &[&str] = &["extension_launch", "extension_ready", "extension_exit", "extension_output"];
 
 pub struct Extensions {
+    root: Root,
     dir: PathBuf,
+    /// Where the default extensions' binaries are (`august-ext-<name>`); none: no defaults.
+    defaults: Option<PathBuf>,
     core: RwLock<Option<Arc<dyn Core>>>,
+    /// Extensions reached over links of the embedder's, by name.
+    linked: RwLock<Vec<(String, Link)>>,
     slots: RwLock<Vec<Slot>>,
     generation: AtomicU64,
     me: Weak<Extensions>,
 }
 
-pub fn dir() -> PathBuf {
-    crate::config::home().join("extensions")
-}
-
-/// The extension-writing guide with the API types (op `guide`).
-pub fn guide() -> String {
-    format!("Extensions live in {}.\n\n{GUIDE}\n```ts\n{TYPES}```\n", dir().display())
+/// The extension-writing guide with the API types (op `guide`), for extensions in `dir`.
+pub fn guide(dir: &Path) -> String {
+    format!("Extensions live in {}.\n\n{GUIDE}\n```ts\n{TYPES}```\n", dir.display())
 }
 
 pub fn valid_name(name: &str) -> bool {
@@ -246,11 +256,11 @@ pub fn valid_name(name: &str) -> bool {
 }
 
 /// `$AUGUST_BUN`, or `bun` on PATH (the gateway's PATH includes the login shell's).
-fn find_bun() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("AUGUST_BUN") {
+fn find_bun(root: &Root) -> Option<PathBuf> {
+    if let Some(p) = root.env("AUGUST_BUN") {
         return Some(PathBuf::from(p));
     }
-    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = root.env("PATH").unwrap_or_default();
     std::env::split_paths(&path).map(|d| d.join("bun")).find(|p| p.is_file())
 }
 
@@ -278,35 +288,36 @@ pub fn with_defaults(schema: &Value, settings: &Value) -> Value {
 }
 
 /// An extension starts unless the user turned it off (`enabled: false` in its settings).
-fn enabled(name: &str) -> bool {
-    crate::config::unit("extensions", name).map_or(true, |v| v["enabled"] != false)
+fn enabled(root: &Root, name: &str) -> bool {
+    root.unit("extensions", name).map_or(true, |v| v["enabled"] != false)
 }
 
 /// The folder of the running binary, where the extensions that ship with August are.
-fn bin_dir() -> PathBuf {
+pub fn bin_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
     exe.parent().unwrap_or(Path::new(".")).to_path_buf()
 }
 
-/// `august-ext-<name>` next to the running binary.
-fn default_binary(name: &str) -> PathBuf {
-    bin_dir().join(format!("august-ext-{name}"))
+/// `august-ext-<name>` in `bin`.
+fn default_binary(bin: &Path, name: &str) -> PathBuf {
+    bin.join(format!("august-ext-{name}"))
 }
 
-/// The extensions that ship with August: binaries `august-ext-<name>` next to `august`.
-fn shipped() -> Vec<String> {
-    let names = std::fs::read_dir(bin_dir()).into_iter().flatten().filter_map(|e| e.ok());
+/// The extensions that ship with August: binaries `august-ext-<name>` in `bin`.
+fn shipped(bin: Option<&Path>) -> Vec<String> {
+    let Some(bin) = bin else { return Vec::new() };
+    let names = std::fs::read_dir(bin).into_iter().flatten().filter_map(|e| e.ok());
     let mut names: Vec<String> = names
         .filter_map(|e| e.file_name().to_str()?.strip_prefix("august-ext-").map(String::from))
-        .filter(|n| valid_name(n) && default_binary(n).is_file())
+        .filter(|n| valid_name(n) && default_binary(bin, n).is_file())
         .collect();
     names.sort();
     names
 }
 
-/// Defaults, and extensions marked `early`, start before the rest.
-fn early(name: &str, launch: &Launch) -> bool {
-    matches!(launch, Launch::Binary { .. }) || crate::config::unit("extensions", name).is_ok_and(|v| v["early"] == true)
+/// Defaults, extensions linked in and those marked `early` start before the rest.
+fn early(root: &Root, name: &str, launch: &Launch) -> bool {
+    matches!(launch, Launch::Binary { .. } | Launch::Linked(_)) || root.unit("extensions", name).is_ok_and(|v| v["early"] == true)
 }
 
 /// Why a hook chain stopped something.
@@ -354,14 +365,26 @@ fn stopped(data: &Value) -> bool {
 }
 
 impl Extensions {
-    pub fn new(dir: PathBuf) -> Arc<Self> {
+    /// Extensions of `root` (in `home/extensions`), with the defaults in `defaults`.
+    pub fn new(root: Root, defaults: Option<PathBuf>) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
-            dir,
+            dir: root.home().join("extensions"),
+            root,
+            defaults,
+            linked: RwLock::default(),
             core: RwLock::new(None),
             slots: RwLock::new(Vec::new()),
             generation: AtomicU64::new(0),
             me: me.clone(),
         })
+    }
+
+    /// Adds extension `name`, reached over the links `link` makes; it starts with the others.
+    /// One in the extensions folder of the same name wins.
+    pub fn link(&self, name: &str, link: Link) {
+        let mut linked = self.linked.write().unwrap();
+        linked.retain(|(n, _)| n != name);
+        linked.push((name.into(), link));
     }
 
     pub fn set_core(&self, core: Arc<dyn Core>) {
@@ -386,9 +409,14 @@ impl Extensions {
                 found.push((name, launch));
             }
         }
-        for name in shipped() {
+        for (name, link) in self.linked.read().unwrap().iter() {
+            if !found.iter().any(|(n, _)| n == name) {
+                found.push((name.clone(), Launch::Linked(link.clone())));
+            }
+        }
+        for name in shipped(self.defaults.as_deref()) {
             if !found.iter().any(|(n, _)| *n == name) {
-                let launch = Launch::Binary { exe: default_binary(&name), dir: self.defaults_dir().join(&name) };
+                let launch = Launch::Binary { exe: default_binary(self.defaults.as_deref().unwrap_or(Path::new(".")), &name), dir: self.defaults_dir().join(&name) };
                 found.push((name, launch));
             }
         }
@@ -398,7 +426,7 @@ impl Extensions {
 
     /// Folders of the defaults (dropping the TypeScript copies earlier versions wrote there).
     fn prepare_defaults(&self) -> std::io::Result<()> {
-        for name in shipped() {
+        for name in shipped(self.defaults.as_deref()) {
             let folder = self.defaults_dir().join(name);
             std::fs::create_dir_all(&folder)?;
             std::fs::remove_file(folder.join("index.ts")).ok();
@@ -408,7 +436,7 @@ impl Extensions {
 
     /// Writes `host.ts` next to the extensions and returns `(bun, host.ts)`.
     fn runtime(&self) -> Result<(PathBuf, PathBuf), String> {
-        let bun = find_bun().ok_or("bun is not installed (https://bun.sh); set AUGUST_BUN to its path")?;
+        let bun = find_bun(&self.root).ok_or("bun is not installed (https://bun.sh); set AUGUST_BUN to its path")?;
         let rt = self.dir.join(".runtime");
         let host = rt.join("host.ts");
         let write = || -> std::io::Result<()> {
@@ -441,6 +469,7 @@ impl Extensions {
                 spec.update(&v).map_err(|e| format!("{MANIFEST}: {e}"))?;
                 Ok(spec)
             }
+            Launch::Linked(_) => Ok(Spec { command: Vec::new(), env: Default::default(), dir: launch.dir() }),
             Launch::Binary { exe, dir } => {
                 if !exe.is_file() {
                     return Err(format!("{} is missing; build it with `cargo build`", exe.display()));
@@ -473,7 +502,7 @@ impl Extensions {
     /// hooks. A first launch is `install`, one with changed files `update`; else `reason`.
     async fn launch_one(&self, name: &str, launch: &Launch, reason: &str) -> (u64, State, String) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let log = Arc::new(Log::new(name));
+        let log = Arc::new(Log::new(self.root.home(), name));
         let print = fingerprint(&launch.source());
         let before = self.launched()[name].as_object().cloned();
         let (reason, changed): (&str, Vec<String>) = match &before {
@@ -502,10 +531,16 @@ impl Extensions {
         if stopped(&data) {
             return failed(format!("launch blocked: {}", block_text(&data)));
         }
-        if let Err(e) = spec.update(&data) {
-            return failed(format!("an extension_launch hook left {e}"));
+        let linked = match launch {
+            Launch::Linked(link) => Some(link.clone()),
+            _ => None,
+        };
+        if linked.is_none() {
+            if let Err(e) = spec.update(&data) {
+                return failed(format!("an extension_launch hook left {e}"));
+            }
+            log.note(&format!("command: {}", spec.command.join(" ")));
         }
-        log.note(&format!("command: {}", spec.command.join(" ")));
 
         let core = self.core.read().unwrap().clone();
         let (me, n) = (self.me.clone(), name.to_string());
@@ -521,7 +556,15 @@ impl Extensions {
                 me.emit_later("extension_output", json!({"name": n, "line": line}));
             }
         });
-        let host = match Host::start(spec.command(), name, core, log.clone(), on_line, on_exit).await {
+        let started = match linked {
+            Some(link) => Host::link(link(), name, core, log.clone(), on_exit).await,
+            None => {
+                let mut command = spec.command();
+                command.env("AUGUST_WORKSPACE", self.root.workspace()).env("AUGUST_HOME", self.root.home());
+                Host::start(command, name, core, log.clone(), on_line, on_exit).await
+            }
+        };
+        let host = match started {
             Ok(h) => Arc::new(h),
             Err(e) => return failed(e),
         };
@@ -568,7 +611,7 @@ impl Extensions {
         if exit.reason == "blocked" {
             return; // its `extension_ready` hooks refused it; nothing to restart
         }
-        let policy = supervise(name);
+        let policy = supervise(&self.root, name);
         let (restarts, uptime) = {
             let mut slots = self.slots.write().unwrap();
             let Some(slot) = slots.iter_mut().find(|s| s.name == name && s.generation == generation) else {
@@ -644,16 +687,16 @@ impl Extensions {
     /// `ping_misses` times in a row means it hangs, and `failed` that many times means it is
     /// broken inside: either way it is killed and goes the way of a crash.
     fn watch(&self, name: String, generation: u64, host: Weak<Host>) {
-        let me = self.me.clone();
+        let (me, root) = (self.me.clone(), self.root.clone());
         tokio::spawn(async move {
             let (mut misses, mut failures) = (0, 0);
             loop {
-                tokio::time::sleep(supervise(&name).ping_interval).await;
+                tokio::time::sleep(supervise(&root, &name).ping_interval).await;
                 let (Some(me), Some(host)) = (me.upgrade(), host.upgrade()) else { return };
                 if !me.is_current(&name, generation) {
                     return;
                 }
-                let policy = supervise(&name);
+                let policy = supervise(&root, &name);
                 match host.request_with("health", json!({}), policy.ping_timeout, None).await {
                     Err(e) if e.kind.as_deref() == Some("timeout") => {
                         misses += 1;
@@ -714,7 +757,7 @@ impl Extensions {
     pub async fn check_health(&self, name: &str) -> Result<Value> {
         let host = self.running().into_iter().find(|(n, _)| n == name).map(|(_, h)| h);
         let host = host.ok_or_else(|| anyhow::anyhow!("extension {name} is not running"))?;
-        Ok(match host.request_with("health", json!({}), supervise(name).ping_timeout, None).await {
+        Ok(match host.request_with("health", json!({}), supervise(&self.root, name).ping_timeout, None).await {
             Ok(v) => json!({"status": v["status"].as_str().unwrap_or("ok"), "detail": v["detail"]}),
             Err(e) if e.kind.as_deref() == Some("timeout") => json!({"status": "hung", "detail": e.message}),
             Err(_) => json!({"status": "ok", "detail": "it has no health check of its own"}),
@@ -752,7 +795,7 @@ impl Extensions {
         });
         let slots: Vec<Slot> = found
             .iter()
-            .map(|(name, launch)| match (&kept, Some(name.as_str()) == keep, enabled(name)) {
+            .map(|(name, launch)| match (&kept, Some(name.as_str()) == keep, enabled(&self.root, name)) {
                 (Some((generation, state)), true, _) => Slot { generation: *generation, ..Slot::new(name.clone(), launch.clone(), state.clone(), "kept") },
                 (_, _, false) => Slot::new(name.clone(), launch.clone(), State::Disabled, "disable"),
                 _ => Slot::new(name.clone(), launch.clone(), State::Starting, reason),
@@ -764,7 +807,7 @@ impl Extensions {
                 .iter()
                 .filter(|(name, launch)| {
                     let starting = self.slots.read().unwrap().iter().any(|s| &s.name == name && matches!(s.state, State::Starting));
-                    starting && early(name, launch) == early_wave
+                    starting && early(&self.root, name, launch) == early_wave
                 })
                 .collect();
             futures_util::future::join_all(wave.into_iter().map(|(name, launch)| async move {
@@ -782,7 +825,7 @@ impl Extensions {
     /// (Re)starts one extension after it was saved, enabling it. Returns its status line.
     pub async fn load(&self, name: &str) -> Result<String> {
         let launch = self.launch(name)?;
-        crate::config::set(&format!("extensions.{name}.enabled"), Value::Null)?;
+        self.root.set(&format!("extensions.{name}.enabled"), Value::Null)?;
         shut_down(self.running().into_iter().filter(|(n, _)| n == name).map(|(_, h)| h).collect()).await;
         {
             let mut slots = self.slots.write().unwrap();
@@ -812,7 +855,7 @@ impl Extensions {
     pub async fn disable(&self, name: &str) -> Result<()> {
         let launch = self.launch(name)?;
         shut_down(self.running().into_iter().filter(|(n, _)| n == name).map(|(_, h)| h).collect()).await;
-        crate::config::set(&format!("extensions.{name}.enabled"), json!(false))?;
+        self.root.set(&format!("extensions.{name}.enabled"), json!(false))?;
         {
             let mut slots = self.slots.write().unwrap();
             slots.retain(|s| s.name != name); // the process is killed as it drops
@@ -832,7 +875,7 @@ impl Extensions {
             json!({"name": name, "state": e["state"], "reason": e["reason"], "error": e["error"], "detail": e["health"]["detail"],
                    "restarts": e["restarts"], "final": e["final"]})
         };
-        Log::new(name).note(&format!("{} ({})", data["state"].as_str().unwrap_or(""), data["reason"].as_str().unwrap_or("")));
+        Log::new(self.root.home(), name).note(&format!("{} ({})", data["state"].as_str().unwrap_or(""), data["reason"].as_str().unwrap_or("")));
         eprintln!("extension {name}: {} ({})", data["state"].as_str().unwrap_or(""), data["reason"].as_str().unwrap_or(""));
         self.tell(data);
     }
@@ -972,7 +1015,7 @@ impl Extensions {
             futures_util::future::join_all(hosts.iter().map(|(n, h)| hook(n, h, event, &data, chat, observe))).await;
             return data;
         }
-        in_user_order(&mut hosts);
+        in_user_order(&self.root, &mut hosts);
         for (name, host) in hosts {
             if let (Some(Value::Object(changes)), Some(d)) = (hook(&name, &host, event, &data, chat, false).await, data.as_object_mut()) {
                 d.extend(changes);
@@ -988,7 +1031,7 @@ impl Extensions {
     /// in the user's order.
     pub fn taker(&self, job: &str) -> Option<String> {
         let mut hosts: Vec<_> = self.running().into_iter().filter(|(_, h)| h.manifest().takes.iter().any(|t| t == job)).collect();
-        in_user_order(&mut hosts);
+        in_user_order(&self.root, &mut hosts);
         hosts.into_iter().next().map(|(n, _)| n)
     }
 
@@ -1117,10 +1160,10 @@ impl Extensions {
             State::Failed(e) => ("failed", Some(e.trim().to_string())),
             State::Disabled => ("disabled", None),
         };
-        let origin = crate::config::unit("extensions", &slot.name).ok().and_then(|v| v["origin"].as_str().map(String::from));
+        let origin = self.root.unit("extensions", &slot.name).ok().and_then(|v| v["origin"].as_str().map(String::from));
         let origin = origin.unwrap_or_else(|| match slot.launch {
             Launch::Binary { .. } => "default".into(),
-            Launch::Script(_) | Launch::Command(_) => "user".into(),
+            Launch::Script(_) | Launch::Command(_) | Launch::Linked(_) => "user".into(),
         });
         let mut v = json!({"name": slot.name, "state": state, "error": error, "origin": origin, "reason": slot.reason,
                            "restarts": slot.restarts, "final": slot.gave_up});
@@ -1171,15 +1214,29 @@ impl Extensions {
 
     /// One line per extension, as `/extensions` shows them.
     pub fn status(&self) -> String {
-        status(&self.list())
+        status(&self.list(), &self.dir)
+    }
+
+    /// The extension-writing guide (op `guide`).
+    pub fn guide(&self) -> String {
+        guide(&self.dir)
+    }
+
+    pub fn root(&self) -> &Root {
+        &self.root
+    }
+
+    /// The last `lines` lines of extension `name`'s log.
+    pub fn log_tail(&self, name: &str, lines: usize) -> String {
+        logs::tail(self.root.home(), name, lines)
     }
 }
 
 /// The status report (logged at start) for a `list()`.
-fn status(list: &Value) -> String {
+fn status(list: &Value, dir: &Path) -> String {
     let all = list.as_array().cloned().unwrap_or_default();
     if all.is_empty() {
-        return format!("No extensions. They live in `{}`.", dir().display());
+        return format!("No extensions. They live in `{}`.", dir.display());
     }
     all.iter().map(status_line).collect::<Vec<_>>().join("\n")
 }
@@ -1222,8 +1279,8 @@ fn status_line(e: &Value) -> String {
 
 /// Sorts extensions in the user's order (`hooks.order` in `august.json`), the rest after.
 // ponytail: reads august.json on every call; cache it if that ever shows up.
-fn in_user_order(hosts: &mut [(String, Arc<Host>)]) {
-    let order = crate::config::get("august.hooks.order").unwrap_or_default();
+fn in_user_order(root: &Root, hosts: &mut [(String, Arc<Host>)]) {
+    let order = root.get("august.hooks.order").unwrap_or_default();
     let order: Vec<&str> = order.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     hosts.sort_by_key(|(n, _)| order.iter().position(|o| o == n).unwrap_or(usize::MAX));
 }

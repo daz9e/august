@@ -6,18 +6,9 @@ use super::*;
 use crate::extensions::Extensions;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-static EXTENSIONS: OnceLock<Weak<Extensions>> = OnceLock::new();
-
-/// The extensions remote providers are reached through (set once by the gateway).
-pub fn use_extensions(ext: &Arc<Extensions>) {
-    EXTENSIONS.set(Arc::downgrade(ext)).ok();
-}
-
-fn extensions() -> Result<Arc<Extensions>> {
-    EXTENSIONS.get().and_then(Weak::upgrade).ok_or_else(|| anyhow::anyhow!("extensions are not running"))
-}
-
 pub struct Remote {
+    /// The extensions it is reached through.
+    ext: Weak<Extensions>,
     id: String,
     /// Empty until known: the provider's default model is asked for at the first call.
     model: OnceLock<String>,
@@ -29,31 +20,30 @@ pub struct Remote {
 }
 
 impl Remote {
-    pub fn new(id: &str, model_name: &str, effort: &str) -> Self {
+    pub fn new(ext: &Arc<Extensions>, id: &str, model_name: &str, effort: &str) -> Self {
         let model = OnceLock::new();
         if !model_name.is_empty() {
             model.set(model_name.to_string()).ok();
         }
-        Self { id: id.into(), model, effort: effort.into(), options: Value::Null, window: Mutex::new(None) }
+        Self { ext: Arc::downgrade(ext), id: id.into(), model, effort: effort.into(), options: Value::Null, window: Mutex::new(None) }
     }
-}
 
-/// Ids of the providers the running extensions offer.
-pub fn provider_ids() -> Vec<String> {
-    extensions().map(|e| e.providers().into_iter().map(|(_, p)| p.id).collect()).unwrap_or_default()
+    fn extensions(&self) -> Result<Arc<Extensions>> {
+        self.ext.upgrade().ok_or_else(|| anyhow::anyhow!("extensions are not running"))
+    }
 }
 
 /// The model provider `id` starts with when none is chosen: its default, else the first
 /// it lists.
-pub async fn default_model(id: &str) -> Result<String> {
+pub async fn default_model(ext: &Extensions, id: &str) -> Result<String> {
     anyhow::ensure!(!id.is_empty(), "no model provider is chosen yet: sign in to one with /login");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        if let Some(p) = extensions()?.providers().into_iter().map(|(_, p)| p).find(|p| p.id == id) {
+        if let Some(p) = ext.providers().into_iter().map(|(_, p)| p).find(|p| p.id == id) {
             if let Some(m) = p.default_model {
                 return Ok(m);
             }
-            let first = models(id).await?.into_iter().next();
+            let first = models(ext, id).await?.into_iter().next();
             return first.map(|m| m.id).ok_or_else(|| anyhow::anyhow!("{id} offers no models"));
         }
         anyhow::ensure!(std::time::Instant::now() < deadline, "no provider `{id}` is offered by any extension");
@@ -62,8 +52,8 @@ pub async fn default_model(id: &str) -> Result<String> {
 }
 
 /// The models provider `id` offers.
-pub async fn models(id: &str) -> Result<Vec<ModelInfo>> {
-    let list = extensions()?.call_provider(id, "models", serde_json::json!({"provider": id}), None).await.map_err(|e| anyhow::anyhow!(e.message))?;
+pub async fn models(ext: &Extensions, id: &str) -> Result<Vec<ModelInfo>> {
+    let list = ext.call_provider(id, "models", serde_json::json!({"provider": id}), None).await.map_err(|e| anyhow::anyhow!(e.message))?;
     Ok(list.as_array().into_iter().flatten().filter_map(ModelInfo::from_json).collect())
 }
 
@@ -78,7 +68,12 @@ impl LlmProvider for Remote {
     }
 
     fn tuned(&self, effort: Option<&str>, options: &Value) -> Option<Arc<dyn LlmProvider>> {
-        let mut tuned = Self::new(&self.id, self.name(), effort.unwrap_or(&self.effort));
+        let model = OnceLock::new();
+        if !self.name().is_empty() {
+            model.set(self.name().to_string()).ok();
+        }
+        let effort = effort.unwrap_or(&self.effort).to_string();
+        let mut tuned = Self { ext: self.ext.clone(), id: self.id.clone(), model, effort, options: Value::Null, window: Mutex::new(None) };
         tuned.options = if options.is_null() { self.options.clone() } else { options.clone() };
         *tuned.window.lock().unwrap() = self.context_window();
         Some(Arc::new(tuned))
@@ -99,7 +94,7 @@ impl LlmProvider for Remote {
         let model = match self.model.get() {
             Some(m) => m.clone(),
             None => {
-                let m = default_model(&self.id).await?;
+                let m = default_model(&*self.extensions()?, &self.id).await?;
                 self.model.set(m.clone()).ok();
                 m
             }
@@ -115,7 +110,7 @@ impl LlmProvider for Remote {
             options: self.options.clone(),
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
-        let ext = extensions()?;
+        let ext = self.extensions()?;
         let call = ext.call_provider(&self.id, "complete", req.to_json(), Some(tx));
         tokio::pin!(call);
         let mut show = |event: Value| {
@@ -137,7 +132,7 @@ impl LlmProvider for Remote {
             None => anyhow::anyhow!(e.message),
         })?;
         let completion = Completion::from_json(&value).ok_or_else(|| anyhow::anyhow!("provider {} sent a bad completion", self.id))?;
-        if self.window.lock().unwrap().is_none() && let Ok(list) = models(&self.id).await {
+        if self.window.lock().unwrap().is_none() && let Ok(list) = models(&ext, &self.id).await {
             *self.window.lock().unwrap() = list.iter().find(|m| m.id == model).and_then(|m| m.context_window);
         }
         Ok(completion)

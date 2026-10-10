@@ -14,9 +14,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, Command};
-use tokio::sync::{Mutex, oneshot};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::{Mutex, Notify, oneshot};
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 /// The version of the protocol this August speaks (`ready.protocol`).
@@ -132,15 +132,21 @@ fn call_thread(params: &Value) -> Option<Thread> {
     ops::thread(&json!({"thread": params["ctx"]["thread"]})).ok()
 }
 
+/// Where August writes to the extension.
+type Writer = Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>;
+
 pub struct Host {
-    stdin: Arc<Mutex<ChildStdin>>,
+    stdin: Writer,
     waiting: Waiting,
     next_id: AtomicU64,
     manifest: Arc<RwLock<Manifest>>,
     busy: Busy,
     streams: Streams,
-    /// Its process group (the process leads one), killed when the host is dropped.
+    /// Its process group (the process leads one), killed when the host is dropped; 0 for
+    /// an extension linked in.
     pid: i32,
+    /// Closes the link of one linked in.
+    close: Arc<Notify>,
     exited: Arc<AtomicBool>,
     /// Why the core stopped it, when it did: `(reason, error)`.
     stopped: Arc<StdMutex<Option<(String, String)>>>,
@@ -152,8 +158,7 @@ pub struct Host {
 impl Drop for Host {
     fn drop(&mut self) {
         if !self.exited.load(Ordering::SeqCst) {
-            // SAFETY: plain syscall; the group is the extension's own (`process_group(0)`).
-            unsafe { libc::killpg(self.pid, libc::SIGKILL) };
+            self.kill();
         }
     }
 }
@@ -166,7 +171,7 @@ fn limited(mut m: Manifest, limit: &RwLock<Option<Vec<String>>>) -> Manifest {
     m
 }
 
-async fn write_line(stdin: &Mutex<ChildStdin>, msg: &Value) -> std::io::Result<()> {
+async fn write_line(stdin: &Mutex<Box<dyn AsyncWrite + Send + Unpin>>, msg: &Value) -> std::io::Result<()> {
     let mut line = msg.to_string();
     line.push('\n');
     let mut stdin = stdin.lock().await;
@@ -176,6 +181,16 @@ async fn write_line(stdin: &Mutex<ChildStdin>, msg: &Value) -> std::io::Result<(
 
 fn tail_text(tail: &Tail) -> String {
     tail.lock().unwrap().iter().cloned().collect::<Vec<_>>().join("\n")
+}
+
+/// The process behind a link, when there is one.
+struct Process {
+    pid: i32,
+    /// Its exit code, once it ended.
+    waited: tokio::task::JoinHandle<Option<i32>>,
+    /// Done once its stderr is read to the end.
+    stderr_done: tokio::task::JoinHandle<()>,
+    tail: Tail,
 }
 
 impl Host {
@@ -192,8 +207,6 @@ impl Host {
     ) -> Result<Host, String> {
         let program = command.as_std().get_program().to_string_lossy().to_string();
         let mut child = command
-            .env("AUGUST_WORKSPACE", crate::config::workspace().unwrap_or_default())
-            .env("AUGUST_HOME", crate::config::home())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -205,24 +218,19 @@ impl Host {
             })?;
         let pid = child.id().map_or(0, |p| p as i32);
         log.note(&format!("started, pid {pid}"));
-        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("piped stdin")));
+        let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
 
-        let exited: Arc<AtomicBool> = Arc::default();
-        let waited = {
-            let exited = exited.clone();
-            tokio::spawn(async move {
-                let code = child.wait().await.ok().and_then(|s| s.code());
-                exited.store(true, Ordering::SeqCst);
-                // What it started dies with it, so a restart doesn't find the old ones running.
-                if pid > 0 {
-                    // SAFETY: plain syscall on the extension's own process group; it may be gone.
-                    unsafe { libc::killpg(pid, libc::SIGKILL) };
-                }
-                code
-            })
-        };
+        let waited = tokio::spawn(async move {
+            let code = child.wait().await.ok().and_then(|s| s.code());
+            // What it started dies with it, so a restart doesn't find the old ones running.
+            if pid > 0 {
+                // SAFETY: plain syscall on the extension's own process group; it may be gone.
+                unsafe { libc::killpg(pid, libc::SIGKILL) };
+            }
+            code
+        });
         let tail: Tail = Arc::default();
         let stderr_done = {
             let (tail, log) = (tail.clone(), log.clone());
@@ -239,7 +247,30 @@ impl Host {
                 }
             })
         };
+        let process = Process { pid, waited, stderr_done, tail };
+        Self::serve((Box::new(stdout), Box::new(stdin)), Some(process), name, core, log, on_exit).await
+    }
 
+    /// Serves an extension August reaches over `io` rather than a process of its own, and
+    /// waits until it has registered everything; `on_exit` runs if the link closes after.
+    pub async fn link(io: super::Io, name: &str, core: Option<Arc<dyn Core>>, log: Arc<Log>, on_exit: Box<dyn FnOnce(Exit) + Send>) -> Result<Host, String> {
+        log.note("linked");
+        Self::serve(io, None, name, core, log, on_exit).await
+    }
+
+    async fn serve(
+        (stdout, stdin): super::Io,
+        process: Option<Process>,
+        name: &str,
+        core: Option<Arc<dyn Core>>,
+        log: Arc<Log>,
+        on_exit: Box<dyn FnOnce(Exit) + Send>,
+    ) -> Result<Host, String> {
+        let stdin: Writer = Arc::new(Mutex::new(stdin));
+        let pid = process.as_ref().map_or(0, |p| p.pid);
+        let tail = process.as_ref().map(|p| p.tail.clone()).unwrap_or_default();
+        let exited: Arc<AtomicBool> = Arc::default();
+        let close: Arc<Notify> = Arc::default();
         let waiting: Waiting = Arc::default();
         let manifest: Arc<RwLock<Manifest>> = Arc::default();
         let stopped: Arc<StdMutex<Option<(String, String)>>> = Arc::default();
@@ -250,11 +281,16 @@ impl Host {
         {
             let (stdin, waiting, tail, name) = (stdin.clone(), waiting.clone(), tail.clone(), name.to_string());
             let (manifest, busy, streams) = (manifest.clone(), busy.clone(), streams.clone());
-            let (stopped, limit, log) = (stopped.clone(), limit.clone(), log.clone());
+            let (stopped, limit, log, exited, close) = (stopped.clone(), limit.clone(), log.clone(), exited.clone(), close.clone());
             tokio::spawn(async move {
                 let mut ready_tx = Some(ready_tx);
                 let mut lines = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
+                loop {
+                    let line = tokio::select! {
+                        line = lines.next_line() => line,
+                        _ = close.notified() => break,
+                    };
+                    let Ok(Some(line)) = line else { break };
                     let Ok(msg) = serde_json::from_str::<Value>(&line) else {
                         log.line(&line);
                         continue;
@@ -310,18 +346,25 @@ impl Host {
                         }
                     }
                 }
-                // The process is gone: fail whatever still waits for it.
+                // The extension is gone: fail whatever still waits for it.
                 for (_, tx) in waiting.lock().unwrap().drain() {
                     tx.send(Err("the extension process exited".to_string().into())).ok();
                 }
-                stderr_done.await.ok();
-                let code = waited.await.ok().flatten();
+                stdin.lock().await.shutdown().await.ok();
+                let code = match process {
+                    Some(p) => {
+                        p.stderr_done.await.ok();
+                        p.waited.await.ok().flatten()
+                    }
+                    None => None,
+                };
+                exited.store(true, Ordering::SeqCst);
                 let by_core = stopped.lock().unwrap().take();
                 let why = by_core.as_ref().map_or_else(String::new, |(_, e)| format!(": {e}"));
                 let (reason, error) = by_core.unwrap_or_else(|| ("exit".into(), tail_text(&tail)));
                 log.note(&match code {
                     Some(c) => format!("exited with code {c} ({reason}{why})"),
-                    None => format!("ended by a signal ({reason}{why})"),
+                    None => format!("ended ({reason}{why})"),
                 });
                 if ready_tx.is_none() {
                     on_exit(Exit { reason, error, code });
@@ -329,9 +372,10 @@ impl Host {
             });
         }
 
+        let host = Host { stdin, waiting, next_id: AtomicU64::new(1), manifest, busy, streams, pid, close, exited, stopped, limit, started: Instant::now() };
         match tokio::time::timeout(START_TIMEOUT, ready_rx).await {
             Ok(Ok(())) => {
-                let speaks = manifest.read().unwrap().protocol;
+                let speaks = host.manifest.read().unwrap().protocol;
                 if speaks != PROTOCOL {
                     return Err(format!("speaks extension protocol {speaks}; this August needs {PROTOCOL} (update its SDK)"));
                 }
@@ -342,13 +386,19 @@ impl Host {
                 let tail = tail_text(&tail);
                 return Err(if tail.is_empty() { "the extension exited during startup".into() } else { tail });
             }
-            Err(_) => {
-                // SAFETY: plain syscall on the extension's own process group.
-                unsafe { libc::killpg(pid, libc::SIGKILL) };
-                return Err(format!("did not start within {} s", START_TIMEOUT.as_secs()));
-            }
+            Err(_) => return Err(format!("did not start within {} s", START_TIMEOUT.as_secs())),
         }
-        Ok(Host { stdin, waiting, next_id: AtomicU64::new(1), manifest, busy, streams, pid, exited, stopped, limit, started: Instant::now() })
+        Ok(host)
+    }
+
+    /// Ends it: kills its process group, or closes the link.
+    fn kill(&self) {
+        if self.pid > 0 {
+            // SAFETY: plain syscall; the group is the extension's own (`process_group(0)`).
+            unsafe { libc::killpg(self.pid, libc::SIGKILL) };
+        } else {
+            self.close.notify_one();
+        }
     }
 
     pub fn manifest(&self) -> RwLockReadGuard<'_, Manifest> {
@@ -359,11 +409,10 @@ impl Host {
         self.pid
     }
 
-    /// Kills its process group; it then ends as `reason` (`hang`, `unhealthy`) with `error`.
+    /// Ends it; it then ends as `reason` (`hang`, `unhealthy`) with `error`.
     pub fn stop(&self, reason: &str, error: &str) {
         *self.stopped.lock().unwrap() = Some((reason.into(), error.into()));
-        // SAFETY: plain syscall on the extension's own process group.
-        unsafe { libc::killpg(self.pid, libc::SIGKILL) };
+        self.kill();
     }
 
     /// From now on it has at most these permissions, whatever it declares.
@@ -446,7 +495,7 @@ impl Host {
 /// Cancels a call the extension is still working on when nobody waits for it any more.
 struct CancelOnDrop {
     id: u64,
-    stdin: Arc<Mutex<ChildStdin>>,
+    stdin: Writer,
     waiting: Waiting,
     done: bool,
 }
