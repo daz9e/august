@@ -442,6 +442,20 @@ async fn main() {
     let home = std::env::var("AUGUST_HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".august"));
     let config_path = home.join("mcp.json");
     let status: Status = Arc::default();
+    // A server that failed is outside this extension (its command, its address): degraded.
+    let watched = status.clone();
+    august.health(move || {
+        let failed: Vec<String> = watched.lock().unwrap().iter().filter_map(|(n, s)| match s {
+            State::Failed(e) => Some(format!("{n}: {e}")),
+            _ => None,
+        }).collect();
+        async move {
+            Ok(match failed.is_empty() {
+                true => json!({"status": "ok"}),
+                false => json!({"status": "degraded", "detail": format!("MCP servers down — {}", failed.join("; "))}),
+            })
+        }
+    });
 
     let (s, path) = (status.clone(), config_path.clone());
     august.register_command("mcp", "List MCP servers and their tools", move |_, _| {

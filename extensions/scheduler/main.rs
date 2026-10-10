@@ -12,6 +12,7 @@ use august_ext::{August, Ctx, Thread, str_arg, truncate};
 use schedule::{Schedule, fmt_time};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::time::Duration;
 
 const TICK: Duration = Duration::from_secs(20);
@@ -266,13 +267,26 @@ async fn main() {
         }
     });
 
+    let every = std::env::var("AUGUST_SCHEDULER_TICK").ok().and_then(|v| v.parse().ok()).map(Duration::from_secs).unwrap_or(TICK);
+    let ticked = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    // A loop that stopped ticking is broken inside: failed, so August restarts it.
+    let last = ticked.clone();
+    august.health(move || {
+        let late = last.lock().unwrap().elapsed();
+        async move {
+            Ok(match late > every * 3 + Duration::from_secs(60) {
+                true => json!({"status": "failed", "detail": format!("the task loop last ran {} s ago", late.as_secs())}),
+                false => json!({"status": "ok"}),
+            })
+        }
+    });
     let ticker = august.clone();
     tokio::spawn(async move {
-        let every = std::env::var("AUGUST_SCHEDULER_TICK").ok().and_then(|v| v.parse().ok()).map(Duration::from_secs).unwrap_or(TICK);
         loop {
             if let Err(e) = tick(&ticker).await {
                 eprintln!("scheduler: {e:#}");
             }
+            *ticked.lock().unwrap() = std::time::Instant::now();
             tokio::time::sleep(every).await;
         }
     });

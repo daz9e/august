@@ -212,6 +212,8 @@ struct Telegram {
     typing: Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>,
     /// The long-polling loop.
     poller: Mutex<Option<tokio::task::AbortHandle>>,
+    /// How polling went last: when it last got an answer, and the error since, if any.
+    polled: Mutex<Option<(std::time::Instant, Option<String>)>>,
     /// While pairing: where a private message from someone not yet allowed goes.
     pairing: Mutex<Option<mpsc::UnboundedSender<(i64, String)>>>,
 }
@@ -465,6 +467,7 @@ async fn connect(august: &August, tg: &Arc<Telegram>, token: &str) -> Result<Str
     }
     *tg.api.write().unwrap() = Some(api.clone());
     let username = bot.username.clone();
+    *tg.polled.lock().unwrap() = Some((std::time::Instant::now(), None));
     let task = tokio::spawn(poll(august.clone(), tg.clone(), api, bot));
     if let Some(old) = tg.poller.lock().unwrap().replace(task.abort_handle()) {
         old.abort();
@@ -478,8 +481,14 @@ async fn poll(august: August, tg: Arc<Telegram>, api: Api, bot: Bot) {
     let mut offset = 0;
     loop {
         let updates = match api.get_updates(offset, 30).await {
-            Ok(u) => u,
+            Ok(u) => {
+                *tg.polled.lock().unwrap() = Some((std::time::Instant::now(), None));
+                u
+            }
             Err(e) => {
+                if let Some((_, error)) = tg.polled.lock().unwrap().as_mut() {
+                    *error = Some(format!("{e:#}"));
+                }
                 eprintln!("{e:#}; retrying in 3s");
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
@@ -567,6 +576,23 @@ async fn login(august: &August, tg: &Arc<Telegram>, steps: Login) -> Result<Sign
     Ok(Signed { who: format!("@{username}"), expires_at: None })
 }
 
+/// The poller stopped while connected: broken inside. No answers from Telegram for two long
+/// polls: the network or Telegram, which a restart won't fix.
+fn health(tg: &Telegram) -> Value {
+    if tg.api.read().unwrap().is_none() {
+        return json!({"status": "ok", "detail": "not connected"});
+    }
+    if tg.poller.lock().unwrap().as_ref().is_some_and(|p| p.is_finished()) {
+        return json!({"status": "failed", "detail": "the polling loop stopped"});
+    }
+    match &*tg.polled.lock().unwrap() {
+        Some((at, Some(error))) if at.elapsed() > Duration::from_secs(70) => {
+            json!({"status": "degraded", "detail": format!("no answer from Telegram for {} s: {error}", at.elapsed().as_secs())})
+        }
+        _ => json!({"status": "ok"}),
+    }
+}
+
 /// `/logout telegram`: forgets the token and stops the bot (allowed users stay).
 async fn logout(august: &August, tg: &Telegram) -> Result<()> {
     august.set_secret("token", None).await?;
@@ -586,6 +612,11 @@ async fn main() {
         "allowed": {"type": "array", "items": {"type": "integer"}, "default": [], "description": "Telegram user ids allowed to talk to the bot (/login telegram pairs one)"},
     }}));
     let tg = Arc::new(Telegram::default());
+    let t = tg.clone();
+    august.health(move || {
+        let t = t.clone();
+        async move { Ok(health(&t)) }
+    });
     let (a, t) = (august.clone(), tg.clone());
     let (b, u) = (august.clone(), tg.clone());
     august.register_login_account(
