@@ -24,8 +24,7 @@ async fn serve(august: August) {
         "august",
         "Call one of August's core operations: sessions, history, search, turns, models, \
          messengers, accounts, extensions, settings and more. `op: \"ops\"` lists every \
-         operation with its parameters; `op: \"guide\"` explains them in depth. `params.thread` \
-         defaults to the current chat.",
+         operation with its parameters. `params.thread` defaults to the current chat.",
         json!({
             "type": "object",
             "properties": {

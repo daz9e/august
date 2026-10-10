@@ -1,11 +1,19 @@
 //! `extend`: the agent writes extensions for August itself (`save_extension`); the core
 //! starts it and marks it as the agent's. `extensions` lists them and turns them on and off.
-//! The core's extension guide ships as the `writing-extensions` skill.
+//! It brings the TypeScript SDK (`extensions/sdk-ts`): the host that runs an `index.ts` under
+//! bun, its types, and the guide, which ships as the `writing-extensions` skill.
+
+#[cfg(test)]
+mod tests;
 
 use anyhow::bail;
 use august_ext::{August, str_arg};
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+const HOST: &str = include_str!("../sdk-ts/host.ts");
+const TYPES: &str = include_str!("../sdk-ts/august.d.ts");
+const GUIDE: &str = include_str!("../sdk-ts/guide.md");
 
 fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
@@ -21,6 +29,10 @@ async fn serve(august: August) {
     let dir = PathBuf::from(august.env("AUGUST_EXTENSIONS").unwrap_or_default());
     let home = dir.display().to_string();
     let skills = dir.join(".runtime/skills/writing-extensions");
+    let host = dir.join(".runtime/ts/host.ts");
+    if let Err(e) = write_sdk(&host, &dir, &skills) {
+        eprintln!("could not write the TypeScript SDK: {e:#}");
+    }
     let me = august.clone();
     august.register_tool(
         "save_extension",
@@ -42,18 +54,21 @@ async fn serve(august: August) {
             "additionalProperties": false
         }),
         move |input, _| {
-            let (august, folder) = (me.clone(), dir.join(str_arg(&input, "name")));
+            let (august, folder, host) = (me.clone(), dir.join(str_arg(&input, "name")), host.clone());
             async move {
                 let name = str_arg(&input, "name");
                 if !valid_name(name) {
                     bail!("extension names use lowercase letters, digits, `-` and `_` (max 64)");
                 }
                 let files: Vec<(String, String)> = match (input["code"].as_str(), input["files"].as_object()) {
-                    (Some(code), None) => vec![("index.ts".into(), code.into())],
+                    (Some(code), None) => {
+                        let command = json!({"command": ["bun", "run", host.display().to_string(), "index.ts", name]});
+                        vec![("index.ts".into(), code.into()), ("extension.json".into(), serde_json::to_string_pretty(&command)?)]
+                    }
                     (None, Some(files)) => files.iter().map(|(p, c)| (p.clone(), c.as_str().unwrap_or_default().to_string())).collect(),
                     _ => bail!("give either `code` (TypeScript) or `files` (any language, with extension.json)"),
                 };
-                if !files.iter().any(|(p, _)| p == "index.ts" || p == "extension.json") {
+                if !files.iter().any(|(p, _)| p == "extension.json") {
                     bail!("`files` needs an `extension.json` with the `command` that runs it");
                 }
                 for (path, _) in &files {
@@ -63,10 +78,6 @@ async fn serve(august: August) {
                     }
                 }
                 std::fs::create_dir_all(&folder)?;
-                // One entry: a TypeScript extension drops an old extension.json, which would win.
-                if files.iter().any(|(p, _)| p == "index.ts") && !files.iter().any(|(p, _)| p == "extension.json") {
-                    std::fs::remove_file(folder.join("extension.json")).ok();
-                }
                 for (path, content) in &files {
                     let file = folder.join(path);
                     std::fs::create_dir_all(file.parent().unwrap_or(&folder))?;
@@ -163,20 +174,20 @@ async fn serve(august: August) {
             Ok(Some(json!({"system": system})))
         }
     });
-    // The guide comes from the core, so it waits for the connection `run` serves.
-    let me = august.clone();
-    tokio::spawn(async move {
-        let write = async {
-            let guide = me.call("guide", json!({})).await?;
-            std::fs::create_dir_all(&skills)?;
-            let about = "How to extend August itself with extensions in TypeScript or any language (tools, slash commands, hooks); read before `save_extension`";
-            let text = format!("---\nname: writing-extensions\ndescription: {about}\n---\n{}", guide.as_str().unwrap_or_default());
-            std::fs::write(skills.join("SKILL.md"), text)?;
-            anyhow::Ok(())
-        };
-        if let Err(e) = write.await {
-            eprintln!("could not write the writing-extensions skill: {e:#}");
-        }
-    });
     august.run().await;
+}
+
+/// Writes the TypeScript host and its types at `host`, and the guide as the
+/// `writing-extensions` skill in `skills`.
+fn write_sdk(host: &Path, dir: &Path, skills: &Path) -> anyhow::Result<()> {
+    let rt = host.parent().unwrap_or(dir);
+    std::fs::create_dir_all(rt)?;
+    std::fs::write(host, HOST)?;
+    std::fs::write(rt.join("august.d.ts"), TYPES)?;
+    std::fs::create_dir_all(skills)?;
+    let about = "How to extend August itself with extensions in TypeScript or any language (tools, slash commands, hooks); read before `save_extension`";
+    let guide = GUIDE.replace("{host}", &host.display().to_string());
+    let text = format!("---\nname: writing-extensions\ndescription: {about}\n---\nExtensions live in {}.\n\n{guide}\n```ts\n{TYPES}```\n", dir.display());
+    std::fs::write(skills.join("SKILL.md"), text)?;
+    Ok(())
 }

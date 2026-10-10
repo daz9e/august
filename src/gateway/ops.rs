@@ -29,7 +29,6 @@ const SESSIONS: Option<&str> = Some("sessions");
 
 pub const OPS: &[Op] = &[
     op("ops", None, "Every operation with the permission it needs"),
-    op("guide", None, "How to write extensions: the guide with the API's types (Markdown)"),
     op("tools", None, "Every agent tool: {name, description, parameters, owner}"),
     op("commands", None, "Every slash command: {name, description, owner}"),
     op("status", None, "{provider, model, workspace, busy} (busy: of `thread`, if given)"),
@@ -143,7 +142,6 @@ impl Gateway {
         let ms = |k: &str, default: u64| Duration::from_millis(p[k].as_u64().unwrap_or(default));
         Ok(match name {
             "ops" => Value::Array(OPS.iter().map(|o| json!({"name": o.name, "permission": o.permission, "about": o.about})).collect()),
-            "guide" => json!(self.ext.guide()),
             "tools" => json!(self.tool_list()),
             "commands" => Value::Array(self.command_list().into_iter().map(|(c, owner)| json!({"name": c.name, "description": c.description, "owner": owner})).collect()),
             "status" => {

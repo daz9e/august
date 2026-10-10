@@ -21,13 +21,13 @@ async fn run(fake: &FakeAugust, input: Value, ctx: Value) -> Result<String, Stri
 async fn an_operation_runs_in_the_current_thread_and_turn() {
     let fake = core().await;
     fake.on("sessions", |_| Ok(json!([{"name": "side project"}])));
-    fake.on("guide", |_| Ok(json!("How the operations work")));
+    fake.on("extension_logs", |_| Ok(json!("started, pid 7")));
 
     // JSON results come back pretty, strings as they are.
     let out = run(&fake, json!({"op": "sessions"}), ctx("1")).await.unwrap();
     assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), json!([{"name": "side project"}]));
     assert_eq!(fake.calls("sessions"), vec![json!({"thread": thread("1")})]);
-    assert_eq!(run(&fake, json!({"op": "guide"}), ctx("1")).await.unwrap(), "How the operations work");
+    assert_eq!(run(&fake, json!({"op": "extension_logs"}), ctx("1")).await.unwrap(), "started, pid 7");
 
     // In a turn the call says which, so a new session waits for the turn to end; a thread
     // given in the params wins.

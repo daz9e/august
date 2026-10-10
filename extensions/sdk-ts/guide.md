@@ -18,8 +18,12 @@ This guide and the types at the end are the whole API; you don't need August's s
 
 ## Shape
 
-An extension is one TypeScript file, `<extensions dir>/<name>/index.ts`, run by bun in its
-own process. It default-exports a setup function:
+An extension is a folder `<extensions dir>/<name>/` whose `extension.json` says what to run:
+`{ "command": [...], "env": {...}, "setup": [[...], ...] }`. August runs it in its own process
+and talks to it over stdin/stdout; any language works. In TypeScript (below) it is
+`index.ts`, run by bun through the TypeScript host:
+`{ "command": ["bun", "run", "{host}", "index.ts", "<name>"] }` — `save_extension` with
+`code` writes both files for you. `index.ts` default-exports a setup function:
 
 ```ts
 import type { August } from "august";

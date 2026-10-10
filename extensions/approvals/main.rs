@@ -26,7 +26,7 @@ const SAFE_COMMANDS: &[&str] = &[
 
 /// Core operations (the `august` tool) that only read; every other one is asked about.
 const READ_OPS: &[&str] = &[
-    "ops", "guide", "tools", "commands", "status", "messengers", "turns", "providers", "models",
+    "ops", "tools", "commands", "status", "messengers", "turns", "providers", "models",
     "accounts", "sessions", "history", "messages", "search", "extensions", "extension_logs",
     "extension_health", "settings", "config_list", "config_get", "store_get", "store_list",
 ];

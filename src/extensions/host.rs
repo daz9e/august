@@ -1,4 +1,4 @@
-//! One extension process (`bun run host.ts <entry> <name>`, or a default extension's binary)
+//! One extension process (the command of its `extension.json`, or a default extension's binary)
 //! and the JSON-RPC link to it: one JSON object per line on stdin/stdout, requests in both
 //! directions.
 

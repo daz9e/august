@@ -2,7 +2,8 @@
 // stdin/stdout with newline-delimited JSON-RPC. stdout is reserved for the protocol;
 // console output goes to stderr, which August writes to its log.
 //
-// Usage: bun run host.ts <entry file> <extension name>
+// Usage: bun run host.ts <entry file> <extension name>, as the extension's `extension.json`
+// command. The `extend` extension writes this file and that command.
 
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";

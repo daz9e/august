@@ -1,7 +1,8 @@
-//! Extensions add tools, slash commands and hooks. User extensions are TypeScript files in
-//! `~/.august/extensions/<name>/index.ts`, run by bun through `host.ts`. Default extensions
-//! (the repo's `extensions/<name>/main.rs`) are Rust binaries `august-ext-<name>` next to
-//! `august`, speaking the same protocol; a user extension of the same name replaces one.
+//! Extensions add tools, slash commands and hooks. A user extension is a folder
+//! `~/.august/extensions/<name>/` whose `extension.json` says what to run, in any language.
+//! Default extensions (the repo's `extensions/<name>/main.rs`) are Rust binaries
+//! `august-ext-<name>` next to `august`, speaking the same protocol; a user extension of the
+//! same name replaces one.
 //! Each extension is its own process (see `host.rs`), so a broken or hanging one can't take
 //! the gateway down.
 
@@ -24,9 +25,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
-const HOST_TS: &str = include_str!("host.ts");
-const TYPES: &str = include_str!("august.d.ts");
-const GUIDE: &str = include_str!("guide.md");
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `message_in` may do real work on attachments (e.g. transcribe a voice note).
@@ -41,7 +39,6 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(600);
 const OBSERVERS: &[&str] = &["turn_end", "turn_settled", "turn_event", "llm_result", "session_changed", "reaction", "message_edited", "extension_state", "extension_output", "config_changed", "stop"];
 /// How deep events extensions emit may nest (a handler emitting another, ...).
 const MAX_DEPTH: u32 = 8;
-const ENTRIES: [&str; 3] = ["index.ts", "index.js", "index.mjs"];
 /// A folder with this file is an extension in any language: `{command: [argv], env}`.
 const MANIFEST: &str = "extension.json";
 
@@ -87,8 +84,6 @@ pub type Link = Arc<dyn Fn() -> Io + Send + Sync>;
 /// How an extension is started.
 #[derive(Clone)]
 enum Launch {
-    /// A TypeScript or JavaScript entry file, run by bun through `host.ts`.
-    Script(PathBuf),
     /// A folder with `extension.json`: its `command`, in any language.
     Command(PathBuf),
     /// A default extension's binary; `dir` is its folder (state files).
@@ -100,7 +95,6 @@ enum Launch {
 impl Launch {
     fn dir(&self) -> PathBuf {
         match self {
-            Launch::Script(entry) => entry.parent().unwrap_or(Path::new(".")).to_path_buf(),
             Launch::Command(dir) | Launch::Binary { dir, .. } => dir.clone(),
             Launch::Linked(_) => PathBuf::new(),
         }
@@ -246,29 +240,12 @@ pub struct Extensions {
     me: Weak<Extensions>,
 }
 
-/// The extension-writing guide with the API types (op `guide`), for extensions in `dir`.
-pub fn guide(dir: &Path) -> String {
-    format!("Extensions live in {}.\n\n{GUIDE}\n```ts\n{TYPES}```\n", dir.display())
-}
-
 pub fn valid_name(name: &str) -> bool {
     crate::config::valid_name(name)
 }
 
-/// `$AUGUST_BUN`, or `bun` on PATH (the gateway's PATH includes the login shell's).
-fn find_bun(root: &Root) -> Option<PathBuf> {
-    if let Some(p) = root.env("AUGUST_BUN") {
-        return Some(PathBuf::from(p));
-    }
-    let path = root.env("PATH").unwrap_or_default();
-    std::env::split_paths(&path).map(|d| d.join("bun")).find(|p| p.is_file())
-}
-
 fn entry_of(folder: &Path) -> Option<Launch> {
-    if folder.join(MANIFEST).is_file() {
-        return Some(Launch::Command(folder.to_path_buf()));
-    }
-    ENTRIES.iter().map(|e| folder.join(e)).find(|p| p.is_file()).map(Launch::Script)
+    folder.join(MANIFEST).is_file().then(|| Launch::Command(folder.to_path_buf()))
 }
 
 /// Names of the properties a settings schema marks `"secret": true`.
@@ -425,43 +402,18 @@ impl Extensions {
         found
     }
 
-    /// Folders of the defaults (dropping the TypeScript copies earlier versions wrote there).
+    /// Folders of the defaults, for their state.
     fn prepare_defaults(&self) -> std::io::Result<()> {
         for name in shipped(self.defaults.as_deref()) {
-            let folder = self.defaults_dir().join(name);
-            std::fs::create_dir_all(&folder)?;
-            std::fs::remove_file(folder.join("index.ts")).ok();
+            std::fs::create_dir_all(self.defaults_dir().join(name))?;
         }
         Ok(())
     }
 
-    /// Writes `host.ts` next to the extensions and returns `(bun, host.ts)`.
-    fn runtime(&self) -> Result<(PathBuf, PathBuf), String> {
-        let bun = find_bun(&self.root).ok_or("bun is not installed (https://bun.sh); set AUGUST_BUN to its path")?;
-        let rt = self.dir.join(".runtime");
-        let host = rt.join("host.ts");
-        let write = || -> std::io::Result<()> {
-            std::fs::create_dir_all(&rt)?;
-            if std::fs::read_to_string(&host).ok().as_deref() != Some(HOST_TS) {
-                std::fs::write(&host, HOST_TS)?;
-            }
-            if std::fs::read_to_string(rt.join("august.d.ts")).ok().as_deref() != Some(TYPES) {
-                std::fs::write(rt.join("august.d.ts"), TYPES)?;
-            }
-            Ok(())
-        };
-        write().map_err(|e| format!("could not write {}: {e}", host.display()))?;
-        Ok((bun, host))
-    }
-
     /// The process `launch` stands for, before hooks change it.
-    fn spec(&self, name: &str, launch: &Launch) -> Result<Spec, String> {
+    fn spec(&self, launch: &Launch) -> Result<Spec, String> {
         let text = |p: &Path| p.display().to_string();
         match launch {
-            Launch::Script(entry) => {
-                let (bun, host) = self.runtime()?;
-                Ok(Spec { command: vec![text(&bun), "run".into(), text(&host), text(entry), name.into()], env: Default::default(), dir: launch.dir() })
-            }
             Launch::Command(dir) => {
                 let file = dir.join(MANIFEST);
                 let read = std::fs::read_to_string(&file).map_err(|e| format!("could not read {}: {e}", file.display()))?;
@@ -523,7 +475,7 @@ impl Extensions {
         log.note(&format!("launching ({reason})"));
         self.tell(json!({"name": name, "state": "starting", "reason": reason, "error": null, "restarts": null, "final": false}));
 
-        let mut spec = match self.spec(name, launch) {
+        let mut spec = match self.spec(launch) {
             Ok(s) => s,
             Err(e) => return failed(e),
         };
@@ -1193,7 +1145,7 @@ impl Extensions {
         let origin = self.root.unit("extensions", &slot.name).ok().and_then(|v| v["origin"].as_str().map(String::from));
         let origin = origin.unwrap_or_else(|| match slot.launch {
             Launch::Binary { .. } => "default".into(),
-            Launch::Script(_) | Launch::Command(_) | Launch::Linked(_) => "user".into(),
+            Launch::Command(_) | Launch::Linked(_) => "user".into(),
         });
         let mut v = json!({"name": slot.name, "state": state, "error": error, "origin": origin, "reason": slot.reason,
                            "restarts": slot.restarts, "final": slot.gave_up});
@@ -1247,10 +1199,6 @@ impl Extensions {
         status(&self.list(), &self.dir)
     }
 
-    /// The extension-writing guide (op `guide`).
-    pub fn guide(&self) -> String {
-        guide(&self.dir)
-    }
 
     pub fn root(&self) -> &Root {
         &self.root

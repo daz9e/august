@@ -1,5 +1,5 @@
 //! SDK for August's default extensions, which are Rust binaries run as their own processes.
-//! It speaks the same protocol as `src/extensions/host.ts` does for TypeScript extensions:
+//! It speaks the same protocol as `extensions/sdk-ts/host.ts` does for TypeScript extensions:
 //! one JSON-RPC message per line on stdin/stdout, requests in both directions. Every request
 //! from August runs as its own task, so a handler can call back into August (`ctx.llm`,
 //! `ctx.ask`, ...) while others are served. stdout is the protocol; log with `eprintln!`.
@@ -479,7 +479,7 @@ impl August {
         Ok(v.as_array().into_iter().flatten().map(|e| (e["key"].as_str().unwrap_or_default().to_string(), e["value"].clone())).collect())
     }
 
-    /// Every messenger: description, capabilities and threads (see `august.d.ts`).
+    /// Every messenger: description, capabilities and threads (see `extensions/sdk-ts/august.d.ts`).
     pub async fn messengers(&self) -> Result<Value> {
         self.0.link.call("messengers", json!({})).await
     }
