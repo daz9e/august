@@ -48,6 +48,7 @@ pub struct Responses<A> {
     /// `None` omits the `reasoning` field (models that don't take it).
     effort: Option<String>,
     session_header: Option<&'static str>,
+    options: Value,
 }
 
 impl<A: TokenSource> Responses<A> {
@@ -59,7 +60,14 @@ impl<A: TokenSource> Responses<A> {
             model,
             effort,
             session_header: None,
+            options: Value::Null,
         }
+    }
+
+    /// Fields set on every request body (see `merge_options`).
+    pub fn with_options(mut self, options: Value) -> Self {
+        self.options = options;
+        self
     }
 
     /// Sends the conversation id in this header (e.g. `x-opencode-session`).
@@ -350,6 +358,7 @@ impl<A: TokenSource> Responses<A> {
             body["reasoning"] = json!({"effort": effort});
             body["include"] = json!(["reasoning.encrypted_content"]);
         }
+        crate::merge_options(&mut body, &self.options);
 
         let mut delay = std::time::Duration::from_secs(2);
         let mut reauthed = false;

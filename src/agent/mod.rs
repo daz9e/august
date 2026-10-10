@@ -300,6 +300,10 @@ impl Agent {
                 // ponytail: builds the provider on every such call; cache by spec if it costs.
                 provider = crate::llm::providers::build_spec(m)?;
             }
+            let effort = data["effort"].as_str();
+            if (effort.is_some() || data["options"].is_object()) && let Some(p) = provider.tuned(effort, &data["options"]) {
+                provider = p;
+            }
         }
         // A `context` hook may change what the model sees for this one call (`messages`), or
         // the history itself (`history`, kept from then on), with a `note` to show.

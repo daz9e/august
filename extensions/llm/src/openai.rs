@@ -11,6 +11,7 @@ pub struct OpenAi {
     session_header: Option<&'static str>,
     /// The model's context window, if configured.
     window: Option<usize>,
+    options: Value,
 }
 
 impl OpenAi {
@@ -22,12 +23,19 @@ impl OpenAi {
             model,
             session_header: None,
             window: None,
+            options: Value::Null,
         }
     }
 
     /// The model's context window, as configured.
     pub fn with_context_window(mut self, tokens: Option<usize>) -> Self {
         self.window = tokens;
+        self
+    }
+
+    /// Fields set on every request body (see `merge_options`).
+    pub fn with_options(mut self, options: Value) -> Self {
+        self.options = options;
         self
     }
 
@@ -222,13 +230,14 @@ impl OpenAi {
                 })
             })
             .collect();
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": Self::encode(system, messages),
             "tools": tools,
             "stream": true,
             "stream_options": {"include_usage": true},
         });
+        crate::merge_options(&mut body, &self.options);
         let mut req = self
             .http
             .post(format!("{}/chat/completions", self.base_url))

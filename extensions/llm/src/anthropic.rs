@@ -22,6 +22,7 @@ pub struct Anthropic {
     model: String,
     effort: String,
     session_header: Option<&'static str>,
+    options: Value,
 }
 
 impl Anthropic {
@@ -35,7 +36,14 @@ impl Anthropic {
             model,
             effort,
             session_header: None,
+            options: Value::Null,
         }
+    }
+
+    /// Fields set on every request body (see `merge_options`).
+    pub fn with_options(mut self, options: Value) -> Self {
+        self.options = options;
+        self
     }
 
     /// Sends the conversation id in this header (e.g. `x-opencode-session`).
@@ -252,6 +260,7 @@ impl Anthropic {
             body["fallbacks"] = json!("default");
             req = req.header("anthropic-beta", "server-side-fallback-2026-07-01");
         }
+        crate::merge_options(&mut body, &self.options);
 
         let resp = sse::post_stream(req, &body).await?;
         let mut state = StreamState::default();

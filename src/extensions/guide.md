@@ -93,7 +93,9 @@ leave it unchanged.
 - `llm_call` `{ step, system, model, tools }`: before every model call of a turn (`step`
   from 0; `tools` are names). For that call only, return `{ system }` to use another system
   prompt, `{ tools }` to offer only some of the tools, `{ model }` to use another model of
-  the active provider or `provider:model`. The prompt is otherwise
+  the active provider or `provider:model`, `{ effort }` (`low` … `high`, as the provider
+  takes it) to think more or less, `{ options }` to set fields of the provider's request
+  body (`{ temperature: 0 }`; the provider's own API names them). The prompt is otherwise
   byte-stable so the provider can cache it; changing it costs that cache, so prefer
   `before_turn`.
 - `model_select` `{ model, previous }`: the model is being switched (`/model`,
@@ -205,9 +207,10 @@ Calling into August:
 - `await ctx.callTool("read", { path: "notes.md" })` runs any agent tool (
   MCP or another extension's) for that thread, through the `tool_call`/`tool_result` hooks
   returns `{ output, isError }`.
-- `await ctx.llm(prompt, { system })` is one completion without tools on the thread's
-  conversation's model (`llm_result` counts it there); `prompt` may be a list of messages as
-  `context` has them. Returns the text.
+- `await ctx.llm(prompt, { system, effort, options })` is one completion without tools on
+  the thread's conversation's model (`llm_result` counts it there); `effort` and `options`
+  as `llm_call` takes them; `prompt` may be a list of messages as `context` has them.
+  Returns the text.
 - `await ctx.agent(task, { system, tools, exclude })` runs a sub-agent with a fresh
   conversation and returns its final reply (`tools` limits it, `exclude` hides some).
 - Turns: `const id = await august.turns.start(thread, { text, mode })` starts a `visible`

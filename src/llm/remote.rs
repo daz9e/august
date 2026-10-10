@@ -22,6 +22,8 @@ pub struct Remote {
     /// Empty until known: the provider's default model is asked for at the first call.
     model: OnceLock<String>,
     effort: String,
+    /// Merged into the provider's request body (see `Request::options`).
+    options: Value,
     /// Learned from the provider's model list after the first call.
     window: Mutex<Option<usize>>,
 }
@@ -32,7 +34,7 @@ impl Remote {
         if !model_name.is_empty() {
             model.set(model_name.to_string()).ok();
         }
-        Self { id: id.into(), model, effort: effort.into(), window: Mutex::new(None) }
+        Self { id: id.into(), model, effort: effort.into(), options: Value::Null, window: Mutex::new(None) }
     }
 }
 
@@ -75,6 +77,13 @@ impl LlmProvider for Remote {
         *self.window.lock().unwrap()
     }
 
+    fn tuned(&self, effort: Option<&str>, options: &Value) -> Option<Arc<dyn LlmProvider>> {
+        let mut tuned = Self::new(&self.id, self.name(), effort.unwrap_or(&self.effort));
+        tuned.options = if options.is_null() { self.options.clone() } else { options.clone() };
+        *tuned.window.lock().unwrap() = self.context_window();
+        Some(Arc::new(tuned))
+    }
+
     async fn complete(&self, session: &str, system: &str, messages: &[Message], tools: &[ToolSpec]) -> Result<Completion> {
         self.complete_stream(session, system, messages, tools, &mut |_| {}).await
     }
@@ -103,6 +112,7 @@ impl LlmProvider for Remote {
             system: system.into(),
             messages: messages.to_vec(),
             tools: tools.to_vec(),
+            options: self.options.clone(),
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
         let ext = extensions()?;

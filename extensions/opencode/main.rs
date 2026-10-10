@@ -99,12 +99,12 @@ async fn complete(august: &August, req: Request, on_text: &mut (dyn for<'a> FnMu
     };
     let base = base_url(&settings, &req.provider);
     let model: Box<dyn LlmProvider> = match format {
-        Format::Messages => Box::new(Anthropic::new(&base, key, req.model.clone(), req.effort.clone()).with_session_header(SESSION_HEADER)),
-        Format::Chat => Box::new(OpenAi::new(base, key, req.model.clone()).with_session_header(SESSION_HEADER)),
+        Format::Messages => Box::new(Anthropic::new(&base, key, req.model.clone(), req.effort.clone()).with_session_header(SESSION_HEADER).with_options(req.options.clone())),
+        Format::Chat => Box::new(OpenAi::new(base, key, req.model.clone()).with_session_header(SESSION_HEADER).with_options(req.options.clone())),
         Format::Responses => {
             // Only OpenAI's own models take `reasoning` (grok, muse, ... may reject it).
             let effort = req.model.starts_with("gpt-").then(|| req.effort.clone());
-            Box::new(Responses::new(&base, ApiKey(key), req.model.clone(), effort).with_session_header(SESSION_HEADER))
+            Box::new(Responses::new(&base, ApiKey(key), req.model.clone(), effort).with_session_header(SESSION_HEADER).with_options(req.options.clone()))
         }
     };
     model.complete_stream(&req.session, &req.system, &req.messages, &req.tools, on_text).await

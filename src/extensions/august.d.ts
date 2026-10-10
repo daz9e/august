@@ -149,7 +149,7 @@ declare module "august" {
     callTool(name: string, input?: object): Promise<{ output: string; isError: boolean }>;
     /** One completion without tools on this thread's conversation's model (counted in its
      *  usage); a prompt, or messages as the `context` hook has them. Returns the text. */
-    llm(prompt: string | Message[], opts?: { system?: string }): Promise<string>;
+    llm(prompt: string | Message[], opts?: { system?: string; effort?: string; options?: Record<string, unknown> }): Promise<string>;
     /** `august.emit` for this thread and turn (their handlers see both). */
     emit<T extends object = any>(event: string, data?: object): Promise<T>;
   }

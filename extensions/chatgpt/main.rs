@@ -162,7 +162,7 @@ async fn main() {
         None,
         |_| async { Ok(infos(list_models().await?)) },
         |req, stream| async move {
-            let model = Responses::new(API_BASE, session().await?, req.model, Some(req.effort));
+            let model = Responses::new(API_BASE, session().await?, req.model, Some(req.effort)).with_options(req.options);
             let mut on_text = |t: &str| stream.text(t);
             model.complete_stream(&req.session, &req.system, &req.messages, &req.tools, &mut on_text).await
         },
@@ -173,7 +173,7 @@ async fn main() {
         None,
         |_| async { Ok(infos(codex::list_models(&august_llm::http_client()).await?)) },
         |req, stream| async move {
-            let model = codex::model(codex_session().await?, req.model, req.effort);
+            let model = codex::model(codex_session().await?, req.model, req.effort).with_options(req.options);
             let mut on_text = |t: &str| stream.text(t);
             model.complete_stream(&req.session, &req.system, &req.messages, &req.tools, &mut on_text).await
         },

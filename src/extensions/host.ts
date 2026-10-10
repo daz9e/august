@@ -151,8 +151,8 @@ function context(thread: Thread | null, turn: Turn | null = null, depth = 0) {
     agent: (task: string, opts: object = {}) => runTurn(need(), { ...opts, text: task, mode: "fresh", parent: turn?.id }),
     ask: async (question: string, options: string[], opts: { timeout?: number } = {}) => ask(need(), question, options, opts.timeout),
     callTool: (name: string, input: unknown = {}) => inThread("callTool", { name, input }),
-    llm: (prompt: string | object[], opts: { system?: string } = {}) =>
-      call("llm", { ...(typeof prompt === "string" ? { prompt } : { messages: prompt }), system: opts.system, thread, from_turn: turn?.id }),
+    llm: (prompt: string | object[], opts: { system?: string; effort?: string; options?: object } = {}) =>
+      call("llm", { ...(typeof prompt === "string" ? { prompt } : { messages: prompt }), ...opts, thread, from_turn: turn?.id }),
     emit: (event: string, data: object = {}) => call("emit", { event, data, thread, from_turn: turn?.id, depth }),
   };
 }

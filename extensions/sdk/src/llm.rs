@@ -268,6 +268,9 @@ pub struct Request {
     pub system: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
+    /// Fields merged into the provider's request body for this call (`{temperature: 0}`);
+    /// `null` for none. August never looks inside.
+    pub options: Value,
 }
 
 impl Request {
@@ -277,6 +280,7 @@ impl Request {
             "system": self.system,
             "messages": self.messages.iter().map(Message::to_json).collect::<Vec<_>>(),
             "tools": self.tools.iter().map(ToolSpec::to_json).collect::<Vec<_>>(),
+            "options": self.options,
         })
     }
 
@@ -290,6 +294,7 @@ impl Request {
             system: s("system"),
             messages: v["messages"].as_array()?.iter().filter_map(Message::from_json).collect(),
             tools: v["tools"].as_array().into_iter().flatten().filter_map(ToolSpec::from_json).collect(),
+            options: v["options"].clone(),
         })
     }
 }
@@ -317,6 +322,12 @@ pub trait LlmProvider: Send + Sync {
 
     /// The model's context window in tokens, when the provider knows it.
     fn context_window(&self) -> Option<usize> {
+        None
+    }
+
+    /// This provider with another `effort` and/or request `options` (see `Request`), for
+    /// some calls; `None` if it has no such knobs.
+    fn tuned(&self, _effort: Option<&str>, _options: &Value) -> Option<std::sync::Arc<dyn LlmProvider>> {
         None
     }
 

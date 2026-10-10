@@ -96,7 +96,7 @@ fn provide(august: &August, settings: &Value, id: &str, label: &str, default_mod
             let august = for_complete.clone();
             async move {
                 let e = endpoint(&august, &req.provider).await?;
-                let model = OpenAi::new(e.base_url, e.key, req.model).with_context_window(e.window);
+                let model = OpenAi::new(e.base_url, e.key, req.model).with_context_window(e.window).with_options(req.options);
                 let mut on_text = |t: &str| stream.text(t);
                 model.complete_stream(&req.session, &req.system, &req.messages, &req.tools, &mut on_text).await
             }

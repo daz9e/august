@@ -49,7 +49,7 @@ pub const OPS: &[Op] = &[
     op("turns", TURNS, "Running turns, of {thread} or all"),
     op("stop", TURNS, "Stop everything running in {thread}, like /stop"),
     op("callTool", Some("tools"), "Run an agent tool {thread, name, input}"),
-    op("llm", Some("llm"), "One completion without tools: {prompt} or {messages}, {system}; in {thread}'s conversation's model, counted in its usage"),
+    op("llm", Some("llm"), "One completion without tools: {prompt} or {messages}, {system}, {effort}, {options} (fields of the provider's request body); in {thread}'s conversation's model, counted in its usage"),
     op("model_set", Some("models"), "Switch to {model} of the current provider, or `provider:model` (`provider:` for its default)"),
     op("providers", Some("models"), "Every model provider: {id, label, default_model, extension}"),
     op("models", Some("models"), "The models {provider} offers (default: the active one): [{id, context_window}]"),
@@ -236,6 +236,11 @@ impl Gateway {
                 let provider = match model {
                     Some(m) => providers::build_spec(&m)?,
                     None => self.provider.read().unwrap().clone(),
+                };
+                let effort = p["effort"].as_str();
+                let provider = match effort.is_some() || p["options"].is_object() {
+                    true => provider.tuned(effort, &p["options"]).unwrap_or(provider),
+                    false => provider,
                 };
                 let c = provider.complete(&crate::util::new_uuid(), system, &messages, &[]).await?;
                 if self.ext.listens("llm_result") {

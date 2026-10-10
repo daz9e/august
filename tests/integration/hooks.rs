@@ -117,13 +117,13 @@ const ROUTER: &str = r#"
 export default function (august) {
   august.on("llm_call", async ({ step, model, tools }, ctx) => {
     await ctx.send(`step ${step} on ${model} with ${tools.includes("read") && tools.includes("bash")}`);
-    return step === 0 ? { model: "cheap-model", tools: ["read"] } : undefined;
+    return step === 0 ? { model: "cheap-model", tools: ["read"], options: { temperature: 0 } } : undefined;
   });
 }
 "#;
 
 #[tokio::test]
-async fn llm_call_picks_the_model_and_tools_of_one_call() {
+async fn llm_call_picks_the_model_tools_and_options_of_one_call() {
     if !have_bun() {
         return;
     }
@@ -141,14 +141,17 @@ async fn llm_call_picks_the_model_and_tools_of_one_call() {
     chat.ask("read the note", "done").await;
     chat.wait_for("step 0 on fake-model with true").await;
 
-    // The first call went to the cheaper model with one tool; the next one is back to normal.
+    // The first call went to the cheaper model with one tool and its own request options;
+    // the next one is back to normal.
     let reqs = fake.llm_requests();
     let names = |r: &Value| -> Vec<String> {
         r["tools"].as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str().map(String::from)).collect()
     };
     assert_eq!(reqs[0]["model"], "cheap-model");
     assert_eq!(names(&reqs[0]), ["read"]);
+    assert_eq!(reqs[0]["temperature"], 0);
     assert_eq!(reqs[1]["model"], "fake-model");
+    assert!(reqs[1].get("temperature").is_none());
     assert!(names(&reqs[1]).len() > 1);
 }
 
