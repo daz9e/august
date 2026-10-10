@@ -31,7 +31,7 @@ async fn an_operation_runs_in_the_current_thread_and_turn() {
 
     // In a turn the call says which, so a new session waits for the turn to end; a thread
     // given in the params wins.
-    let turn = json!({"id": 7, "mode": "visible", "source": null, "parent": null});
+    let turn = json!({"id": 7, "conversation": "thread", "show": true, "source": null, "parent": null});
     run(&fake, json!({"op": "session_new", "params": {"name": "side"}}), turn_ctx("1", turn)).await.unwrap();
     assert_eq!(fake.calls("session_new"), vec![json!({"name": "side", "thread": thread("1"), "from_turn": 7})]);
     run(&fake, json!({"op": "history", "params": {"thread": thread("2")}}), ctx("1")).await.unwrap();

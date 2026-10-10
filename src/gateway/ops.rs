@@ -45,7 +45,7 @@ pub const OPS: &[Op] = &[
     op("listen", MESSAGING, "Listen in {thread} for {buttons, text}; returns a listener id. With {secret} a text taken is deleted from the chat"),
     op("next", MESSAGING, "What {listener} took"),
     op("prompt", MESSAGING, "Hand {thread} a message as if the user sent it"),
-    op("turn_start", TURNS, "Start a turn {thread, turn: {text, mode: visible|quiet|fork|fresh, source, parent, ...}}; returns its id"),
+    op("turn_start", TURNS, "Start a turn {thread, turn: {text, conversation: thread|copy|new, show, source, parent, ...}}; returns its id"),
     op("turn_wait", TURNS, "A turn's outcome {id, timeout_ms}"),
     op("turn_cancel", TURNS, "Cancel turn {id}"),
     op("turns", TURNS, "Running turns, of {thread} or all"),

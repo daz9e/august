@@ -160,7 +160,7 @@ async fn an_extension_talks_to_a_conversation_of_no_chat() {
                         *book = Some(me.call("session_new", json!({"name": "notebook"})).await?.as_str().unwrap().to_string());
                     }
                     let thread = august_ext::Thread { messenger: "session".into(), id: book.clone().unwrap() };
-                    let id = me.start_turn(&thread, json!({"text": args, "mode": "quiet"})).await?;
+                    let id = me.start_turn(&thread, json!({"text": args})).await?;
                     let out = me.wait_turn(id, std::time::Duration::from_secs(10)).await?;
                     let messages = me.call("messages", json!({"thread": thread})).await?;
                     Ok(Some(format!("{}: {} ({} messages)", out["status"].as_str().unwrap(), out["reply"].as_str().unwrap(), messages["messages"].as_array().unwrap().len())))

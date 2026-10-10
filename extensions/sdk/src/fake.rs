@@ -32,7 +32,7 @@ pub fn ctx(id: &str) -> Value {
     json!({"thread": thread(id), "turn": null, "depth": 0})
 }
 
-/// The context of a call in thread `id` during turn `turn` (`{id, mode, source, parent, meta}`).
+/// The context of a call in thread `id` during turn `turn` (`{id, conversation, show, source, parent, meta}`).
 pub fn turn_ctx(id: &str, turn: Value) -> Value {
     json!({"thread": thread(id), "turn": turn, "depth": 0})
 }

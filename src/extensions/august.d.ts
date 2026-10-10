@@ -5,8 +5,8 @@ declare module "august" {
   /** A conversation in a messenger: a Telegram chat (`{ messenger: "telegram", id: "123" }`),
    *  a terminal window (`{ messenger: "cli", id: "1" }`), ... Where a call takes a thread,
    *  `"home"` is the user's home thread (set with /home; else the one they wrote in last).
-   *  `{ messenger: "session", id }` is a stored conversation itself, in no chat: quiet, fork
-   *  and fresh turns run in it, `sessions.messages` reads it; nothing can be sent there. */
+   *  `{ messenger: "session", id }` is a stored conversation itself, in no chat: turns that
+   *  aren't shown run in it, `sessions.messages` reads it; nothing can be sent there. */
   export type Thread = { messenger: string; id: string } | "home";
 
   /** A button under a message; a press comes back with its `id`. */
@@ -42,30 +42,34 @@ declare module "august" {
   /** What a listener took: a button press or a text message; or why nothing came. */
   export type Reply = { press: string } | { text: string } | { timeout: true } | { cancelled: "stop" | "new" };
 
-  /** A run of the agent. `visible`: the thread's conversation, streamed to the thread as a
-   *  turn of the user's is (the default `conversation` extension marks it `[from <source>]`); `quiet`:
-   *  in the thread's conversation, nothing shown, the reply returned; `fork`: on a copy of the
-   *  conversation (same prompt and tools, so the provider's cache holds), nothing kept;
-   *  `fresh`: a new conversation (a sub-agent). */
   /** `source`: who it is from (default `ext:<your name>`; `user` passes it as the user's);
    *  the default `conversation` extension marks it `[from <source>]`. `deliver`: `steer` (default) joins the
    *  running turn before its next model call or starts one; `followUp` runs as its own turn
    *  after the current one; `nextTurn` waits for the next turn without starting one. */
   export type PromptOpts = { source?: string; deliver?: "steer" | "followUp" | "nextTurn" };
-  export type TurnMode = "visible" | "quiet" | "fork" | "fresh";
-  export type Turn = { id: number; mode: TurnMode; source?: string; parent?: number; meta?: unknown };
+  /** Which conversation a turn runs in: `thread`, the thread's own; `copy`, a copy of it (same
+   *  prompt and tools, so the provider's cache holds) dropped afterwards; `new`, one of its own
+   *  (a sub-agent). */
+  export type Conversation = "thread" | "copy" | "new";
+  /** A run of the agent. `show`: streamed to its thread as it runs, like the user's turns. */
+  export type Turn = { id: number; conversation: Conversation; show: boolean; source?: string; parent?: number; meta?: unknown };
   export type TurnRequest = {
     text: string;
-    mode: TurnMode;
+    /** Default `thread`. */
+    conversation?: Conversation;
+    /** Shown in the thread as it runs, like one of the user's (the default `conversation`
+     *  extension marks it `[from <source>]`). Default false: nothing shown, the reply returned. */
+    show?: boolean;
     /** Who starts it (default `ext:<your name>`); hooks see it as `ctx.turn.source`. */
     source?: string;
     /** The turn this one belongs to (e.g. `ctx.turn.id`). */
     parent?: number;
-    /** fresh: instructions added to the base system prompt. */
+    /** new: instructions added to the base system prompt. */
     system?: string;
-    /** fresh: only these tools. fork: only these may be called (all stay offered). */
+    /** Only these tools may be called. A `new` conversation is offered only these; the others
+     *  keep offering all (so the cache holds), a call to another fails. */
     tools?: string[];
-    /** fresh: never these tools. */
+    /** Never these tools (like `tools`). */
     exclude?: string[];
     /** Anything for hooks to read as `ctx.turn.meta` (e.g. `{ approve: "all" }` for the
      *  default approvals extension); the core doesn't look inside. */
@@ -75,7 +79,7 @@ declare module "august" {
     status: "ok" | "error" | "cancelled" | "running";
     reply: string;
     error?: string | null;
-    /** fork: every tool call, `{ name, input, output, isError }` (empty for the others). */
+    /** Every tool call of the turn. */
     toolCalls: { name: string; input: any; output: string; isError: boolean }[];
   };
 
@@ -101,7 +105,7 @@ declare module "august" {
 
   /** What the journal records. `source`: who the turn came from (`user`, `ext:goal`, ...);
    *  `caller`: who acted (`model`, `ext:<name>`, `user`). `data` by kind:
-   *  `turn_start` {mode, parent, text}, `turn_end` {status, error}, `user_message` {text},
+   *  `turn_start` {conversation, show, parent, text}, `turn_end` {status, error}, `user_message` {text},
    *  `assistant` {step, text, toolCalls, usage}, `tool` {tool, id, input, output, isError},
    *  `session` {reason: new|switch, previous},
    *  `model_change` {model, previous}, `custom` {type, data} (an extension's own). */
@@ -145,7 +149,7 @@ declare module "august" {
     send(message: OutMessage): Promise<string>;
     /** Hands the thread a message (see `PromptOpts`); passes `message_in`. */
     prompt(text: string, opts?: PromptOpts): Promise<void>;
-    /** Runs a sub-agent for this thread (a `fresh` turn under this one): a new conversation,
+    /** Runs a sub-agent for this thread (a turn in a `new` conversation under this one),
      *  nobody to answer questions. Resolves to its final reply; throws
      *  if it failed or was cancelled (/stop cancels all of a thread's turns).
      *  `system` is added to the base system prompt; `tools` limits it to those tools,
@@ -226,7 +230,7 @@ declare module "august" {
       error: string | null;
       /** How many tool calls the turn made. */
       toolCalls: number;
-      /** Not the user's visible conversation (`ctx.turn.mode` says which). */
+      /** Not shown in the thread (`ctx.turn` says more). */
       unattended: boolean;
     };
     /** What a visible turn does, in order, as it happens: `text` (reply fragments; ones that
@@ -288,7 +292,7 @@ declare module "august" {
     /** A model call failed; `attempt` counts from 1. Return `retry: true` to try again.
      *  `streamed`: part of the failed reply was already shown; another try repeats it. */
     llm_error: { step: number; attempt: number; model: string; error: { kind: LlmErrorKind; message: string }; streamed: boolean };
-    /** After each model call August makes (observe only; background): a turn's or a fork's
+    /** After each model call August makes (observe only; background): a turn's
      *  (`step`), or a single `llm` call (`step` null). `session`: the conversation it counts
      *  for (null: none). */
     llm_result: { step: number | null; session: string | null; text: string; toolCalls: { name: string; input: any }[]; usage: Usage };
@@ -333,7 +337,7 @@ declare module "august" {
      *  with `note` shown in the turn. Keep tool_use / tool_result pairs intact. */
     context: { messages?: Message[]; history?: Message[]; note?: string };
     /** `retry: true` tries the call again (after `delayMs`, on `model` for the rest of the
-     *  turn); the `context` handlers see the `error` first. At most 8 tries. */
+     *  turn); the `context` handlers see the `error` first. The core doesn't count tries. */
     llm_error: { retry?: boolean; delayMs?: number; model?: string };
     llm_result: void;
     /** The conversation's own settings, kept with it. */
@@ -469,7 +473,7 @@ declare module "august" {
     ask(thread: Thread, question: string, options: string[], opts?: { timeout?: number }): Promise<string | null>;
     /** Hands `thread` a message (see `PromptOpts`); passes `message_in`. */
     prompt(thread: Thread, text: string, opts?: PromptOpts): Promise<void>;
-    /** Turns: start one of any mode and get its id; wait for its outcome (once;
+    /** Turns: start one and get its id; wait for its outcome (once;
      *  `{ status: "running" }` if the timeout passes first); cancel it; list running ones. */
     turns: {
       start(thread: Thread, turn: TurnRequest): Promise<number>;

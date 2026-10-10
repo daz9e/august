@@ -49,7 +49,7 @@ async fn serve(august: August) {
             let line = all.as_array().into_iter().flatten().find(|m| m["id"] == messenger.as_str()).map(surface);
             let own = data["system"].as_str().unwrap_or_default().trim();
             let system: Vec<&str> = [intro.as_str(), line.as_deref().unwrap_or(""), own].into_iter().filter(|s| !s.is_empty()).collect();
-            let from = match ctx.turn.as_ref().filter(|t| t.mode == "visible").and_then(|t| t.source.as_deref()) {
+            let from = match ctx.turn.as_ref().filter(|t| t.show).and_then(|t| t.source.as_deref()) {
                 Some(s) if s != "user" => format!("[from {s}] "),
                 _ => String::new(),
             };

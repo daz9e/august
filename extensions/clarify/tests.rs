@@ -58,7 +58,7 @@ async fn no_answer_in_ten_minutes_says_so() {
 #[tokio::test]
 async fn a_background_turn_cannot_ask() {
     let fake = clarify().await;
-    let task = turn_ctx("1", json!({"id": 7, "mode": "quiet", "source": "scheduler", "parent": null, "meta": {}}));
+    let task = turn_ctx("1", json!({"id": 7, "conversation": "thread", "show": false, "source": "scheduler", "parent": null, "meta": {}}));
     let err = fake.tool("clarify", json!({"question": "Which?", "options": ["A", "B"]}), task).await.unwrap_err();
     assert!(err.to_string().contains("nobody can answer here"), "{err}");
     assert!(fake.sent().is_empty());

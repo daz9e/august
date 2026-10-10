@@ -110,7 +110,7 @@ async fn ask(august: &August, ctx: &Ctx, action: &str) -> Result<Option<String>>
         Reply::Press(_) => ("❌ Denied", Some("the user denied this")),
         Reply::Text(t) if is_yes(&t) => ("✅ Allowed", None),
         Reply::Text(t) => {
-            if ctx.turn.as_ref().is_some_and(|t| t.mode == "visible") {
+            if ctx.turn.as_ref().is_some_and(|t| t.show) {
                 ctx.prompt_with(&t, json!({"source": "user"})).await.ok();
             }
             ("❌ Denied", Some("the user denied this and wrote instead"))

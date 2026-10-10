@@ -56,7 +56,7 @@ async fn save(august: &August, task: &Task) -> Result<()> {
 
 /// The thread a tool call manages tasks of; refused outside the user's own turns.
 fn thread_of(ctx: &Ctx) -> Result<Thread> {
-    if ctx.turn.as_ref().is_some_and(|t| t.mode != "visible") {
+    if ctx.turn.as_ref().is_some_and(|t| !t.show) {
         bail!("tasks can't be managed from a scheduled task or a subtask");
     }
     ctx.thread.clone().ok_or_else(|| anyhow::anyhow!("tasks belong to a chat; this call has none"))
@@ -144,8 +144,8 @@ async fn fire(august: August, task: Task) -> Result<()> {
     if let Some(script) = &task.script {
         text += &format!("\n\n[Output of the task's script `{script}`]\n{}", run_script(&august, script).await);
     }
-    let mode = if task.isolated { "fresh" } else { "quiet" };
-    let id = august.start_turn(&task.thread, json!({"text": text, "mode": mode, "source": "scheduler"})).await?;
+    let conversation = if task.isolated { "new" } else { "thread" };
+    let id = august.start_turn(&task.thread, json!({"text": text, "conversation": conversation, "source": "scheduler"})).await?;
     let out = august.wait_turn(id, Duration::from_secs(3600)).await?;
     let reply = out["reply"].as_str().unwrap_or_default().trim();
     match out["status"].as_str() {

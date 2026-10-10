@@ -88,10 +88,12 @@ leave it unchanged.
   model sees.
 - `turn_end` `{ text, reply, status, error, toolCalls, unattended }`: after any turn; `status` is
   `ok`, `error` (why: `error`) or `cancelled`, `toolCalls` how many tools it called, and `ctx.turn` its
-  `{ id, mode, source, parent }` (`unattended`: not the user's visible conversation). Runs
+  `{ id, conversation, show, source, parent, meta }` (`unattended`: not shown in the thread). Runs
   in the background; the result is ignored.
 - `llm_call` `{ step, system, model, tools }`: before every model call of a turn (`step`
-  from 0; `tools` are names). For that call only, return `{ system }` to use another system
+  from 0; `tools` are names). The core sets no limit on steps: a turn ends when the model
+  stops calling tools, so this is where a limit goes (the default `steps` extension offers no
+  tools from its limit on, with a note to report). For that call only, return `{ system }` to use another system
   prompt, `{ tools }` to offer only some of the tools, `{ model }` to use another model of
   the active provider or `provider:model`, `{ effort }` (`low` … `high`, as the provider
   takes it) to think more or less, `{ options }` to set fields of the provider's request
@@ -113,10 +115,10 @@ leave it unchanged.
   failed (`kind`: `rate_limit`, `overloaded`, `network`, `auth`, `quota`, `context_too_long`,
   `refused`, `bad_request`, `other`; `streamed`: part of its reply was already shown, so
   another try would show it again). Return `{ retry: true }` to try again, with
-  `delayMs` to wait first and `model` to use another one for the rest of the turn; at most
-  8 tries.
+  `delayMs` to wait first and `model` to use another one for the rest of the turn. The core
+  doesn't count tries: stop asking (`attempt` counts from 1) when you've had enough.
 - `llm_result` `{ step, session, text, toolCalls: [{ name, input }], usage }`: after every
-  model call August makes — a turn's, a fork's, or an `llm` call's (`step` null); the
+  model call August makes — a turn's or an `llm` call's (`step` null); the
   default `usage` extension counts them for `/usage`.
 - `turn_event` `{ kind: text|step|tool|note, text?, tool?, input? }`: what a visible
   turn does, in order, as it happens (reply fragments, a new model call, a tool call, a
@@ -222,19 +224,20 @@ Calling into August:
   Returns the text.
 - `await ctx.agent(task, { system, tools, exclude })` runs a sub-agent with a fresh
   conversation and returns its final reply (`tools` limits it, `exclude` hides some).
-- Turns: `const id = await august.turns.start(thread, { text, mode })` starts a `visible`
-  turn (in the thread's conversation, shown there like one of the user's, after whatever runs
-  there now; `conversation` marks it `[from <source>]`; unlike `prompt`, it skips `message_in`), a `quiet` one (in the thread's conversation,
-  nothing shown, e.g. a scheduled check), a `fork` (on a copy of the conversation, nothing
-  kept; `tools` limits what it may call; good for looking back at a conversation) or a
-  `fresh` one (a sub-agent); `await august.turns.wait(id)` gives
+- Turns: `const id = await august.turns.start(thread, { text, conversation, show })` starts a
+  turn. `conversation` is where it runs: `thread` (the default, the thread's own, after whatever
+  runs there now), `copy` (a copy of it, dropped afterwards; good for looking back at a
+  conversation) or `new` (one of its own: a sub-agent). `show: true` streams it to the thread
+  like one of the user's (`conversation` marks it `[from <source>]`; unlike `prompt`, it skips
+  `message_in`); otherwise nothing is shown (e.g. a scheduled check). `tools` / `exclude` limit
+  what it may call. `await august.turns.wait(id)` gives
   `{ status, reply, error, toolCalls }`. `source` defaults to `ext:<your name>`, `parent`
   links it to the turn that asked (`ctx.turn.id`). `august.turns.cancel(id)`,
   `august.turns.list()`. /stop cancels every turn of its thread, queued ones too. `ctx.turn`
-  tells which turn a call runs in (`{ id, mode, source, parent }`). Work in another thread
+  tells which turn a call runs in (`{ id, conversation, show, source, parent, meta }`). Work in another thread
   that reports back:
   ```ts
-  const id = await august.turns.start(target, { text: task, mode: "visible", parent: ctx.turn?.id });
+  const id = await august.turns.start(target, { text: task, show: true, parent: ctx.turn?.id });
   august.turns.wait(id).then((out) => august.prompt(ctx.thread!, `#${id} ${out.status}: ${out.reply}`, { deliver: "followUp" }));
   return `started #${id}`; // don't hold the tool call open while it runs
   ```
@@ -272,7 +275,7 @@ helpers for the common ones:
   inside one, return `history` from `context`).
 - A conversation needs no chat: `august.sessions.new(null, { name, settings })` starts one
   of its own and returns its id; the thread `{ messenger: "session", id }` addresses it, so
-  `august.turns.start` runs quiet, fork and fresh turns in it (a background agent that keeps
+  `august.turns.start` runs turns that aren't shown in it (a background agent that keeps
   its context, a conversation between agents) and `august.sessions.messages` reads it.
   Nothing can be sent there; report back to a real thread.
 - Conversations are stored and addressable: `august.sessions.list(thread?)`,

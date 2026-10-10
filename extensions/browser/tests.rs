@@ -58,7 +58,7 @@ async fn browser_commands_run_in_a_per_chat_session() {
     b.run(json!(["screenshot", "shots/page.png"]), ctx("1")).await;
     // Another chat, and a sub-agent of this one, get browsers of their own.
     b.run(json!(["back"]), ctx("2")).await;
-    b.run(json!(["back"]), turn_ctx("1", json!({"id": 7, "mode": "fresh"}))).await;
+    b.run(json!(["back"]), turn_ctx("1", json!({"id": 7, "conversation": "new"}))).await;
 
     let shot = b.workspace.join("shots/page.png");
     let expected = [

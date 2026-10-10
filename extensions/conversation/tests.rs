@@ -44,13 +44,13 @@ async fn a_turn_starts_with_who_august_is_and_how_its_replies_are_shown() {
 #[tokio::test]
 async fn the_model_sees_who_a_message_is_from_when_not_the_user() {
     let fake = conversation().await;
-    let turn = |mode: &str, source: &str| turn_ctx("1", json!({"id": 1, "mode": mode, "source": source}));
-    let data = fake.event("before_turn", json!({"text": "all done"}), turn("visible", "subagent")).await.unwrap();
+    let turn = |show: bool, source: &str| turn_ctx("1", json!({"id": 1, "conversation": "thread", "show": show, "source": source}));
+    let data = fake.event("before_turn", json!({"text": "all done"}), turn(true, "subagent")).await.unwrap();
     assert_eq!(unstamped(text(&data)), "[from subagent] all done");
-    let data = fake.event("before_turn", json!({"text": "hi"}), turn("visible", "user")).await.unwrap();
+    let data = fake.event("before_turn", json!({"text": "hi"}), turn(true, "user")).await.unwrap();
     assert_eq!(unstamped(text(&data)), "hi");
     // A quiet turn is August talking to itself.
-    let data = fake.event("before_turn", json!({"text": "check"}), turn("quiet", "subagent")).await.unwrap();
+    let data = fake.event("before_turn", json!({"text": "check"}), turn(false, "subagent")).await.unwrap();
     assert_eq!(unstamped(text(&data)), "check");
 
     let data = fake.event("message_in", json!({"text": "all done", "source": "subagent"}), ctx("1")).await.unwrap();

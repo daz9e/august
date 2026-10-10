@@ -195,7 +195,7 @@ async fn turn_settled_comes_when_nothing_runs_in_the_thread() {
                     if d["unattended"] == true {
                         ctx.send("background turn ended").await?;
                     } else if !started.swap(true, Ordering::SeqCst) {
-                        me.start_turn(ctx.thread.as_ref().unwrap(), json!({"text": "think more", "mode": "fork"})).await?;
+                        me.start_turn(ctx.thread.as_ref().unwrap(), json!({"text": "think more", "conversation": "copy"})).await?;
                     }
                     Ok(None)
                 }

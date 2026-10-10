@@ -1,5 +1,5 @@
-//! Turns and their modes: visible, quiet, fork and fresh turns started by extensions,
-//! messages arriving mid-turn, follow-ups, the step budget.
+//! Turns: ones extensions start (in the thread's conversation, a copy, a new one; shown or
+//! not), messages arriving mid-turn, follow-ups, no step limit of the core's.
 
 use crate::support::*;
 use august_ext::August;
@@ -34,7 +34,7 @@ fn turnkit(a: &August) {
     a.register_command("quiet", "", move |_, ctx| {
         let r = r.clone();
         async move {
-            let out = r(ctx.thread.clone().unwrap(), json!({"text": "check quietly", "mode": "quiet"})).await?;
+            let out = r(ctx.thread.clone().unwrap(), json!({"text": "check quietly"})).await?;
             Ok(Some(format!("quiet {}: {}", out["status"].as_str().unwrap(), out["reply"].as_str().unwrap())))
         }
     });
@@ -42,7 +42,7 @@ fn turnkit(a: &August) {
     a.register_command("fork", "", move |_, ctx| {
         let r = r.clone();
         async move {
-            let out = r(ctx.thread.clone().unwrap(), json!({"text": "look back", "mode": "fork", "tools": ["read"]})).await?;
+            let out = r(ctx.thread.clone().unwrap(), json!({"text": "look back", "conversation": "copy", "tools": ["read"]})).await?;
             let calls: Vec<String> = out["toolCalls"].as_array().unwrap().iter().map(|c| format!("{}:{}", c["name"].as_str().unwrap(), c["isError"])).collect();
             Ok(Some(format!("fork {}: {} | {}", out["status"].as_str().unwrap(), out["reply"].as_str().unwrap(), calls.join(","))))
         }
@@ -52,27 +52,27 @@ fn turnkit(a: &August) {
         let me = me.clone();
         async move {
             let thread = ctx.thread.clone().unwrap();
-            let id = me.start_turn(&thread, json!({"text": "a long job", "mode": "fresh"})).await?;
+            let id = me.start_turn(&thread, json!({"text": "a long job", "conversation": "new"})).await?;
             let (waiter, c) = (me.clone(), ctx.clone());
             tokio::spawn(async move {
                 let out = waiter.wait_turn(id, Duration::from_secs(60)).await.unwrap();
                 c.send(&format!("spawned {}", out["status"].as_str().unwrap())).await.ok();
             });
             let running = me.call("turns", json!({"thread": thread})).await?;
-            let modes: Vec<&str> = running.as_array().unwrap().iter().filter_map(|t| t["mode"].as_str()).collect();
-            Ok(Some(format!("running: {}", modes.join(","))))
+            let kinds: Vec<&str> = running.as_array().unwrap().iter().filter_map(|t| t["conversation"].as_str()).collect();
+            Ok(Some(format!("running: {}", kinds.join(","))))
         }
     });
     a.on("turn_end", |d, ctx| async move {
         if let Some(turn) = ctx.turn.as_ref().filter(|t| t.source.as_deref() == Some("turnkit")) {
-            ctx.send(&format!("ended {} {}", turn.mode, d["status"].as_str().unwrap())).await?;
+            ctx.send(&format!("ended {:?} {}", turn.conversation, d["status"].as_str().unwrap())).await?;
         }
         Ok(None)
     });
 }
 
 #[tokio::test]
-async fn extensions_run_quiet_fork_and_fresh_turns() {
+async fn extensions_run_turns_in_the_thread_a_copy_and_a_new_conversation() {
     let core = core()
         .model(|req| {
             let all = all_text(req);
@@ -97,7 +97,7 @@ async fn extensions_run_quiet_fork_and_fresh_turns() {
 
     // A quiet turn shows nothing but stays in the conversation.
     chat.ask("/quiet", "quiet ok: QUIET-REPLY").await;
-    chat.wait_for("ended quiet ok").await;
+    chat.wait_for("ended \"thread\" ok").await;
     assert_eq!(chat.texts().iter().filter(|t| t.contains("QUIET-REPLY")).count(), 1, "{:?}", chat.texts());
     chat.ask("hello", "saw quiet: true").await;
 
@@ -109,7 +109,7 @@ async fn extensions_run_quiet_fork_and_fresh_turns() {
     assert!(!last.contains("look back") && !last.contains("FORK-REPLY"), "the fork was kept");
 
     // Stopping the thread cancels its turns, sub-agents included.
-    chat.ask("/spawn", "running: fresh").await;
+    chat.ask("/spawn", "running: new").await;
     assert_eq!(core.call_in(&chat.thread, "stop", json!({})).await.unwrap()["cancelled"], 1);
     chat.wait_for("spawned cancelled").await;
 }
@@ -138,7 +138,7 @@ async fn an_extension_runs_a_visible_turn_in_another_thread_and_reports_back() {
                 let me = me.clone();
                 async move {
                     let there = august_ext::Thread { messenger: MESSENGER.into(), id: input["thread"].as_str().unwrap().into() };
-                    let id = me.start_turn(&there, json!({"text": input["task"], "mode": "visible", "parent": ctx.turn.as_ref().map(|t| t.id)})).await?;
+                    let id = me.start_turn(&there, json!({"text": input["task"], "show": true, "parent": ctx.turn.as_ref().map(|t| t.id)})).await?;
                     let (me, here) = (me.clone(), ctx.thread.clone().unwrap());
                     tokio::spawn(async move {
                         let out = me.wait_turn(id, Duration::from_secs(10)).await.unwrap();
@@ -223,16 +223,15 @@ async fn message_during_the_final_answer_runs_next_and_a_follow_up_keeps_its_own
 }
 
 #[tokio::test]
-async fn out_of_steps_the_agent_reports_progress() {
+async fn the_core_limits_no_steps_and_a_hook_can_end_a_turn_by_taking_the_tools() {
     let core = core()
-        .model(|req| if req.tools.is_empty() { text("Did 3 steps; the rest is left for next time.") } else { tool("read", json!({"path": "x"})) })
+        .model(|req| if req.tools.is_empty() { text("Done for now.") } else { tool("read", json!({"path": "x"})) })
         .ext("files", files)
-        .env("AUGUST_MAX_STEPS", "3")
+        .ext("limit", |a| {
+            a.on("llm_call", |d, _| async move { Ok((d["step"].as_u64() >= Some(200)).then(|| json!({"tools": []}))) });
+        })
         .start()
         .await;
-    core.chat("1").ask("loop forever", "Did 3 steps").await;
-    let reqs = core.requests();
-    assert_eq!(reqs.len(), 4);
-    let last = reqs.last().unwrap();
-    assert!(all_text(last).contains("Step limit reached") || last.system.contains("Step limit reached"));
+    core.chat("1").ask("loop forever", "Done for now.").await;
+    assert_eq!(core.requests().len(), 201);
 }

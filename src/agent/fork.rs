@@ -1,71 +1,64 @@
-//! A fork: one more exchange on a copy of a conversation. It runs on the same system
-//! prompt, history and tool list as the conversation (so the provider's prompt cache
-//! covers almost all of it), may only call the tools it is allowed, and keeps nothing:
-//! the conversation itself doesn't change. Extensions use it to look back at a
-//! conversation (e.g. a review that saves what is worth remembering).
+//! A fork: a copy of a conversation that runs turns like any other and keeps nothing. It
+//! starts from the same system prompt, history and tool list (so the provider's prompt cache
+//! covers almost all of it), and goes through the same loop and hooks; what it adds is
+//! dropped with it. Extensions use it to look back at a conversation (e.g. a review that
+//! saves what is worth remembering).
 
-use super::Agent;
-use crate::llm::{Block, LlmProvider, Message, Role, StopReason, ToolSpec};
-use crate::tools::{ToolCtx, ToolRegistry};
-use serde_json::{Value, json};
+use super::{Agent, SessionStore};
+use crate::llm::Message;
+use anyhow::Result;
 use std::sync::Arc;
 
-/// Model calls one fork may make.
-const MAX_STEPS: usize = 12;
-
-pub struct Fork {
-    provider: Arc<dyn LlmProvider>,
-    session: String,
-    system: String,
-    history: Vec<Message>,
-    specs: Vec<ToolSpec>,
-    tools: ToolRegistry,
-}
-
 impl Agent {
-    /// The conversation as it is now, to fork.
-    pub fn fork(&mut self) -> Fork {
-        Fork {
-            provider: self.provider(),
-            session: self.session.clone(),
-            system: self.system_now(),
-            history: self.history.clone(),
-            specs: self.specs(),
+    /// A copy of the conversation as it is now; nothing it does is stored.
+    pub fn fork(&mut self) -> Agent {
+        let system = self.system_now();
+        Agent {
+            provider: self.provider.clone(),
             tools: self.tools.clone(),
+            system,
+            turn_system: None,
+            snapshot: Some(String::new()),
+            history: self.history.clone(),
+            db: Arc::new(Dropped(self.db.clone())),
+            chat_key: self.chat_key.clone(),
+            session: self.session.clone(),
+            stored: self.history.len(),
+            turn_start: self.history.len(),
+            last_input_tokens: self.last_input_tokens,
+            turn_calls: Vec::new(),
+            settings: self.settings.clone(),
+            session_provider: self.session_provider.clone(),
+            turn_provider: None,
+            starting: None,
         }
     }
 }
 
-impl Fork {
-    /// Adds `task` as a user message and runs to the end; tools outside `allow` (when
-    /// given) answer with an error. Returns the final reply and every tool call
-    /// (`{name, input, output, isError}`).
-    pub async fn run(mut self, task: &str, allow: Option<&[String]>, ctx: &ToolCtx) -> anyhow::Result<(String, Vec<Value>)> {
-        self.history.push(Message::user_text(task));
-        let mut calls = Vec::new();
-        for step in 0..MAX_STEPS {
-            let completion = self.provider.complete(&self.session, &self.system, &self.history, &self.specs).await?;
-            if let Some(ext) = self.tools.extensions().filter(|e| e.listens("llm_result")).cloned() {
-                let (data, origin) = (super::llm_result(Some(step), Some(&self.session), &completion), ctx.origin.clone());
-                tokio::spawn(async move { ext.emit("llm_result", data, &origin).await });
-            }
-            let reply = completion.message;
-            self.history.push(reply.clone());
-            if !matches!(completion.stop_reason, StopReason::ToolUse) || reply.tool_uses().next().is_none() {
-                return Ok((reply.text(), calls));
-            }
-            let mut results = Vec::new();
-            for (id, name, input) in reply.tool_uses() {
-                let (output, is_error) = if allow.is_none_or(|a| a.iter().any(|n| n == name)) {
-                    self.tools.call(Some(id), name, input, ctx).await
-                } else {
-                    (format!("`{name}` is not available here"), true)
-                };
-                calls.push(json!({"name": name, "input": input, "output": output, "isError": is_error}));
-                results.push(Block::ToolResult { tool_use_id: id.to_string(), content: output, is_error });
-            }
-            self.history.push(Message { role: Role::User, content: results });
-        }
-        Ok((self.history.last().map(Message::text).unwrap_or_default(), calls))
+/// A store that reads from the conversation's own and writes nowhere.
+struct Dropped(Arc<dyn SessionStore>);
+
+impl SessionStore for Dropped {
+    fn resume_session(&self, chat_key: &str) -> Result<(String, Vec<Message>)> {
+        self.0.resume_session(chat_key)
     }
+    fn live(&self, session: &str) -> Result<Vec<Message>> {
+        self.0.live(session)
+    }
+    fn bind(&self, _: &str, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn update_session_settings(&self, _: &str, _: &serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+    fn session_settings(&self, session: &str) -> Result<serde_json::Value> {
+        self.0.session_settings(session)
+    }
+    fn append(&self, _: &str, _: &[Message], _: bool) -> Result<()> {
+        Ok(())
+    }
+    fn replace_live(&self, _: &str, _: &[Message]) -> Result<()> {
+        Ok(())
+    }
+    fn journal(&self, _: &crate::db::Entry) {}
 }

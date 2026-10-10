@@ -96,7 +96,7 @@ fn notice(changes: &[String]) -> Option<String> {
 
 /// After one of the user's turns: reviews when one is due.
 async fn after_turn(august: August, counters: Arc<Mutex<HashMap<String, Counters>>>, data: Value, ctx: Ctx) -> anyhow::Result<()> {
-    let visible = ctx.turn.as_ref().is_some_and(|t| t.mode == "visible");
+    let visible = ctx.turn.as_ref().is_some_and(|t| t.show);
     if !visible || data["status"] != "ok" || std::env::var("AUGUST_REVIEW").is_ok_and(|v| v == "off") {
         return Ok(());
     }
@@ -132,8 +132,8 @@ async fn after_turn(august: August, counters: Arc<Mutex<HashMap<String, Counters
     }
     let thread = ctx.thread.clone().ok_or_else(|| anyhow::anyhow!("a turn without a thread"))?;
     let turn = json!({
-        "text": ask.trim_end(), "mode": "fork", "source": "review", "parent": ctx.turn.as_ref().map(|t| t.id),
-        "tools": ALLOWED, "meta": {"approve": "all"},
+        "text": ask.trim_end(), "conversation": "copy", "source": "review", "parent": ctx.turn.as_ref().map(|t| t.id),
+        "tools": ALLOWED, "meta": {"approve": "all", "max_steps": 12},
     });
     let id = august.start_turn(&thread, turn).await?;
     let out = august.wait_turn(id, Duration::from_secs(600)).await?;

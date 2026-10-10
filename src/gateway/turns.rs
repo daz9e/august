@@ -1,13 +1,13 @@
-//! Turns as one primitive. Every run of the agent is a turn with an id, a mode, the thread
-//! it belongs to, the turn that started it (if any) and who did (`source`). `/stop` cancels
-//! every turn of a thread, sub-agents included. Extensions start turns of any mode, wait
-//! for their outcome, list and cancel them.
+//! Turns as one primitive. Every run of the agent is a turn with an id, the thread it
+//! belongs to, the conversation it runs in (the thread's, a copy, a new one), whether it is
+//! shown, the turn that started it (if any) and who did (`source`). `/stop` cancels every
+//! turn of a thread, sub-agents included. Extensions start turns, wait for their outcome,
+//! list and cancel them.
 
 use super::Gateway;
-use crate::agent::{Agent, TurnMode, TurnTag};
+use crate::agent::{Agent, Conversation, TurnTag};
 use crate::extensions::Origin;
 use crate::messengers::Thread;
-use crate::tools::ToolCtx;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -64,10 +64,10 @@ pub struct Turns {
 }
 
 impl Turns {
-    /// Registers a turn; the returned `Notify` fires when it is cancelled.
-    pub fn begin(&self, thread: &Thread, mode: TurnMode, source: Option<String>, parent: Option<u64>, meta: Value) -> (TurnTag, Arc<Notify>) {
+    /// Registers a turn and gives it its id; the returned `Notify` fires when it is cancelled.
+    pub fn begin(&self, thread: &Thread, mut tag: TurnTag) -> (TurnTag, Arc<Notify>) {
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        let tag = TurnTag { id, mode, source, parent, meta };
+        tag.id = id;
         let cancel = Arc::new(Notify::new());
         let running = Running { thread: thread.clone(), tag: tag.clone(), cancel: cancel.clone() };
         self.running.lock().unwrap().insert(id, running);
@@ -84,9 +84,10 @@ impl Turns {
         self.running.lock().unwrap().get(&id).map(|r| r.tag.clone())
     }
 
-    /// Whether `id` is the visible turn running in `thread` (the one holding its conversation).
+    /// Whether `id` is a turn shown in `thread`'s own conversation (the user's).
     pub fn is_reply_of(&self, id: u64, thread: &Thread) -> bool {
-        self.running.lock().unwrap().get(&id).is_some_and(|r| &r.thread == thread && r.tag.mode == TurnMode::Visible)
+        let running = self.running.lock().unwrap();
+        running.get(&id).is_some_and(|r| &r.thread == thread && r.tag.show && r.tag.conversation == Conversation::Thread)
     }
 
     /// Cancels every running turn of `thread`; returns how many there were.
@@ -107,7 +108,7 @@ impl Turns {
         self.running.lock().unwrap().values().any(|r| &r.thread == thread)
     }
 
-    /// Running turns, of one thread or all: `{id, mode, source, parent, thread}`.
+    /// Running turns, of one thread or all: `{id, conversation, show, source, parent, thread}`.
     pub fn list(&self, thread: Option<&Thread>) -> Value {
         let running = self.running.lock().unwrap();
         let mut list: Vec<&Running> = running.values().filter(|r| thread.is_none_or(|t| &r.thread == t)).collect();
@@ -130,17 +131,22 @@ pub struct TurnRequest {
     #[serde(skip)]
     pub thread: Option<Thread>,
     pub text: String,
-    /// `visible`, `quiet` (the default), `fork` or `fresh`.
-    pub mode: Option<TurnMode>,
+    /// `thread` (the default): the thread's conversation; `copy`: a copy of it, dropped
+    /// afterwards; `new`: a conversation of its own.
+    #[serde(default)]
+    pub conversation: Conversation,
+    /// Shown in the thread as it runs, like the user's turns (default: not).
+    #[serde(default)]
+    pub show: bool,
     /// Who starts it (shown to hooks as `ctx.turn.source`).
     pub source: Option<String>,
     pub parent: Option<u64>,
-    /// `fresh`: instructions added to the base system prompt.
+    /// `new`: instructions added to the base system prompt.
     pub system: Option<String>,
-    /// `fresh`: only these tools; `fork`: only these may be called (the rest stay offered,
-    /// so the prompt cache holds).
+    /// Only these tools may be called. A `new` conversation is offered only these; the
+    /// others keep offering what they did, so the prompt cache holds.
     pub tools: Option<Vec<String>>,
-    /// `fresh`: never these tools.
+    /// Never these tools (like `tools`).
     #[serde(default)]
     pub exclude: Vec<String>,
     /// Whatever the starter wants hooks to know about the turn (`ctx.turn.meta`).
@@ -152,31 +158,33 @@ impl Gateway {
     /// Starts a turn for an extension and returns its id; its outcome waits for `wait_turn`.
     pub(super) fn start_turn(self: &Arc<Self>, req: TurnRequest) -> Result<u64> {
         let thread = req.thread.clone().ok_or_else(|| anyhow::anyhow!("a turn needs a thread"))?;
-        let mode = req.mode.unwrap_or(TurnMode::Quiet);
         if thread.is_session() {
-            anyhow::ensure!(mode != TurnMode::Visible, "a stored conversation has no chat to show a visible turn in");
+            anyhow::ensure!(!req.show, "a stored conversation has no chat to show a turn in");
             self.db.current_session(&thread.key())?;
         } else if self.channel(&thread.messenger).is_none() {
             bail!("messenger `{}` is not running", thread.messenger);
         }
+        let callable = (req.tools.is_some() || !req.exclude.is_empty()).then(|| {
+            let names = self.tools().specs().into_iter().map(|s| s.name);
+            let allowed = names.filter(|n| req.tools.as_ref().is_none_or(|t| t.contains(n)) && !req.exclude.contains(n));
+            Arc::new(allowed.collect())
+        });
+        let tag = TurnTag {
+            id: 0,
+            conversation: req.conversation,
+            show: req.show,
+            source: req.source.clone(),
+            parent: req.parent,
+            meta: req.meta.clone(),
+            callable,
+        };
         // Registered now, so /stop cancels it even while it waits for the thread.
-        let (tag, cancel) = self.turns.begin(&thread, mode, req.source.clone(), req.parent, req.meta.clone());
-        if mode != TurnMode::Visible {
-            self.journal_turn(&thread, &tag, "turn_start", json!({"mode": tag.mode, "parent": tag.parent, "text": req.text}));
-        }
+        let (tag, cancel) = self.turns.begin(&thread, tag);
         let (tx, rx) = oneshot::channel();
         self.turns.outcomes.lock().unwrap().insert(tag.id, rx);
         let (me, id) = (self.clone(), tag.id);
         tokio::spawn(async move {
-            let outcome = if mode == TurnMode::Visible {
-                me.visible_turn(thread, tag, cancel, req.text).await
-            } else {
-                let text = req.text.clone();
-                let outcome = me.run_turn(thread.clone(), tag.clone(), cancel, req).await;
-                me.turns.end(id);
-                me.turn_ended(&thread, &tag, &text, &outcome);
-                outcome
-            };
+            let outcome = me.run_turn(thread, tag, cancel, req).await;
             tx.send(outcome).ok();
             // Nobody collected it: drop it after a while.
             tokio::time::sleep(OUTCOME_TTL).await;
@@ -196,87 +204,67 @@ impl Gateway {
         }
     }
 
-    /// A visible turn an extension started: like one of the user's, after whatever runs in
-    /// the thread now, streamed there.
-    async fn visible_turn(self: &Arc<Self>, thread: Thread, tag: TurnTag, cancel: Arc<Notify>, text: String) -> Outcome {
-        let id = tag.id;
-        let run = async {
-            let channel = self.messenger(&thread)?;
-            self.turn(channel, thread.clone(), &thread.id, &text, Vec::new(), Some((tag, cancel))).await
-        };
-        run.await.unwrap_or_else(|e| {
-            self.turns.end(id);
-            Outcome::of(Some(Err(e)), Vec::new())
-        })
-    }
-
+    /// Runs a turn an extension started, in the conversation it asked for.
     async fn run_turn(self: &Arc<Self>, thread: Thread, tag: TurnTag, cancel: Arc<Notify>, req: TurnRequest) -> Outcome {
-        let origin = Origin { thread: Some(thread.clone()), turn: Some(tag.clone()), ..Default::default() };
-        let ctx = ToolCtx {
-            db: self.db.clone(),
-            origin,
-            inbox: None,
-            caller: "model".into(),
+        let channel = if tag.show {
+            match self.messenger(&thread) {
+                Ok(c) => Some(c),
+                Err(e) => return self.not_started(&thread, &tag, &req.text, e),
+            }
+        } else {
+            None
         };
-        let outcome = match tag.mode {
-            TurnMode::Quiet => {
-                let state = match self.chat(&thread).await {
-                    Ok(s) => s,
-                    Err(e) => return Outcome::of(Some(Err(e)), Vec::new()),
-                };
-                // After whatever runs in the thread now; the user's next message waits for it.
+        // The thread's conversation and a shown turn: like one of the user's, after whatever
+        // runs in the thread now, with the messages sent meanwhile.
+        if tag.show && tag.conversation == Conversation::Thread {
+            let (id, text) = (tag.clone(), req.text.clone());
+            return match self.turn(channel.expect("shown"), thread.clone(), &thread.id, &req.text, Vec::new(), Some((tag, cancel))).await {
+                Ok(outcome) => outcome,
+                Err(e) => self.not_started(&thread, &id, &text, e),
+            };
+        }
+        let state = match tag.conversation {
+            Conversation::New => None,
+            _ => match self.chat(&thread).await {
+                Ok(s) => Some(s),
+                Err(e) => return self.not_started(&thread, &tag, &req.text, e),
+            },
+        };
+        match tag.conversation {
+            // After whatever runs in the thread now; the user's next message waits for it.
+            Conversation::Thread => {
+                let state = state.expect("a chat");
                 let mut agent = state.agent.lock().await;
-                agent.set_provider(self.provider.read().unwrap().clone());
-                let shown_nowhere: &mut (dyn FnMut(crate::agent::Event) + Send) = &mut |_| {};
-                let r = tokio::select! {
-                    r = agent.run_turn(&req.text, &ctx, shown_nowhere) => Some(r),
-                    _ = cancel.notified() => None,
-                };
-                if r.is_none() {
-                    agent.rollback_turn();
+                self.turn_once(&mut agent, channel, &thread, &req.text, Vec::new(), (tag, cancel), None).await
+            }
+            Conversation::Copy => {
+                let mut fork = state.expect("a chat").agent.lock().await.fork();
+                self.turn_once(&mut fork, channel, &thread, &req.text, Vec::new(), (tag, cancel), None).await
+            }
+            Conversation::New => {
+                // A key of its own, so it starts fresh instead of resuming an older one's session.
+                let key = format!("{}#agent-{}", thread.key(), &crate::util::new_uuid()[..8]);
+                let mut tools = self.tools().without(&req.exclude);
+                if let Some(only) = &req.tools {
+                    tools = tools.only(only);
                 }
-                Outcome::of(r, Vec::new())
-            }
-            TurnMode::Fork => {
-                let fork = match self.chat(&thread).await {
-                    Ok(state) => state.agent.lock().await.fork(),
-                    Err(e) => return Outcome::of(Some(Err(e)), Vec::new()),
+                let provider = self.provider.read().unwrap().clone();
+                let system = req.system.clone().unwrap_or_default();
+                let mut agent = match Agent::new(provider, tools, system, self.db.clone(), &key) {
+                    Ok(a) => a,
+                    Err(e) => return self.not_started(&thread, &tag, &req.text, e),
                 };
-                let r = tokio::select! {
-                    r = fork.run(&req.text, req.tools.as_deref(), &ctx) => Some(r),
-                    _ = cancel.notified() => None,
-                };
-                match r {
-                    Some(Ok((reply, calls))) => Outcome::of(Some(Ok(reply)), calls),
-                    Some(Err(e)) => Outcome::of(Some(Err(e)), Vec::new()),
-                    None => Outcome::of(None, Vec::new()),
-                }
+                self.turn_once(&mut agent, channel, &thread, &req.text, Vec::new(), (tag, cancel), None).await
             }
-            TurnMode::Fresh => {
-                let r = tokio::select! {
-                    r = self.fresh(&thread, &tag, &req, &ctx) => Some(r),
-                    _ = cancel.notified() => None,
-                };
-                Outcome::of(r, Vec::new())
-            }
-            TurnMode::Visible => unreachable!("visible turns run in visible_turn"),
-        };
-        outcome
+        }
     }
 
-    /// A conversation of its own (a sub-agent) with the thread's hooks; returns the reply.
-    async fn fresh(&self, thread: &Thread, tag: &TurnTag, req: &TurnRequest, ctx: &ToolCtx) -> Result<String> {
-        // A key of its own, so it starts fresh instead of resuming an older one's session.
-        let key = format!("{}#agent-{}", thread.key(), &crate::util::new_uuid()[..8]);
-        let mut tools = self.tools().without(&req.exclude);
-        if let Some(only) = &req.tools {
-            tools = tools.only(only);
-        }
-        let provider = self.provider.read().unwrap().clone();
-        let system = req.system.clone().unwrap_or_default();
-        let mut agent = Agent::new(provider, tools, system, self.db.clone(), &key)?;
-        eprintln!("fresh turn #{} starts: {}", tag.id, req.text.chars().take(80).collect::<String>());
-        agent.run_turn(&req.text, ctx, &mut |_| {}).await
+    /// A turn that failed before it ran: it ends like any other.
+    fn not_started(self: &Arc<Self>, thread: &Thread, tag: &TurnTag, text: &str, e: anyhow::Error) -> Outcome {
+        let outcome = Outcome::of(Some(Err(e)), Vec::new());
+        self.turns.end(tag.id);
+        self.turn_ended(thread, tag, text, &outcome);
+        outcome
     }
 
     /// Tells extensions (`turn_settled`, once) when nothing runs in `thread` any more and
@@ -311,7 +299,7 @@ impl Gateway {
             "status": outcome.status,
             "error": outcome.error,
             "toolCalls": outcome.tool_calls.len(),
-            "unattended": tag.mode != TurnMode::Visible,
+            "unattended": !tag.show,
         });
         let origin = Origin { thread: Some(thread.clone()), turn: Some(tag.clone()), ..Default::default() };
         let (me, thread) = (self.clone(), thread.clone());

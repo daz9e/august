@@ -58,7 +58,8 @@ impl Gateway {
         let (mut images, mut text, mut begun) = (images, text, begun);
         let mut first = None;
         loop {
-            let ended = self.turn_once(&state, &mut agent, channel.clone(), &id, chat, &text, images, begun.take()).await;
+            let begun = begun.take().unwrap_or_else(|| self.turns.begin(&id, TurnTag::shown()));
+            let ended = self.turn_once(&mut agent, Some(channel.clone()), &id, &text, images, begun, Some(state.inbox.clone())).await;
             first.get_or_insert(ended);
             let left = state.inbox.finish();
             if !left.is_empty() {
@@ -71,24 +72,26 @@ impl Gateway {
         }
     }
 
+    /// Runs one turn of `agent` in `thread`. A turn that is shown streams its events to
+    /// whoever draws turns (or sends the outcome to `channel` when nobody does); `inbox`:
+    /// the chat's, for messages the user sends while it runs.
     #[allow(clippy::too_many_arguments)]
-    async fn turn_once(
+    pub(super) async fn turn_once(
         self: &Arc<Self>,
-        state: &super::Chat,
         agent: &mut crate::agent::Agent,
-        channel: Arc<dyn Messenger>,
+        channel: Option<Arc<dyn Messenger>>,
         id: &Thread,
-        chat: &str,
         text: &str,
         images: Vec<Block>,
-        begun: Option<(TurnTag, Arc<Notify>)>,
+        (tag, cancel): (TurnTag, Arc<Notify>),
+        inbox: Option<Arc<crate::agent::Inbox>>,
     ) -> Outcome {
-        let (tag, cancel) = begun.unwrap_or_else(|| self.turns.begin(id, crate::agent::TurnMode::Visible, None, None, Value::Null));
-        self.journal_turn(id, &tag, "turn_start", json!({"mode": tag.mode, "parent": tag.parent, "text": text}));
+        self.journal_turn(id, &tag, "turn_start", json!({"conversation": tag.conversation, "show": tag.show, "parent": tag.parent, "text": text}));
         agent.set_provider(self.provider.read().unwrap().clone());
+        let channel = channel.filter(|_| tag.show);
 
-        let renderer = self.ext.taker("render");
-        let drawing = renderer.as_ref().map(|name| {
+        let renderer = channel.as_ref().and_then(|_| self.ext.taker("render"));
+        let drawing = renderer.as_ref().zip(channel.as_ref()).map(|(name, channel)| {
             let (tx, task) = draw(self.ext.clone(), name.clone(), Origin { thread: Some(id.clone()), turn: Some(tag.clone()), ..Default::default() });
             self.live.lock().unwrap().insert(id.clone(), (name.clone(), tx.clone()));
             tx.send(Live::Event(json!({"kind": "start", "capabilities": channel.describe().capabilities}))).ok();
@@ -99,10 +102,10 @@ impl Gateway {
         let ctx = ToolCtx {
             db: self.db.clone(),
             origin,
-            inbox: Some(state.inbox.clone()),
+            inbox: inbox.clone(),
             caller: "model".into(),
         };
-        let hooked = self.ext.listens("turn_event").then(|| turn_events(self.ext.clone(), ctx.origin.clone()));
+        let hooked = (tag.show && self.ext.listens("turn_event")).then(|| turn_events(self.ext.clone(), ctx.origin.clone()));
         let live = drawing.as_ref().map(|(tx, _)| tx.clone());
         let mut on_event = move |e: Event| {
             let e = match &e {
@@ -119,39 +122,46 @@ impl Gateway {
             }
         };
 
-        state.inbox.steering(true);
+        if let Some(inbox) = &inbox {
+            inbox.steering(true);
+        }
         let outcome = tokio::select! {
             r = agent.run_turn_with(text, images, &ctx, &mut on_event) => Some(r),
             _ = cancel.notified() => None,
         };
-        state.inbox.steering(false);
+        if let Some(inbox) = &inbox {
+            inbox.steering(false);
+        }
         let ended = Outcome::of(
             outcome.as_ref().map(|r| r.as_ref().map(String::clone).map_err(|e| anyhow::anyhow!("{e:#}"))),
-            vec![serde_json::Value::Null; agent.tool_calls()],
+            agent.tool_calls(),
         );
         if outcome.is_none() {
             agent.rollback_turn();
         }
-        match &drawing {
-            Some((tx, _)) => {
+        match (&drawing, &channel) {
+            (Some((tx, _)), _) => {
                 tx.send(Live::Event(json!({"kind": "end", "status": ended.status, "reply": ended.reply, "error": ended.error}))).ok();
             }
             // Nobody draws turns: just the outcome, once.
-            None => {
+            (None, Some(channel)) => {
                 let text = match (ended.status, &ended.error) {
                     ("ok", _) if ended.reply.is_empty() => "(empty reply)".to_string(),
                     ("ok", _) => ended.reply.clone(),
                     ("cancelled", _) => "⏹ Stopped.".into(),
                     (_, e) => format!("⚠️ Error: {}", e.as_deref().unwrap_or_default()),
                 };
-                if let Err(e) = channel.send(chat, &OutMessage::text(text)).await {
+                if let Err(e) = channel.send(&id.id, &OutMessage::text(text)).await {
                     eprintln!("{}: send failed: {e:#}", channel.id());
                 }
             }
+            (None, None) => {}
         }
         self.turns.end(tag.id);
         self.turn_ended(id, &tag, text, &ended);
-        self.live.lock().unwrap().remove(id);
+        if drawing.is_some() {
+            self.live.lock().unwrap().remove(id);
+        }
         drop(ctx);
         drop(on_event);
         if let Some((tx, task)) = drawing {

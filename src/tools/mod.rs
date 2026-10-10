@@ -76,6 +76,9 @@ impl ToolRegistry {
     }
 
     async fn call_hooked(&self, id: Option<&str>, name: &str, input: &Value, ctx: &ToolCtx) -> (String, bool) {
+        if ctx.origin.turn.as_ref().and_then(|t| t.callable.as_ref()).is_some_and(|c| !c.contains(name)) {
+            return (format!("`{name}` is not available here"), true);
+        }
         let Some(ext) = self.ext.as_ref().filter(|_| self.offered(name)) else {
             return (format!("unknown tool: {name}"), true);
         };

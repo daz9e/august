@@ -15,11 +15,6 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// Model calls one turn may make (override: `AUGUST_MAX_STEPS`).
-const MAX_STEPS: usize = 150;
-/// Tries of one model call when `llm_error` handlers keep asking for another.
-const MAX_ATTEMPTS: usize = 8;
-
 /// `llm_result`'s data for a completion: `step` of a turn's (or a fork's) loop, `None` for a
 /// single call; `session`: the conversation it is counted in.
 pub fn llm_result(step: Option<usize>, session: Option<&str>, completion: &Completion) -> Value {
@@ -35,23 +30,24 @@ pub fn llm_result(step: Option<usize>, session: Option<&str>, completion: &Compl
     })
 }
 
-/// How a turn runs. `Visible`: the user's conversation, streamed to the thread. `Quiet`:
-/// in the thread's conversation, nothing shown, the reply returned. `Fork`: on a copy of
-/// the conversation, nothing kept. `Fresh`: a new conversation (a sub-agent).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Which conversation a turn runs in: the thread's own (`Thread`), a copy of it that is
+/// dropped afterwards (`Copy`), or a new one of its own (`New`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum TurnMode {
-    Visible,
-    Quiet,
-    Fork,
-    Fresh,
+pub enum Conversation {
+    #[default]
+    Thread,
+    Copy,
+    New,
 }
 
 /// The turn a hook, tool or command runs in.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TurnTag {
     pub id: u64,
-    pub mode: TurnMode,
+    pub conversation: Conversation,
+    /// Whether it is shown in its thread as it runs.
+    pub show: bool,
     /// Who started it, when not the user (an extension's name, `scheduler`, ...).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -60,6 +56,17 @@ pub struct TurnTag {
     /// What the starter attached for hooks to read; the core doesn't look inside.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub meta: Value,
+    /// When set, only these tools may be called in it (the others stay offered).
+    #[serde(skip)]
+    pub callable: Option<Arc<std::collections::HashSet<String>>>,
+}
+
+impl TurnTag {
+    /// A turn of the user's: in the thread's conversation, shown there (its id comes when
+    /// it is registered).
+    pub fn shown() -> Self {
+        Self { id: 0, conversation: Conversation::Thread, show: true, source: None, parent: None, meta: Value::Null, callable: None }
+    }
 }
 
 pub enum Event<'a> {
@@ -92,8 +99,8 @@ pub struct Agent {
     turn_start: usize,
     /// Input tokens the provider reported for the latest call.
     last_input_tokens: usize,
-    /// Tool calls the running turn made.
-    turn_tool_calls: usize,
+    /// Tool calls the running turn made: `{name, input, output, isError}`.
+    turn_calls: Vec<Value>,
     /// The session's settings as of the running turn: `{model, system, tools}`.
     settings: Value,
     /// The provider for the session's own `model`, if it has one.
@@ -129,7 +136,7 @@ impl Agent {
             stored,
             turn_start: stored,
             last_input_tokens: 0,
-            turn_tool_calls: 0,
+            turn_calls: Vec::new(),
             settings: json!({}),
             session_provider: None,
             turn_provider: None,
@@ -137,9 +144,9 @@ impl Agent {
         })
     }
 
-    /// Tool calls the latest turn made.
-    pub fn tool_calls(&self) -> usize {
-        self.turn_tool_calls
+    /// Tool calls the latest turn made: `{name, input, output, isError}`.
+    pub fn tool_calls(&self) -> Vec<Value> {
+        self.turn_calls.clone()
     }
 
     pub fn set_provider(&mut self, provider: Arc<dyn LlmProvider>) {
@@ -226,11 +233,6 @@ impl Agent {
     fn build_spec(&self, spec: &str) -> Result<Arc<dyn LlmProvider>> {
         let ext = self.tools.extensions().ok_or_else(|| anyhow::anyhow!("no extensions offer models"))?;
         crate::llm::providers::build_spec(ext, spec)
-    }
-
-    fn max_steps(&self) -> usize {
-        let set = self.tools.extensions().and_then(|e| e.root().env("AUGUST_MAX_STEPS"));
-        set.and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(MAX_STEPS)
     }
 
     /// The model this session talks to.
@@ -372,9 +374,6 @@ impl Agent {
                 Err(e) => e,
             };
             let Some(ext) = self.tools.extensions().filter(|x| x.listens("llm_error")).cloned() else { return Err(e) };
-            if attempt >= MAX_ATTEMPTS {
-                return Err(e);
-            }
             let kind = crate::llm::error::ErrorKind::of(&e).as_str();
             let failed = json!({"kind": kind, "message": format!("{e:#}")});
             let data = json!({"step": step, "attempt": attempt, "model": self.provider().name(), "error": failed, "streamed": streamed});
@@ -383,7 +382,7 @@ impl Agent {
                 return Err(e);
             }
             if let Some(ms) = data["delayMs"].as_u64() {
-                tokio::time::sleep(std::time::Duration::from_millis(ms.min(600_000))).await;
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
             }
             if let Some(m) = data["model"].as_str().filter(|m| *m != self.provider().name()) {
                 self.turn_provider = Some(self.build_spec(m)?);
@@ -420,18 +419,9 @@ impl Agent {
         }
     }
 
-    /// Runs one user turn to completion and returns the final assistant text.
-    /// History is append-only; on error the whole turn is rolled back.
-    pub async fn run_turn(
-        &mut self,
-        user_text: &str,
-        ctx: &ToolCtx,
-        on_event: &mut (dyn FnMut(Event) + Send),
-    ) -> Result<String> {
-        self.run_turn_with(user_text, Vec::new(), ctx, on_event).await
-    }
-
-    /// Like `run_turn`, with extra blocks (images) after the user's text.
+    /// Runs one turn to completion and returns the final assistant text; `attachments`
+    /// (images) go after the user's text. History is append-only; on error the whole turn is
+    /// rolled back.
     pub async fn run_turn_with(
         &mut self,
         user_text: &str,
@@ -444,7 +434,7 @@ impl Agent {
         self.turn_start = self.history.len();
         self.turn_system = None;
         self.turn_provider = None;
-        self.turn_tool_calls = 0;
+        self.turn_calls.clear();
         let ext = self.tools.extensions().cloned();
         let mut text = user_text.to_string();
         if let Some(ext) = &ext
@@ -484,8 +474,9 @@ impl Agent {
         self.history.push(user);
         let specs = self.specs();
 
-        let limit = self.max_steps();
-        for step in 0..limit {
+        // How many steps a turn may take is the hooks' business (`llm_call` can take the tools
+        // away); the loop ends when the model stops calling tools.
+        for step in 0.. {
             if step > 0 {
                 on_event(Event::Step);
                 // Messages the user sent meanwhile join the tool results.
@@ -511,14 +502,14 @@ impl Agent {
 
             // Run the requested tools concurrently; results go back in call order.
             let calls: Vec<_> = reply.tool_uses().collect();
-            self.turn_tool_calls += calls.len();
             for (_, name, input) in &calls {
                 on_event(Event::ToolCall { name, input });
             }
             let outputs =
                 futures_util::future::join_all(calls.iter().map(|(id, name, input)| self.tools.call(Some(id), name, input, ctx))).await;
             let mut results = Vec::new();
-            for ((id, _, _), (output, is_error)) in calls.iter().zip(outputs) {
+            for ((id, name, input), (output, is_error)) in calls.iter().zip(outputs) {
+                self.turn_calls.push(json!({"name": name, "input": input, "output": output, "isError": is_error}));
                 results.push(Block::ToolResult {
                     tool_use_id: id.to_string(),
                     content: output,
@@ -530,18 +521,7 @@ impl Agent {
                 content: results,
             });
         }
-        // Out of steps: one last call without tools for a report instead of a dead end.
-        on_event(Event::Step);
-        let note = format!(
-            "[Step limit reached: you used all {limit} steps of this turn. Don't call tools. Tell the \
-             user briefly what you did, what is left, and how to continue.]"
-        );
-        if let Some(last) = self.history.last_mut() {
-            last.content.push(Block::Text(note));
-        }
-        let completion = self.call_with_retries(limit, &[], ctx, on_event).await?;
-        self.history.push(completion.message.clone());
-        Ok(completion.message.text())
+        unreachable!("the loop returns")
     }
 }
 

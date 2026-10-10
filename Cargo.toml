@@ -132,6 +132,10 @@ name = "august-ext-skills"
 path = "extensions/skills/main.rs"
 
 [[bin]]
+name = "august-ext-steps"
+path = "extensions/steps/main.rs"
+
+[[bin]]
 name = "august-ext-subagents"
 path = "extensions/subagents/main.rs"
 

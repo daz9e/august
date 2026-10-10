@@ -126,7 +126,7 @@ async function ask(thread: Thread, question: string, options: string[], timeout 
   return answer;
 }
 
-type Turn = { id: number; mode: string; source?: string; parent?: number };
+type Turn = { id: number; conversation: string; show: boolean; source?: string; parent?: number; meta?: unknown };
 
 /** Starts a turn and waits for its outcome; throws unless it ended ok. */
 async function runTurn(thread: Thread, turn: object): Promise<string> {
@@ -148,7 +148,7 @@ function context(thread: Thread | null, turn: Turn | null = null, depth = 0) {
     turn,
     send: (message: Message) => inThread("send", { message }),
     prompt: (text: string, opts: { source?: string; deliver?: string } = {}) => inThread("prompt", { text, ...opts }),
-    agent: (task: string, opts: object = {}) => runTurn(need(), { ...opts, text: task, mode: "fresh", parent: turn?.id }),
+    agent: (task: string, opts: object = {}) => runTurn(need(), { ...opts, text: task, conversation: "new", parent: turn?.id }),
     ask: async (question: string, options: string[], opts: { timeout?: number } = {}) => ask(need(), question, options, opts.timeout),
     callTool: (name: string, input: unknown = {}) => inThread("callTool", { name, input }),
     llm: (prompt: string | object[], opts: { system?: string; effort?: string; options?: object } = {}) =>

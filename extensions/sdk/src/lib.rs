@@ -230,8 +230,11 @@ impl Link {
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct Turn {
     pub id: u64,
-    /// `visible`, `quiet`, `fork` or `fresh`.
-    pub mode: String,
+    /// The conversation it runs in: `thread` (the thread's own), `copy` or `new`.
+    pub conversation: String,
+    /// Whether it is shown in its thread as it runs.
+    #[serde(default)]
+    pub show: bool,
     pub source: Option<String>,
     pub parent: Option<u64>,
     /// What the turn's starter attached (`turn_start {meta}`).
@@ -311,7 +314,7 @@ impl Ctx {
     pub async fn agent(&self, task: &str, opts: Value) -> Result<String> {
         let mut turn = if opts.is_object() { opts } else { json!({}) };
         turn["text"] = json!(task);
-        turn["mode"] = json!("fresh");
+        turn["conversation"] = json!("new");
         turn["parent"] = json!(self.turn.as_ref().map(|t| t.id));
         let id = self.in_thread("turn_start", json!({"turn": turn})).await?;
         let out = self.link.call("turn_wait", json!({"id": id})).await?;
@@ -515,8 +518,8 @@ impl August {
         self.0.link.ask(thread, question, options, timeout).await
     }
 
-    /// Starts a turn in `thread` (`{text, mode: visible|quiet|fork|fresh, source, parent,
-    /// system, tools, exclude, meta}`); returns its id.
+    /// Starts a turn in `thread` (`{text, conversation: thread|copy|new, show, source,
+    /// parent, system, tools, exclude, meta}`); returns its id.
     pub async fn start_turn(&self, thread: &Thread, turn: Value) -> Result<u64> {
         let v = self.0.link.call("turn_start", json!({"thread": thread, "turn": turn})).await?;
         v.as_u64().ok_or_else(|| anyhow!("bad turn id"))

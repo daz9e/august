@@ -31,7 +31,7 @@ async fn serve(august: August) {
         }),
         |input, ctx| async move {
             // A sub-agent or a scheduled task has nobody to ask.
-            if ctx.turn.as_ref().is_some_and(|t| t.mode != "visible") {
+            if ctx.turn.as_ref().is_some_and(|t| !t.show) {
                 bail!("nobody can answer here (a background task); decide yourself and say what you assumed");
             }
             let question = str_arg(&input, "question").trim();

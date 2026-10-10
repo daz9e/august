@@ -144,7 +144,7 @@ async fn a_yes_in_words_allows_and_other_words_deny_and_reach_the_agent() {
         assert!(ask.starts_with("✅ Allowed"), "{ask}");
     }
 
-    let turn = turn_ctx("1", json!({"id": 7, "mode": "visible", "meta": {}}));
+    let turn = turn_ctx("1", json!({"id": 7, "conversation": "thread", "show": true, "meta": {}}));
     let (out, ask) = answered(&fake, bash("rm x"), turn, |f, _| f.reply("1", "no, call it other.txt")).await;
     assert_eq!(out["block"], "the user denied this and wrote instead");
     assert!(ask.starts_with("❌ Denied"), "{ask}");
@@ -152,7 +152,7 @@ async fn a_yes_in_words_allows_and_other_words_deny_and_reach_the_agent() {
     assert_eq!((prompt["text"].as_str(), prompt["source"].as_str(), prompt["from_turn"].as_u64()), (Some("no, call it other.txt"), Some("user"), Some(7)));
 
     // Outside a visible turn the words have nowhere to go.
-    let quiet = turn_ctx("1", json!({"id": 8, "mode": "quiet", "meta": {}}));
+    let quiet = turn_ctx("1", json!({"id": 8, "conversation": "thread", "show": false, "meta": {}}));
     let (out, _) = answered(&fake, bash("rm x"), quiet, |f, _| f.reply("1", "not now")).await;
     assert!(out["block"].is_string());
     assert_eq!(fake.calls("prompt").len(), 1);
@@ -185,7 +185,7 @@ async fn a_cancelled_question_blocks_the_call() {
 async fn a_turn_approved_in_advance_or_without_a_thread_asks_nobody() {
     let fake = approvals().await;
     judge(&fake);
-    let all = turn_ctx("1", json!({"id": 1, "mode": "quiet", "meta": {"approve": "all"}}));
+    let all = turn_ctx("1", json!({"id": 1, "conversation": "thread", "show": false, "meta": {"approve": "all"}}));
     assert!(fake.event("tool_call", bash("rm -rf build"), all).await.unwrap()["block"].is_null());
 
     let nowhere = json!({"thread": null, "turn": null, "depth": 0});

@@ -19,7 +19,7 @@ async fn subagents() -> FakeAugust {
 
 /// The user's turn 3 in thread 1.
 fn users_turn() -> Value {
-    turn_ctx("1", json!({"id": 3, "mode": "visible", "source": null, "parent": null, "meta": {}}))
+    turn_ctx("1", json!({"id": 3, "conversation": "thread", "show": true, "source": null, "parent": null, "meta": {}}))
 }
 
 /// Sub-agent turns are numbered from 100 and end as `out(task)` says.
@@ -61,7 +61,7 @@ async fn subtasks_run_as_fresh_turns_and_report_back() {
         let turn = &start["turn"];
         assert_eq!(start["thread"], json!({"messenger": "test", "id": "1"}));
         // A fresh conversation that sees only the task, child of the user's turn.
-        assert_eq!(turn["mode"], "fresh");
+        assert_eq!(turn["conversation"], "new");
         assert_eq!(turn["parent"], 3);
         assert!(turn["text"].as_str().unwrap().ends_with("\n\nContext:\nbe quick"));
         assert!(turn["system"].as_str().unwrap().starts_with("You are a sub-agent"));
