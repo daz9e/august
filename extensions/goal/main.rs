@@ -88,9 +88,12 @@ async fn judge(goals: Shared, max_turns: u32, data: Value, ctx: Ctx) -> anyhow::
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let max_turns: u32 = std::env::var("AUGUST_GOAL_TURNS").ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(20);
+    serve(August::new()).await
+}
+
+async fn serve(august: August) {
+    let max_turns: u32 = august.env("AUGUST_GOAL_TURNS").and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(20);
     let goals: Shared = Arc::default();
-    let august = August::new();
     august.needs(&["llm", "messaging"]);
 
     let g = goals.clone();
@@ -145,3 +148,6 @@ async fn main() {
     });
     august.run().await;
 }
+
+#[cfg(test)]
+mod tests;

@@ -21,7 +21,6 @@ mod login;
 mod telegram;
 mod terminal;
 mod subtasks;
-mod goal;
 mod usage;
 mod mcp;
 mod browser;

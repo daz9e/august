@@ -5,10 +5,12 @@
 //! `ctx.ask`, ...) while others are served. stdout is the protocol; log with `eprintln!`.
 
 pub mod chunk;
+pub mod fake;
 pub mod llm;
 pub mod messenger;
 
 pub use chunk::split_markdown;
+pub use fake::FakeAugust;
 
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Map, Value, json};
