@@ -740,7 +740,12 @@ async fn plain(mut screen: Screen, mut august: mpsc::UnboundedReceiver<Option<To
     };
     flush(&mut screen);
     let mut input = BufReader::new(tokio::io::stdin()).lines();
+    // Input ended: the window closes once August has answered what was sent.
+    let mut ended = false;
     loop {
+        if ended && screen.busy.is_none() {
+            return Ok(());
+        }
         tokio::select! {
             msg = august.recv() => match msg.flatten() {
                 Some(msg) => screen.show(msg),
@@ -751,8 +756,11 @@ async fn plain(mut screen: Screen, mut august: mpsc::UnboundedReceiver<Option<To
                     return Ok(());
                 }
             },
-            line = input.next_line() => {
-                let Some(line) = line? else { return Ok(()) };
+            line = input.next_line(), if !ended => {
+                let Some(line) = line? else {
+                    ended = true;
+                    continue;
+                };
                 let line = line.trim();
                 match line {
                     "" => continue,
