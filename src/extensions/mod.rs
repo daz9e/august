@@ -1,7 +1,7 @@
 //! Extensions add tools, slash commands and hooks. A user extension is a folder
 //! `~/.august/extensions/<name>/` whose `extension.json` says what to run, in any language.
-//! Default extensions (the repo's `extensions/<name>/main.rs`) are Rust binaries
-//! `august-ext-<name>` next to `august`, speaking the same protocol; a user extension of the
+//! Default extensions (august-agent's `extensions/<name>/main.rs`) are binaries
+//! `august-ext-<name>` in `august.defaults` (else next to `august`), speaking the same protocol; a user extension of the
 //! same name replaces one.
 //! Each extension is its own process (see `host.rs`), so a broken or hanging one can't take
 //! the gateway down.

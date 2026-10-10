@@ -2,7 +2,7 @@
 name = "august-ext"
 version = "0.1.0"
 edition = "2024"
-description = "SDK for August's default extensions: the extension protocol over stdio"
+description = "SDK for August extensions: the extension protocol over stdio"
 
 [dependencies]
 async-trait = "0.1"

@@ -333,7 +333,9 @@ pub struct Options {
 /// Runs August in the foreground until `august stop` or a signal.
 pub async fn serve() -> Result<()> {
     let root = Root::from_env()?;
-    let gw = build(Options { root: root.clone(), messengers: Vec::new(), defaults: Some(extensions::bin_dir()), linked: Vec::new() })?;
+    // Default extensions are installed apart from the core: `august.defaults`, else next to `august`.
+    let defaults = root.get("august.defaults").ok().and_then(|v| v.as_str().map(PathBuf::from)).unwrap_or_else(extensions::bin_dir);
+    let gw = build(Options { root: root.clone(), messengers: Vec::new(), defaults: Some(defaults), linked: Vec::new() })?;
     let model = gw.model.read().unwrap().clone();
     let label = if model.0.is_empty() { "no model provider yet (/login)".to_string() } else { format!("{} · {}", model.0, model.1) };
     println!("august · {label} · workspace {}", root.workspace().display());

@@ -2,11 +2,9 @@
 name = "august"
 version = "0.1.0"
 edition = "2024"
-default-run = "august"
 
 [dependencies]
-august-ext = { path = "extensions/sdk" }
-august-llm = { path = "extensions/llm" }
+august-ext = { path = "sdk" }
 anyhow = "1"
 async-trait = "0.1"
 base64 = "0.23.1"
@@ -15,159 +13,24 @@ dotenvy = "0.15"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 getrandom = "0.3"
 libc = "0.2"
-regex = "1.13.1"
-encoding_rs = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-sha2 = "0.11.0"
 tokio = { version = "1", features = ["full"] }
-crossterm = "0.29"
-unicode-width = "0.2.2"
 
 [[bin]]
 name = "august"
 path = "src/main.rs"
 
-# Default extensions: each its own process, started by the gateway.
-[[bin]]
-name = "august-ext-anthropic"
-path = "extensions/anthropic/main.rs"
-
-[[bin]]
-name = "august-ext-attachments"
-path = "extensions/attachments/main.rs"
-
-[[bin]]
-name = "august-ext-core"
-path = "extensions/core/main.rs"
-
-[[bin]]
-name = "august-ext-config"
-path = "extensions/config/main.rs"
-
-[[bin]]
-name = "august-ext-approvals"
-path = "extensions/approvals/main.rs"
-
-[[bin]]
-name = "august-ext-browser"
-path = "extensions/browser/main.rs"
-
-[[bin]]
-name = "august-ext-claude-cli"
-path = "extensions/claude-cli/main.rs"
-
-[[bin]]
-name = "august-ext-chatgpt"
-path = "extensions/chatgpt/main.rs"
-
-[[bin]]
-name = "august-ext-clarify"
-path = "extensions/clarify/main.rs"
-
-[[bin]]
-name = "august-ext-conversation"
-path = "extensions/conversation/main.rs"
-
-[[bin]]
-name = "august-ext-commands"
-path = "extensions/commands/main.rs"
-
-[[bin]]
-name = "august-ext-extend"
-path = "extensions/extend/main.rs"
-
-[[bin]]
-name = "august-ext-goal"
-path = "extensions/goal/main.rs"
-
-[[bin]]
-name = "august-ext-mcp"
-path = "extensions/mcp/main.rs"
-
-[[bin]]
-name = "august-ext-memory"
-path = "extensions/memory/main.rs"
-
-[[bin]]
-name = "august-ext-messaging"
-path = "extensions/messaging/main.rs"
-
-[[bin]]
-name = "august-ext-openai"
-path = "extensions/openai/main.rs"
-
-[[bin]]
-name = "august-ext-opencode"
-path = "extensions/opencode/main.rs"
-
-[[bin]]
-name = "august-ext-compaction"
-path = "extensions/compaction/main.rs"
-
-[[bin]]
-name = "august-ext-render"
-path = "extensions/render/main.rs"
-
-[[bin]]
-name = "august-ext-retry"
-path = "extensions/retry/main.rs"
-
-[[bin]]
-name = "august-ext-review"
-path = "extensions/review/main.rs"
-
-[[bin]]
-name = "august-ext-scheduler"
-path = "extensions/scheduler/main.rs"
-
-[[bin]]
-name = "august-ext-setup"
-path = "extensions/setup/main.rs"
-
-[[bin]]
-name = "august-ext-skills"
-path = "extensions/skills/main.rs"
-
-[[bin]]
-name = "august-ext-steps"
-path = "extensions/steps/main.rs"
-
-[[bin]]
-name = "august-ext-subagents"
-path = "extensions/subagents/main.rs"
-
-[[bin]]
-name = "august-ext-telegram"
-path = "extensions/telegram/main.rs"
-
-[[bin]]
-name = "august-ext-terminal"
-path = "extensions/terminal/main.rs"
-
-[[bin]]
-name = "august-ext-tools"
-path = "extensions/tools/main.rs"
-
-[[bin]]
-name = "august-ext-usage"
-path = "extensions/usage/main.rs"
-
-[[bin]]
-name = "august-ext-voice"
-path = "extensions/voice/main.rs"
-
-[[bin]]
-name = "august-ext-web"
-path = "extensions/web/main.rs"
-
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
-axum = "0.8"
 tempfile = "3"
 
 [[test]]
 name = "core"
 path = "tests/core/main.rs"
+
+[workspace]
+members = ["sdk"]
+default-members = [".", "sdk"]
