@@ -2,7 +2,7 @@
 //! starts it and marks it as the agent's. `extensions` lists them and turns them on and off.
 //! The core's extension guide ships as the `writing-extensions` skill.
 
-use anyhow::{anyhow, bail};
+use anyhow::bail;
 use august_ext::{August, str_arg};
 use serde_json::json;
 use std::path::PathBuf;
@@ -21,37 +21,70 @@ async fn main() {
     let me = august.clone();
     august.register_tool(
         "save_extension",
-        "Create or replace an extension: TypeScript that adds tools, slash commands or hooks \
-         to August itself. Load the `writing-extensions` skill first for the API. The \
-         extension is started right away; the result lists what it registered or the error \
-         to fix. It must call `august.describe(summary, details)`.",
+        "Create or replace an extension that adds tools, slash commands or hooks to August \
+         itself. Load the `writing-extensions` skill first for the API. TypeScript: `code` (its \
+         index.ts). Any other language: `files` by path, with `extension.json` ({command, env, \
+         setup}) — `setup` steps build it or install what it needs, August runs them; don't \
+         build by hand. The extension is set up and started right away; the result is what it \
+         registered, or the error and its log to fix. It must describe itself (summary).",
         json!({
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "lowercase-with-dashes"},
-                "code": {"type": "string", "description": "Contents of index.ts"}
+                "code": {"type": "string", "description": "TypeScript: contents of index.ts"},
+                "files": {"type": "object", "additionalProperties": {"type": "string"},
+                          "description": "Any language: file contents by path inside the extension's folder, including extension.json"}
             },
-            "required": ["name", "code"],
+            "required": ["name"],
             "additionalProperties": false
         }),
         move |input, _| {
             let (august, folder) = (me.clone(), dir.join(str_arg(&input, "name")));
             async move {
-                let (name, code) = (str_arg(&input, "name"), str_arg(&input, "code"));
+                let name = str_arg(&input, "name");
                 if !valid_name(name) {
                     bail!("extension names use lowercase letters, digits, `-` and `_` (max 64)");
                 }
+                let files: Vec<(String, String)> = match (input["code"].as_str(), input["files"].as_object()) {
+                    (Some(code), None) => vec![("index.ts".into(), code.into())],
+                    (None, Some(files)) => files.iter().map(|(p, c)| (p.clone(), c.as_str().unwrap_or_default().to_string())).collect(),
+                    _ => bail!("give either `code` (TypeScript) or `files` (any language, with extension.json)"),
+                };
+                if !files.iter().any(|(p, _)| p == "index.ts" || p == "extension.json") {
+                    bail!("`files` needs an `extension.json` with the `command` that runs it");
+                }
+                for (path, _) in &files {
+                    let inside = std::path::Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_)));
+                    if path.is_empty() || !inside {
+                        bail!("`{path}`: paths are relative and stay inside the extension's folder");
+                    }
+                }
                 std::fs::create_dir_all(&folder)?;
-                let file = folder.join("index.ts");
-                std::fs::write(&file, code)?;
-                let status = august.call("extension_enable", json!({"name": name})).await.map_err(|e| anyhow!("saved, but it failed to start:\n{e:#}"))?;
+                // One entry: a TypeScript extension drops an old extension.json, which would win.
+                if files.iter().any(|(p, _)| p == "index.ts") && !files.iter().any(|(p, _)| p == "extension.json") {
+                    std::fs::remove_file(folder.join("extension.json")).ok();
+                }
+                for (path, content) in &files {
+                    let file = folder.join(path);
+                    std::fs::create_dir_all(file.parent().unwrap_or(&folder))?;
+                    std::fs::write(&file, content)?;
+                }
+                let started = august.call("extension_enable", json!({"name": name})).await;
+                let status = match started {
+                    Ok(status) => status,
+                    Err(e) => {
+                        let log = august.call("extension_logs", json!({"name": name, "lines": 30})).await.unwrap_or_default();
+                        bail!("saved, but it failed to start:\n{e:#}\n\nIts log:\n{}", log.as_str().unwrap_or_default());
+                    }
+                };
                 let list = august.call("extensions", json!({})).await?;
                 let undescribed = list.as_array().into_iter().flatten().any(|e| e["name"] == name && e["summary"].as_str().unwrap_or_default().is_empty());
                 if undescribed {
                     august.call("extension_disable", json!({"name": name})).await?;
-                    bail!("saved, but it doesn't describe itself, so it was turned off: call `august.describe(summary, details)` in setup and save again");
+                    bail!("saved, but it doesn't describe itself, so it was turned off: give it a summary (`august.describe(summary, details)`, or `summary` in its ready message) and save again");
                 }
-                Ok(format!("saved {} and started it.\n{}", file.display(), status.as_str().unwrap_or_default()))
+                let saved: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+                Ok(format!("saved {} in {} and started it.\n{}", saved.join(", "), folder.display(), status.as_str().unwrap_or_default()))
             }
         },
     );
@@ -132,7 +165,7 @@ async fn main() {
         let write = async {
             let guide = me.call("guide", json!({})).await?;
             std::fs::create_dir_all(&skills)?;
-            let about = "How to extend August itself with TypeScript extensions (tools, slash commands, hooks); read before `save_extension`";
+            let about = "How to extend August itself with extensions in TypeScript or any language (tools, slash commands, hooks); read before `save_extension`";
             let text = format!("---\nname: writing-extensions\ndescription: {about}\n---\n{}", guide.as_str().unwrap_or_default());
             std::fs::write(skills.join("SKILL.md"), text)?;
             anyhow::Ok(())

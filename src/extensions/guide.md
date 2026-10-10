@@ -371,6 +371,13 @@ it is new, when its files changed, or on `/setup <name>` — build it, download 
 its dependencies. A failed step keeps it from starting with the step's output; `setup:step`
 hooks may change or block each step.
 
+Save it with `save_extension` and `files` (every file by path, `extension.json` included),
+not by writing files yourself: August then runs its setup, starts it and tells you what it
+registered, or the error with its log. Don't build or install by hand; put it in `setup`.
+Run scripts through their interpreter (`["python3", "main.py"]`), and keep generated files
+out of the folder's sources (`target/`, `node_modules/` are ignored when August checks for
+changes). It's done when the result says it started, not before.
+
 ## Permissions
 
 An extension declares what it uses beyond the thread of the call in progress, and August

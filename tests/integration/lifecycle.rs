@@ -399,3 +399,57 @@ async fn setup_steps_build_an_extension_before_it_starts_and_hooks_judge_each_st
     chat.ask("/setup weather", "✅ weather").await;
     chat.ask("what's the weather?", "Result: built: xx").await;
 }
+
+#[tokio::test]
+async fn the_agent_installs_an_extension_in_any_language_and_august_sets_it_up() {
+    if !have_python() {
+        return;
+    }
+    let pick: fn(&str) -> Value = |text| {
+        let files = |setup: &str| json!({
+            "extension.json": format!(r#"{{"command": ["python3", "main.py"], "setup": [{setup}]}}"#),
+            "main.py": BUILT,
+            "sdk.py": SDK,
+        });
+        if text.contains("broken") {
+            reply_tool("save_extension", json!({"name": "weather", "files": files(r#"["python3", "-c", "import sys; print('no compiler'); sys.exit(2)"]"#)}))
+        } else if text.contains("install") {
+            reply_tool("save_extension", json!({"name": "weather", "files": files(r#"["python3", "-c", "open('built.txt', 'w').write('by setup')"]"#)}))
+        } else if text.contains("escape") {
+            reply_tool("save_extension", json!({"name": "weather", "files": {"extension.json": "{}", "../evil.py": "x"}}))
+        } else {
+            reply_tool("weather", json!({"city": "Paris"}))
+        }
+    };
+    let fake = Fake::llm(Box::new(move |req: &Value| {
+        let msgs = req["messages"].as_array().unwrap();
+        let last = msgs.last().unwrap();
+        if last["role"] == "tool" {
+            return reply_text(&format!("Result: {}", last["content"].as_str().unwrap_or("")));
+        }
+        let text = last["content"].as_str().map(String::from).unwrap_or_else(|| last["content"].to_string());
+        pick(&text)
+    }))
+    .await;
+    let gw = august(&fake, Setup::default()).await;
+    let mut chat = gw.chat().await;
+
+    // Saved, set up by August (not by hand), started, usable right away.
+    chat.say("install a weather extension in python").await;
+    chat.press(&chat.question().await.button("Allow")).await;
+    let saved = chat.wait_for("Result: saved").await;
+    assert!(saved.text.contains("extension.json, main.py, sdk.py") && saved.text.contains("✅ weather — tools: weather"), "{}", saved.text);
+    chat.ask("what's the weather?", "Result: built: by setup").await;
+
+    // A setup that fails comes back with the reason, to fix and save again.
+    chat.say("make it broken").await;
+    chat.press(&chat.question().await.button("Allow")).await;
+    let failed = chat.wait_for("failed to start").await;
+    assert!(failed.text.contains("setup step 1") && failed.text.contains("no compiler"), "{}", failed.text);
+
+    // Files stay inside the extension's folder.
+    chat.say("escape the folder").await;
+    chat.press(&chat.question().await.button("Allow")).await;
+    chat.wait_for("stay inside the extension's folder").await;
+    assert!(!gw.home.join("extensions/evil.py").exists());
+}
