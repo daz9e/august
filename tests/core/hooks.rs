@@ -419,3 +419,62 @@ async fn a_stand_in_takes_over_an_extensions_events() {
     chat.ask("/meter2", "note: 7 tokens seen").await;
     chat.ask("/meter", "belong to meter2").await;
 }
+
+#[tokio::test]
+async fn llm_error_handlers_retry_a_failed_call_on_another_model_or_let_it_fail() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let n = calls.clone();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log = seen.clone();
+    let core = core()
+        .model(move |req| match (n.fetch_add(1, Ordering::SeqCst), last_user_text(req).contains("auth")) {
+            (_, true) => fail(august_ext::llm::error::ErrorKind::Auth, "bad key"),
+            (0, _) => fail(august_ext::llm::error::ErrorKind::Overloaded, "busy"),
+            _ => text(&format!("answered by {}", req.model)),
+        })
+        .ext("retrier", move |a| {
+            let log = log.clone();
+            a.on("llm_error", move |d, _| {
+                log.lock().unwrap().push(format!("{} {} {}", d["error"]["kind"].as_str().unwrap(), d["attempt"], d["model"].as_str().unwrap()));
+                let transient = d["error"]["kind"] == "overloaded";
+                async move { Ok(Some(if transient { json!({"retry": true, "delayMs": 1, "model": "backup-model"}) } else { json!({}) })) }
+            });
+        })
+        .start()
+        .await;
+    let chat = core.chat("1");
+    chat.ask("hi", "answered by backup-model").await;
+    // A failure the handler doesn't retry ends the turn and says why.
+    let failed = chat.ask("auth please", "bad key").await;
+    assert!(!failed.contains("answered"), "{failed}");
+    // The switch lasted only for the turn that failed.
+    assert_eq!(*seen.lock().unwrap(), ["overloaded 1 fake-model", "auth 1 fake-model"]);
+}
+
+#[tokio::test]
+async fn llm_result_counts_every_model_call_in_its_conversation() {
+    let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let log = seen.clone();
+    let core = core()
+        .model(|_| text("ok").usage(100, 20, 30))
+        .ext("meter", move |a| {
+            a.needs(&["llm"]);
+            let log = log.clone();
+            a.on("llm_result", move |d, _| {
+                log.lock().unwrap().push(d);
+                async { Ok(None) }
+            });
+            a.register_command("ask", "", |_, ctx| async move { Ok(Some(format!("llm: {}", ctx.llm("hi", None).await?))) });
+        })
+        .start()
+        .await;
+    let chat = core.chat("1");
+    chat.ask("hello", "ok").await;
+    chat.ask("/ask", "llm: ok").await;
+    core.wait_until("both results", |_| seen.lock().unwrap().len() == 2).await;
+    let seen = seen.lock().unwrap().clone();
+    // The turn's call has its step, the single call none; both count in the chat's session.
+    assert_eq!((seen[0]["step"].clone(), seen[1]["step"].clone()), (json!(0), serde_json::Value::Null));
+    assert!(seen[0]["session"].is_string() && seen[0]["session"] == seen[1]["session"], "{seen:?}");
+    assert_eq!((seen[0]["usage"]["inputTokens"].as_u64(), seen[0]["usage"]["cacheReadTokens"].as_u64()), (Some(100), Some(30)));
+}

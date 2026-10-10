@@ -37,11 +37,13 @@ pub struct Reply {
     /// Pieces streamed before the completion returns.
     stream: Vec<String>,
     delay: Duration,
+    /// Answers only once this lets it (a permit each).
+    gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 fn completion(content: Vec<Block>, stop: StopReason) -> Reply {
     let message = Message { role: Role::Assistant, content };
-    Reply { result: Ok(Completion { message, stop_reason: stop, usage: Usage { input_tokens: 10, output_tokens: 5, ..Default::default() } }), stream: Vec::new(), delay: Duration::ZERO }
+    Reply { result: Ok(Completion { message, stop_reason: stop, usage: Usage { input_tokens: 10, output_tokens: 5, ..Default::default() } }), stream: Vec::new(), delay: Duration::ZERO, gate: None }
 }
 
 /// A text answer.
@@ -56,13 +58,19 @@ pub fn tool(name: &str, input: Value) -> Reply {
 
 /// A failed call of kind `kind`.
 pub fn fail(kind: ErrorKind, message: &str) -> Reply {
-    Reply { result: Err((kind, message.into())), stream: Vec::new(), delay: Duration::ZERO }
+    Reply { result: Err((kind, message.into())), stream: Vec::new(), delay: Duration::ZERO, gate: None }
 }
 
 impl Reply {
     /// Answers only after `delay` (a slow model).
     pub fn after(mut self, delay: Duration) -> Self {
         self.delay = delay;
+        self
+    }
+
+    /// Answers only when `gate` gives it a permit.
+    pub fn gated(mut self, gate: &Arc<tokio::sync::Semaphore>) -> Self {
+        self.gate = Some(gate.clone());
         self
     }
 
@@ -95,6 +103,16 @@ pub fn tool_result(req: &Request) -> Option<String> {
         Block::ToolResult { content, .. } => Some(content.clone()),
         _ => None,
     })
+}
+
+/// Every message's text of a request.
+pub fn all_text(req: &Request) -> String {
+    req.messages.iter().map(Message::text).collect::<Vec<_>>().join("\n")
+}
+
+/// A closed gate (`Reply::gated`); `add_permits` opens it.
+pub fn gate() -> Arc<tokio::sync::Semaphore> {
+    Arc::new(tokio::sync::Semaphore::new(0))
 }
 
 /// Names of the tools a request offers.
@@ -138,6 +156,10 @@ struct Seen {
     menus: Vec<Vec<String>>,
     /// Buttons pressed.
     pressed: Vec<String>,
+    /// Ids of every message the core deleted (the user's included).
+    deleted: Vec<String>,
+    /// `(action, thread, args)` of actions run and threads opened.
+    actions: Vec<(String, String, Value)>,
 }
 
 /// A messenger whose threads tests speak in; it records everything the core does to it.
@@ -173,14 +195,18 @@ impl FakeMessenger {
             reactions: true,
             reply: true,
             threads: true,
-            open_thread: false,
+            open_thread: true,
         }
     }
 
     fn publish(&self, thread: &str, kind: InboundKind) {
+        self.publish_at(thread, Default::default(), kind);
+    }
+
+    fn publish_at(&self, thread: &str, place: august::messengers::Place, kind: InboundKind) {
         let bus = self.bus.lock().unwrap().clone().expect("the core runs");
         let user = User { id: "owner".into(), name: "Owner".into() };
-        bus.publish(Inbound { thread: Thread::new(MESSENGER, thread), place: Default::default(), user, kind });
+        bus.publish(Inbound { thread: Thread::new(MESSENGER, thread), place, user, kind });
     }
 
     fn put(&self, thread: &str, id: &str, m: &OutMessage, edit: bool) {
@@ -209,6 +235,16 @@ impl FakeMessenger {
         self.seen.lock().unwrap().reactions.clone()
     }
 
+    /// `(action, thread, args)` the core ran (`open_thread` included).
+    pub fn actions(&self) -> Vec<(String, String, Value)> {
+        self.seen.lock().unwrap().actions.clone()
+    }
+
+    /// Ids of the messages the core deleted.
+    pub fn deleted(&self) -> Vec<String> {
+        self.seen.lock().unwrap().deleted.clone()
+    }
+
     /// Every message sent to any thread.
     pub fn all(&self) -> Vec<Msg> {
         self.seen.lock().unwrap().msgs.clone()
@@ -222,7 +258,12 @@ impl Messenger for FakeMessenger {
     }
 
     fn describe(&self) -> Description {
-        Description { id: MESSENGER.into(), name: "Test".into(), capabilities: self.caps.clone(), notes: String::new(), actions: Vec::new() }
+        let pin = august::messengers::Action {
+            name: "pin".into(),
+            description: "Pin a message".into(),
+            input_schema: json!({"type": "object", "required": ["message"], "properties": {"message": {"type": "string"}}}),
+        };
+        Description { id: MESSENGER.into(), name: "Test".into(), capabilities: self.caps.clone(), notes: "A messenger for tests.".into(), actions: vec![pin] }
     }
 
     async fn run(&self, bus: Bus<Inbound>) -> anyhow::Result<()> {
@@ -248,7 +289,9 @@ impl Messenger for FakeMessenger {
     }
 
     async fn delete(&self, _thread: &str, id: &str) -> anyhow::Result<()> {
-        if let Some(m) = self.seen.lock().unwrap().msgs.iter_mut().find(|m| m.id == id) {
+        let mut seen = self.seen.lock().unwrap();
+        seen.deleted.push(id.into());
+        if let Some(m) = seen.msgs.iter_mut().find(|m| m.id == id) {
             m.deleted = true;
         }
         Ok(())
@@ -262,6 +305,16 @@ impl Messenger for FakeMessenger {
     async fn set_commands(&self, commands: &[CommandSpec]) -> anyhow::Result<()> {
         self.seen.lock().unwrap().menus.push(commands.iter().map(|c| c.name.clone()).collect());
         Ok(())
+    }
+
+    async fn open_thread(&self, parent: &str, title: &str) -> anyhow::Result<String> {
+        self.seen.lock().unwrap().actions.push(("open_thread".into(), parent.into(), json!({"title": title})));
+        Ok(format!("{parent}/topic"))
+    }
+
+    async fn action(&self, thread: &str, name: &str, args: Value) -> anyhow::Result<Value> {
+        self.seen.lock().unwrap().actions.push((name.into(), thread.into(), args));
+        Ok(json!("pinned"))
     }
 
     async fn download(&self, file: &Attachment) -> anyhow::Result<Vec<u8>> {
@@ -282,6 +335,8 @@ pub struct Builder {
     seed: Vec<(String, Vec<u8>)>,
     caps: Capabilities,
     terminal: bool,
+    /// Default extensions: `(name, sh script)`.
+    defaults: Vec<(String, String)>,
 }
 
 /// A core being set up: `core().model(..).ext(..).start().await`.
@@ -294,6 +349,7 @@ pub fn core() -> Builder {
         seed: Vec::new(),
         caps: FakeMessenger::full(),
         terminal: false,
+        defaults: Vec::new(),
     }
 }
 
@@ -361,28 +417,50 @@ impl Builder {
             std::fs::write(&app, json!({"provider": PROVIDER, "model": MODEL}).to_string()).unwrap();
         }
         let root = Root::new(home.clone(), workspace.clone(), self.env.into_iter().collect());
-
-        let messenger = Arc::new(FakeMessenger::new(self.caps));
-        let mut messengers: Vec<Arc<dyn Messenger>> = vec![messenger.clone()];
-        if self.terminal {
-            let socket = august::messengers::terminal::socket_in(&home);
-            messengers.push(Arc::new(august::messengers::terminal::Terminal::new(socket)));
-        }
+        let defaults = (!self.defaults.is_empty()).then(|| {
+            let bin = dir.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            for (name, script) in &self.defaults {
+                let exe = bin.join(format!("august-ext-{name}"));
+                std::fs::write(&exe, format!("#!/bin/sh\n{script}\n")).unwrap();
+                std::fs::set_permissions(&exe, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            }
+            bin
+        });
         let requests: Arc<Mutex<Vec<Request>>> = Arc::default();
         let probe: Arc<Mutex<Option<August>>> = Arc::default();
+        let mut exts = vec![("model".to_string(), model_setup(self.model, requests.clone())), ("probe".to_string(), probe_setup(probe.clone()))];
+        exts.extend(self.exts);
+        let parts = Parts { root, exts, caps: self.caps, terminal: self.terminal, defaults };
         let pumps: Pumps = Arc::default();
-        let mut linked = vec![
-            ("model".to_string(), model_setup(self.model, requests.clone())),
-            ("probe".to_string(), probe_setup(probe.clone())),
-        ];
-        linked.extend(self.exts);
-        let linked = linked.into_iter().map(|(name, setup)| (name.clone(), link(&root, &name, setup, pumps.clone()))).collect();
-
-        let gw = gateway::build(Options { root, messengers, defaults: None, linked }).unwrap();
-        let run = tokio::spawn(gw.clone().run());
-        let core = Core { gw, home, workspace, messenger, requests, probe, pumps, _run: Aborts(run), _dir: dir };
+        let (gw, messenger, run) = parts.launch(&pumps);
+        let core = Core { gw, home, workspace, messenger, requests, probe, pumps, parts, _run: run, _dir: dir };
         core.wait_until("the core to start", |c| c.messenger.bus.lock().unwrap().is_some()).await;
         core
+    }
+}
+
+/// What a core is built from, to build it again (`Core::restart`).
+struct Parts {
+    root: Root,
+    exts: Vec<(String, Setup)>,
+    caps: Capabilities,
+    terminal: bool,
+    defaults: Option<PathBuf>,
+}
+
+impl Parts {
+    fn launch(&self, pumps: &Pumps) -> (Arc<Gateway>, Arc<FakeMessenger>, Aborts) {
+        let messenger = Arc::new(FakeMessenger::new(self.caps.clone()));
+        let mut messengers: Vec<Arc<dyn Messenger>> = vec![messenger.clone()];
+        if self.terminal {
+            let socket = august::messengers::terminal::socket_in(self.root.home());
+            messengers.push(Arc::new(august::messengers::terminal::Terminal::new(socket)));
+        }
+        let linked = self.exts.iter().map(|(name, setup)| (name.clone(), link(&self.root, name, setup.clone(), pumps.clone()))).collect();
+        let gw = gateway::build(Options { root: self.root.clone(), messengers, defaults: self.defaults.clone(), linked }).unwrap();
+        let run = tokio::spawn(gw.clone().run());
+        (gw, messenger, Aborts(run))
     }
 }
 
@@ -400,6 +478,9 @@ fn model_setup(script: Script, requests: Arc<Mutex<Vec<Request>>>) -> Setup {
                     stream.text(piece);
                 }
                 tokio::time::sleep(reply.delay).await;
+                if let Some(gate) = &reply.gate {
+                    gate.acquire().await.unwrap().forget();
+                }
                 reply.result.map_err(|(kind, message)| ProviderError { kind, message }.into())
             }
         });
@@ -463,11 +544,20 @@ pub struct Core {
     requests: Arc<Mutex<Vec<Request>>>,
     probe: Arc<Mutex<Option<August>>>,
     pumps: Pumps,
+    parts: Parts,
     _run: Aborts,
     _dir: tempfile::TempDir,
 }
 
 impl Core {
+    /// Stops the core and builds it again on the same home and workspace (a restart of
+    /// August); chats made before it talk to the old one.
+    pub async fn restart(&mut self) {
+        let (gw, messenger, run) = self.parts.launch(&self.pumps);
+        (self.gw, self.messenger, self._run) = (gw, messenger, run);
+        self.wait_until("the core to start again", |c| c.messenger.bus.lock().unwrap().is_some()).await;
+    }
+
     /// A thread of the fake messenger.
     pub fn chat(&self, id: &str) -> Chat {
         Chat { m: self.messenger.clone(), thread: id.into(), next: Arc::new(AtomicU64::new(1)) }
@@ -564,6 +654,11 @@ impl Chat {
         self.m.publish(&self.thread, kind);
     }
 
+    /// `send`, from a thread at `place`.
+    pub fn send_at(&self, place: august::messengers::Place, kind: InboundKind) {
+        self.m.publish_at(&self.thread, place, kind);
+    }
+
     pub fn press(&self, button: &str) {
         self.m.seen.lock().unwrap().pressed.push(button.into());
         self.m.publish(&self.thread, InboundKind::Press { button: button.into() });
@@ -648,4 +743,32 @@ pub fn files(a: &August) {
         let ws = ws.clone();
         async move { Ok(std::fs::read_dir(ws)?.filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().to_string())).collect::<Vec<_>>().join("\n")) }
     });
+}
+
+/// Files for an extension in any language: `extensions/<name>/extension.json` running `sh -c
+/// script` in its folder.
+pub fn sh_extension(name: &str, script: &str) -> (String, String) {
+    (format!("extensions/{name}/extension.json"), json!({"command": ["sh", "-c", script]}).to_string())
+}
+
+/// A shell script that registers `manifest` (the `ready` message's params, protocol 2) and
+/// then idles, answering nothing.
+pub fn ready_script(mut manifest: Value) -> String {
+    manifest["protocol"] = json!(2);
+    let ready = json!({"method": "ready", "params": manifest}).to_string();
+    format!("echo '{ready}'; exec cat >/dev/null")
+}
+
+impl Builder {
+    /// An extension in any language (see `sh_extension`).
+    pub fn sh(self, name: &str, script: &str) -> Self {
+        let (path, text) = sh_extension(name, script);
+        self.home(&path, &text)
+    }
+
+    /// A default extension `name` (a binary `august-ext-<name>`) running `sh` script `script`.
+    pub fn default_ext(mut self, name: &str, script: &str) -> Self {
+        self.defaults.push((name.into(), script.into()));
+        self
+    }
 }
