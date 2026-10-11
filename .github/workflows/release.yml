@@ -1,0 +1,79 @@
+# On a `v*` tag (the version in Cargo.toml), or by hand for an existing tag: builds the
+# core (`august`) for each target and publishes one archive per target with its sha256.
+# August with its default extensions is released by august-agent, which bundles the core
+# version it pins.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, zig: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, zig: true }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          [ "v$version" = "$TAG" ] || { echo "tag $TAG, but Cargo.toml says $version"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - if: matrix.zig
+        run: pip3 install ziglang && cargo install --locked cargo-zigbuild
+
+      - name: Build
+        run: |
+          build="cargo build"
+          if [ "${{ matrix.zig }}" = "true" ]; then build="cargo zigbuild"; fi
+          $build --locked --release --target ${{ matrix.target }} --bin august
+
+      - name: Package
+        run: |
+          name="august-core-${{ matrix.target }}"
+          mkdir "$name"
+          cp target/${{ matrix.target }}/release/august "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: august-core-${{ matrix.target }}
+          path: august-core-${{ matrix.target }}.tar.gz*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: august-core-*.tar.gz*
