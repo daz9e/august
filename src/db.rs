@@ -298,7 +298,7 @@ impl Db {
         Ok(out)
     }
 
-    /// A session's settings (`{model, system, tools}`, each optional).
+    /// A session's settings (`{model, system, tools, sections}`, each optional).
     pub fn session_settings(&self, id: &str) -> Result<serde_json::Value> {
         let s: Option<String> = self.conn().query_row("SELECT settings FROM sessions WHERE id = ?1", [id], |r| r.get(0)).optional()?;
         Ok(s.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(|| serde_json::json!({})))

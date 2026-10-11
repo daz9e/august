@@ -101,7 +101,7 @@ pub struct Agent {
     last_input_tokens: usize,
     /// Tool calls the running turn made: `{name, input, output, isError}`.
     turn_calls: Vec<Value>,
-    /// The session's settings as of the running turn: `{model, system, tools}`.
+    /// The session's settings as of the running turn: `{model, system, tools, sections}`.
     settings: Value,
     /// The provider for the session's own `model`, if it has one.
     session_provider: Option<Arc<dyn LlmProvider>>,
@@ -196,7 +196,7 @@ impl Agent {
     }
 
     /// Before a session's first turn: `session_start` may set its settings (`{model, system,
-    /// tools}`), e.g. pick a model for conversations from one messenger.
+    /// tools, sections}`), e.g. pick a model for conversations from one messenger.
     async fn session_start(&mut self, ctx: &ToolCtx) -> Result<()> {
         let Some((reason, previous)) = self.starting.take() else {
             return Ok(());
@@ -207,7 +207,7 @@ impl Agent {
         let data = json!({"session": self.session, "previous": previous, "reason": reason, "chat": self.chat_key});
         let data = ext.emit("session_start", data, &ctx.origin).await;
         let change: serde_json::Map<String, Value> =
-            ["model", "system", "tools"].into_iter().filter_map(|k| data.get(k).filter(|v| !v.is_null()).map(|v| (k.to_string(), v.clone()))).collect();
+            ["model", "system", "tools", "sections"].into_iter().filter_map(|k| data.get(k).filter(|v| !v.is_null()).map(|v| (k.to_string(), v.clone()))).collect();
         if !change.is_empty() {
             self.db.update_session_settings(&self.session, &Value::Object(change))?;
         }

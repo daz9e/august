@@ -181,7 +181,7 @@ Every field is optional except `protocol`; a missing `protocol` counts as 1 and 
 | `events` | `[name]` | the events it hooks (§7). August sends `event` only for these. |
 | `needs` | `[permission]` | the permissions it uses (§4) |
 | `timeouts` | `{event: ms}` | its own timeout per hooked event, overriding the defaults (§5.1) |
-| `sections` | `[{name, text}]` | Markdown sections added to the system prompt. Fixed for a conversation once it starts, so a change shows up from the next one. |
+| `sections` | `[{name, text}]` | Markdown sections added to the system prompt. Fixed for a conversation once it starts, so a change shows up from the next one. A conversation's `sections` setting keeps only the ones it names. |
 | `settings` | JSON Schema | its settings (`config/extensions/<name>.json` → `settings`); properties with `"secret": true` are shown masked; `default`s are filled in by the `settings` operation |
 | `emits` | `[{name, description, schema, observe}]` | events it emits, hooked by others as `<name>:<event>` (§7.8) |
 | `replaces` | `[extension]` | extensions whose event namespace it takes over (§7.8) |
@@ -388,7 +388,7 @@ permissions. Calls are requests: `{"id", "method": "<operation>", "params": {...
 | `sessions` | `thread?` | `[{id, chat, name, settings, created_at, messages, bound}]`, newest first |
 | `session_new` | `thread?, name?, settings?, from_turn?` | the new session's id. With a thread it passes `session_before_new` and becomes that thread's conversation. Without one, it is a conversation of no chat (thread `{messenger: "session", id}`). |
 | `session_switch` | `thread, session, from_turn?` | `session`; passes `session_before_switch` |
-| `session_update` | `session, name?, settings?` | `null`; `settings` is `{model, system, tools}`, and a `null` field deletes it |
+| `session_update` | `session, name?, settings?` | `null`; `settings` is `{model, system, tools, sections}` (`tools`, `sections`: only these by name), and a `null` field deletes it |
 | `history` | `session?` or `thread?`, `kinds?: [kind]`, `since?: entry id`, `limit = 100` | journal entries, oldest first: `[{id, ts, session, turn, kind, source, caller, data}]`. Kinds: `session`, `turn_start`, `user_message`, `assistant`, `tool`, `turn_end`, `model_change`, `custom`. |
 | `messages` | `thread` | `{session, messages, tokens, window}`: what the model sees next |
 | `messages_set` | `thread, messages` | `null`. Replaces the live conversation; earlier messages stay searchable. |
@@ -483,7 +483,7 @@ All of these carry `ctx.turn`.
 
 | Event | Data | A handler may return |
 |---|---|---|
-| `session_start` | `{session, previous, reason: "start"\|"new", chat}` | `model`, `system`, `tools`: the conversation's own settings |
+| `session_start` | `{session, previous, reason: "start"\|"new", chat}` | `model`, `system`, `tools`, `sections`: the conversation's own settings (`session_update`) |
 | `before_turn` | `{text, system}` | `text` (the user message), `system` (the base system prompt for this turn) |
 | `llm_call` | `{step, system, model, tools: [name]}` | for this call only: `system`; `tools` (only these are offered); `model` (`name` or `provider:name`); `effort`; `options` (fields merged into the provider's request body) |
 | `context` | `{step, messages, system, tokens, window, error}` | `messages` (what the model sees in this call only), or `history` with `note` (replaces the conversation from now on and shows `note`) |

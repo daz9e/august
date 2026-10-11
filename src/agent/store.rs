@@ -12,7 +12,7 @@ pub trait SessionStore: Send + Sync {
     fn bind(&self, chat_key: &str, session: &str) -> Result<()>;
     /// Merges `change` into a session's settings (a null field deletes it).
     fn update_session_settings(&self, session: &str, change: &serde_json::Value) -> Result<()>;
-    /// A session's settings: `{model, system, tools}`, each optional.
+    /// A session's settings: `{model, system, tools, sections}`, each optional.
     fn session_settings(&self, session: &str) -> Result<serde_json::Value>;
     fn append(&self, session: &str, msgs: &[Message], index: bool) -> Result<()>;
     /// Replaces the live messages (after a rollback or compaction); old ones stay searchable.

@@ -68,7 +68,7 @@ pub const OPS: &[Op] = &[
     op("login_wait", None, "In your sign-in {session}: the redirect's query {timeout_ms} (or the address the user pastes)"),
     op("sessions", SESSIONS, "Stored conversations, newest first, of {thread} or all: {id, chat, name, settings, messages, bound}"),
     op("session_new", SESSIONS, "Start a new conversation in {thread} (none: of no chat, addressed as thread {messenger: \"session\", id}), optionally with {name, settings}; returns its id"),
-    op("session_update", SESSIONS, "Rename {session} ({name}) or change its {settings}: {model, system, tools}, null deletes"),
+    op("session_update", SESSIONS, "Rename {session} ({name}) or change its {settings}: {model, system, tools, sections}, null deletes"),
     op("session_switch", SESSIONS, "Continue stored {session} in {thread}"),
     op("history", SESSIONS, "The journal of {session} (or {thread}'s, or all): entries after {since} of {kinds}, at most {limit} (default 100)"),
     op("journal_append", None, "Record {type, data} in the journal of {session} or {thread}'s (kind `custom`, caller you)"),

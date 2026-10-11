@@ -11,7 +11,7 @@ impl Agent {
     /// provider caching works; changes show up in the next session.
     pub(super) fn system_now(&mut self) -> String {
         if self.snapshot.is_none() {
-            let extensions = self.tools.extensions().map(|e| e.prompt_sections()).unwrap_or_default();
+            let extensions = self.tools.extensions().map(|e| e.prompt_sections(self.settings["sections"].as_array().map(Vec::as_slice))).unwrap_or_default();
             let own = self.settings["system"].as_str().map(|s| format!("\n\n{}", s.trim())).unwrap_or_default();
             self.snapshot = Some(own + &extensions);
         }

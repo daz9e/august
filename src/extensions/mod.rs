@@ -1094,8 +1094,15 @@ impl Extensions {
     }
 
     /// Every running extension's prompt sections, as one block for the system prompt.
-    pub fn prompt_sections(&self) -> String {
-        self.running().iter().flat_map(|(_, h)| h.manifest().sections.clone()).map(|(_, text)| format!("\n\n{}", text.trim())).collect()
+    /// The running extensions' prompt sections, or only those named in `only`.
+    pub fn prompt_sections(&self, only: Option<&[Value]>) -> String {
+        let kept = |name: &str| only.is_none_or(|o| o.iter().any(|n| n == name));
+        self.running()
+            .iter()
+            .flat_map(|(_, h)| h.manifest().sections.clone())
+            .filter(|(name, _)| kept(name))
+            .map(|(_, text)| format!("\n\n{}", text.trim()))
+            .collect()
     }
 
     /// `(extension, name, description)` of extension commands; of two with one name, the first.

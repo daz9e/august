@@ -177,3 +177,18 @@ async fn an_extension_talks_to_a_conversation_of_no_chat() {
     chat.ask("which number?", "kept").await;
     assert!(!all_text(core.requests().last().unwrap()).contains("keep 42"));
 }
+
+#[tokio::test]
+async fn a_conversation_sees_only_the_prompt_sections_it_names() {
+    let core = core()
+        .ext("memory", |a| a.register_prompt_section("facts", "## Facts\nLIKES-TEA"))
+        .ext("code", |a| {
+            a.register_prompt_section("project", "## Project\nUSES-RUST");
+            a.on("session_start", |_, _| async { Ok(Some(json!({"sections": ["project"]}))) });
+        })
+        .start()
+        .await;
+    core.chat("1").ask("hi", "ok").await;
+    let system = core.requests().last().unwrap().system.clone();
+    assert!(system.contains("USES-RUST") && !system.contains("LIKES-TEA"), "{system}");
+}
