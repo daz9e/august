@@ -185,6 +185,25 @@ impl Llm {
     }
 }
 
+impl Llm {
+    /// Models the configured provider offers.
+    pub async fn models(&self, cfg: &Config) -> Result<Vec<String>> {
+        match cfg.provider.as_str() {
+            "anthropic" => anthropic::models(&self.http, cfg.anthropic_key.as_deref().unwrap_or_default()).await,
+            "chatgpt" => codex::models(&self.http, &self.codex).await,
+            _ => bail!("no provider configured, run `august login`"),
+        }
+    }
+}
+
+/// Reasoning effort levels the provider accepts.
+pub fn efforts(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "anthropic" => &["low", "medium", "high", "xhigh", "max"],
+        _ => &["low", "medium", "high"],
+    }
+}
+
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("august/", env!("CARGO_PKG_VERSION")))

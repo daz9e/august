@@ -32,6 +32,24 @@ fn encode(m: &Message) -> Value {
     json!({"role": role, "content": content})
 }
 
+/// Encodes the history, merging neighbours with the same role (e.g. tool results followed by
+/// a new message after an interrupted turn) so roles strictly alternate.
+fn encode_all(messages: &[Message]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for m in messages {
+        let v = encode(m);
+        match out.last_mut() {
+            Some(prev) if prev["role"] == v["role"] => {
+                if let (Some(a), Some(b)) = (prev["content"].as_array_mut(), v["content"].as_array()) {
+                    a.extend(b.iter().cloned());
+                }
+            }
+            _ => out.push(v),
+        }
+    }
+    out
+}
+
 fn decode(v: Value) -> Block {
     match v["type"].as_str() {
         Some("text") => Block::Text { text: v["text"].as_str().unwrap_or_default().into() },
@@ -155,7 +173,7 @@ pub async fn complete(
         "stream": true,
         "system": system,
         "tools": tools,
-        "messages": messages.iter().map(encode).collect::<Vec<_>>(),
+        "messages": encode_all(messages),
         // Automatic caching of the growing prefix.
         "cache_control": {"type": "ephemeral"},
     });
@@ -200,6 +218,19 @@ pub async fn models(http: &reqwest::Client, key: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merges_same_role_neighbours() {
+        let msgs = [
+            Message { role: Role::User, content: vec![Block::ToolResult { tool_use_id: "t".into(), content: "x".into(), is_error: true }] },
+            Message::user("next"),
+            Message { role: Role::Assistant, content: vec![Block::Text { text: "ok".into() }] },
+        ];
+        let out = encode_all(&msgs);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(out[0]["content"][0]["type"], "tool_result");
+    }
 
     #[test]
     fn accumulates_stream() {

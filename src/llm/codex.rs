@@ -393,10 +393,10 @@ pub async fn complete(
     })
 }
 
-/// Model slugs the backend lists, for the login picker.
-pub async fn models(http: &reqwest::Client) -> Result<Vec<String>> {
-    let slot = tokio::sync::Mutex::new(None);
-    let (token, account) = credentials(http, &slot, false).await?;
+/// Model slugs the backend lists. Goes through the shared session (`slot`): refresh tokens
+/// rotate, so a second copy would leave the other holding a dead one.
+pub async fn models(http: &reqwest::Client, slot: &tokio::sync::Mutex<Option<Profile>>) -> Result<Vec<String>> {
+    let (token, account) = credentials(http, slot, false).await?;
     let resp = request(http, reqwest::Method::GET, "/models?client_version=1.0.0", &token, &account).send().await?;
     let status = resp.status();
     let v: Value = resp.json().await?;
