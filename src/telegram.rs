@@ -101,8 +101,8 @@ impl Api {
         let bytes = self.http.get(format!("{}/{remote}", self.files)).send().await?.error_for_status()?.bytes().await?;
         let dir = config::workspace().join("inbox");
         std::fs::create_dir_all(&dir)?;
-        let name = if name.is_empty() { remote.rsplit('/').next().unwrap_or("file") } else { name };
-        let path = dir.join(format!("{}-{name}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+        let name = if name.is_empty() { remote } else { name };
+        let path = dir.join(format!("{}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), safe_name(name)));
         std::fs::write(&path, &bytes)?;
         Ok(path)
     }
@@ -119,6 +119,12 @@ impl Api {
         }
         Ok(())
     }
+}
+
+/// The last path component of a sender-chosen file name, so it can't point outside the inbox.
+fn safe_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or_default().trim();
+    if base.is_empty() || base == "." || base == ".." { "file".into() } else { base.into() }
 }
 
 fn merge(dst: &mut Value, extra: &Value) {
@@ -715,5 +721,18 @@ impl Channel for Live {
             self.bot.api.upload(self.chat, path, caption).await?;
             Ok(format!("sent {} to the user", path.display()))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn file_names_stay_in_the_inbox() {
+        use super::safe_name;
+        assert_eq!(safe_name("../../.ssh/authorized_keys"), "authorized_keys");
+        assert_eq!(safe_name("..\\..\\x.txt"), "x.txt");
+        assert_eq!(safe_name(".."), "file");
+        assert_eq!(safe_name("photos/file_12.jpg"), "file_12.jpg");
+        assert_eq!(safe_name("report.pdf"), "report.pdf");
     }
 }
