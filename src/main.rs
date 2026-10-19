@@ -77,6 +77,7 @@ async fn main() {
         Cmd::Service { action } => service_cmd(action),
         Cmd::Logs => logs(),
     };
+    tools::kill_background();
     if let Err(e) = res {
         eprintln!("{RED}error:{RESET} {e:#}");
         std::process::exit(1);
@@ -175,7 +176,10 @@ async fn ask(app: Arc<App>, prompt: &str) -> Result<()> {
             println!();
             Ok(())
         }
-        Err(e) if e.downcast_ref::<Cancelled>().is_some() => std::process::exit(130),
+        Err(e) if e.downcast_ref::<Cancelled>().is_some() => {
+            tools::kill_background();
+            std::process::exit(130)
+        }
         Err(e) => Err(e),
     }
 }
@@ -186,6 +190,13 @@ async fn serve(app: Arc<App>) -> Result<()> {
     let cfg = Config::load()?;
     let bot = cfg.telegram_token.as_deref().map(telegram::Bot::new);
     tokio::spawn(cron::run(app.clone(), bot.clone()));
+    // launchd stops the service with SIGTERM; background processes live in their own groups.
+    tokio::spawn(async {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
+        term.recv().await;
+        tools::kill_background();
+        std::process::exit(0);
+    });
     match bot {
         Some(bot) => telegram::serve(app, bot).await,
         None => {
