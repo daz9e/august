@@ -317,7 +317,7 @@ async fn setup_chatgpt() -> Result<()> {
         _ => llm::codex::login(&http).await?.email,
     };
     println!("{GREEN}✓{RESET} Signed in as {email}");
-    let models = llm::codex::models(&http).await.unwrap_or_else(|e| {
+    let models = llm::codex::models(&http, &Default::default()).await.unwrap_or_else(|e| {
         println!("{DIM}Could not list models ({e:#}); type one in.{RESET}");
         Vec::new()
     });

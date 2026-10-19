@@ -266,6 +266,11 @@ pub async fn serve(app: Arc<App>, bot: Arc<Bot>) -> Result<()> {
                 Some((name @ ("new" | "reset" | "compact"), args)) => {
                     let _ = state.tx.send(Job::Command(name.into(), args.into()));
                 }
+                Some((kind @ ("model" | "effort"), "")) => {
+                    let (app, bot) = (app.clone(), bot.clone());
+                    let kind: &'static str = if kind == "model" { "model" } else { "effort" };
+                    tokio::spawn(async move { send_picker(&app, &bot, chat, kind).await });
+                }
                 Some((name, args)) => {
                     let (app, bot, name, args) = (app.clone(), bot.clone(), name.to_string(), args.to_string());
                     tokio::spawn(async move { reply_command(&app, &bot, chat, &name, &args).await });
@@ -386,16 +391,60 @@ async fn transcribe(http: &reqwest::Client, path: &Path) -> Result<Option<String
     Ok(Some(v["text"].as_str().unwrap_or_default().trim().to_string()))
 }
 
+/// Buttons to switch the model or reasoning effort.
+async fn send_picker(app: &App, bot: &Bot, chat: i64, kind: &str) {
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => return drop(bot.api.send(chat, &format!("⚠️ {e:#}")).await),
+    };
+    let items: Vec<String> = if kind == "model" {
+        match app.llm.models(&cfg).await {
+            Ok(m) => m,
+            Err(e) => return drop(bot.api.send(chat, &format!("⚠️ Could not list models: {e:#}")).await),
+        }
+    } else {
+        crate::llm::efforts(&cfg.provider).iter().map(|s| s.to_string()).collect()
+    };
+    let current = if kind == "model" { &cfg.model } else { &cfg.effort };
+    let button = |i: &String| {
+        let label = if i == current { format!("✓ {i}") } else { i.clone() };
+        json!({"text": label, "callback_data": format!("set:{kind}:{i}")})
+    };
+    // Callback data is capped at 64 bytes.
+    let fits: Vec<&String> = items.iter().filter(|i| i.len() + kind.len() + 5 <= 64).take(40).collect();
+    let rows: Vec<Vec<Value>> = if kind == "model" { fits.into_iter().map(|i| vec![button(i)]).collect() } else { vec![fits.into_iter().map(button).collect()] };
+    let title = if kind == "model" { "Choose a model" } else { "Choose reasoning effort" };
+    let html = format!("<b>{title}</b>\nNow: <code>{}</code>", markdown::escape(current));
+    bot.api.send_html(chat, &html, title, json!({"reply_markup": {"inline_keyboard": rows}})).await.ok();
+}
+
 async fn on_button(bot: &Bot, q: &Value, allowed: &[i64]) {
     let id = q["id"].as_str().unwrap_or_default();
     let data = q["data"].as_str().unwrap_or_default();
     let chat = q["message"]["chat"]["id"].as_i64().unwrap_or_default();
     let message = q["message"]["message_id"].as_i64().unwrap_or_default();
-    let Some((key, choice)) = data.strip_prefix("ok:").and_then(|d| d.split_once(':')) else { return };
     if !q["from"]["id"].as_i64().is_some_and(|u| allowed.contains(&u)) {
         bot.api.call("answerCallbackQuery", json!({"callback_query_id": id, "text": "Not allowed"})).await.ok();
         return;
     }
+    if let Some((kind, value)) = data.strip_prefix("set:").and_then(|d| d.split_once(':')) {
+        let res = Config::load().and_then(|mut cfg| {
+            if kind == "model" {
+                cfg.model = value.into();
+            } else {
+                cfg.effort = value.into();
+            }
+            cfg.save()
+        });
+        let text = match res {
+            Ok(()) => format!("{}: <code>{}</code> ✓", if kind == "model" { "Model" } else { "Effort" }, markdown::escape(value)),
+            Err(e) => format!("⚠️ {}", markdown::escape(&format!("{e:#}"))),
+        };
+        bot.api.call("answerCallbackQuery", json!({"callback_query_id": id})).await.ok();
+        bot.api.edit_html(chat, message, &text, value, json!({})).await.ok();
+        return;
+    }
+    let Some((key, choice)) = data.strip_prefix("ok:").and_then(|d| d.split_once(':')) else { return };
     let sender = bot.approvals.lock().unwrap().remove(key);
     let (decision, label) = match choice {
         "y" => (Decision::Yes, "✅ Allowed"),

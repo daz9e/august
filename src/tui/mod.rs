@@ -44,11 +44,6 @@ fn commands_list() -> Vec<(&'static str, &'static str)> {
     list
 }
 
-/// Commands that take an argument get a trailing space when completed instead of running.
-fn takes_args(name: &str) -> bool {
-    matches!(name, "model" | "effort")
-}
-
 // ---------- state shared with the running turn ----------
 
 #[derive(Default, PartialEq, Clone, Copy)]
@@ -157,7 +152,7 @@ impl Shared {
         let style = if is_error { Style::new().fg(RED) } else { DIM };
         let shown: Vec<String> = match name {
             _ if is_error => out.iter().take(3).map(|s| s.to_string()).collect(),
-            "bash" => out.iter().take(3).map(|s| s.to_string()).collect(),
+            "bash" | "$" => out.iter().take(if name == "$" { 8 } else { 3 }).map(|s| s.to_string()).collect(),
             "read" => vec![format!("{} lines", out.len())],
             "web_search" => Vec::new(),
             _ => out.iter().take(1).map(|s| s.to_string()).collect(),
@@ -167,7 +162,7 @@ impl Shared {
             let l: String = l.chars().take(200).collect();
             lines.push(Line::styled(format!("{mark}{l}"), style));
         }
-        if matches!(name, "bash") && out.len() > shown.len() {
+        if matches!(name, "bash" | "$") && out.len() > shown.len() {
             lines.push(Line::styled(format!("    … +{} lines", out.len() - shown.len()), DIM));
         }
         self.block(Kind::Tool, lines);
@@ -372,6 +367,25 @@ struct Running {
     started: Instant,
     /// A slash command (its output is printed as a note) rather than a turn.
     command: Option<&'static str>,
+    /// The command loads choices for this picker instead of printing.
+    pick: Option<&'static str>,
+    /// A `!command` the user runs themselves.
+    shell: Option<String>,
+}
+
+/// A list to choose from (model, effort), filtered by typing.
+struct Picker {
+    kind: &'static str,
+    items: Vec<String>,
+    filter: String,
+    sel: usize,
+}
+
+impl Picker {
+    fn visible(&self) -> Vec<&String> {
+        let f = self.filter.to_lowercase();
+        self.items.iter().filter(|i| i.to_lowercase().contains(&f)).collect()
+    }
 }
 
 struct Tui {
@@ -382,6 +396,9 @@ struct Tui {
     editor: Editor,
     running: Option<Running>,
     popup: usize,
+    picker: Option<Picker>,
+    /// Output of `!commands`, handed to the agent with the next message.
+    shell_context: Vec<String>,
     ctrl_c: Option<Instant>,
     cfg: Config,
     quit: bool,
@@ -396,6 +413,8 @@ pub async fn run(app: Arc<App>) -> Result<()> {
         editor: Editor::new(),
         running: None,
         popup: 0,
+        picker: None,
+        shell_context: Vec::new(),
         ctrl_c: None,
         cfg: Config::load()?,
         quit: false,
@@ -507,6 +526,10 @@ impl Tui {
             return;
         }
 
+        if self.picker.is_some() {
+            return self.on_picker_key(k);
+        }
+
         let popup = self.popup_items();
         match k.code {
             KeyCode::Char('c') if ctrl => {
@@ -544,7 +567,7 @@ impl Tui {
             KeyCode::Enter => self.submit(&popup),
             KeyCode::Tab => {
                 if let Some((name, _)) = popup.get(self.popup) {
-                    self.editor.set(&format!("/{name}{}", if takes_args(name) { " " } else { "" }));
+                    self.editor.set(&format!("/{name}"));
                 }
             }
             KeyCode::Backspace if alt || ctrl => self.editor.delete_word(),
@@ -574,14 +597,62 @@ impl Tui {
         }
     }
 
+    fn on_picker_key(&mut self, k: KeyEvent) {
+        let Some(p) = &mut self.picker else { return };
+        let n = p.visible().len();
+        match k.code {
+            KeyCode::Esc => self.picker = None,
+            KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => self.picker = None,
+            KeyCode::Up if n > 0 => p.sel = (p.sel + n - 1) % n,
+            KeyCode::Down if n > 0 => p.sel = (p.sel + 1) % n,
+            KeyCode::Backspace => {
+                p.filter.pop();
+                p.sel = 0;
+            }
+            KeyCode::Char(c) => {
+                p.filter.push(c);
+                p.sel = 0;
+            }
+            KeyCode::Enter => {
+                let choice = p.visible().get(p.sel).map(|s| s.to_string());
+                let kind = p.kind;
+                self.picker = None;
+                if let Some(choice) = choice {
+                    self.apply_choice(kind, &choice);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_choice(&mut self, kind: &str, choice: &str) {
+        let res = Config::load().and_then(|mut cfg| {
+            if kind == "model" {
+                cfg.model = choice.to_string();
+            } else {
+                cfg.effort = choice.to_string();
+            }
+            cfg.save().map(|_| cfg)
+        });
+        let mut s = self.shared.lock().unwrap();
+        match res {
+            Ok(cfg) => {
+                s.note(&format!("{} set to {choice}", if kind == "model" { "Model" } else { "Effort" }), DIM);
+                self.cfg = cfg;
+            }
+            Err(e) => s.note(&format!("✗ {e:#}"), Style::new().fg(RED)),
+        }
+    }
+
+    fn open_picker(&mut self, kind: &'static str, items: Vec<String>) {
+        let current = if kind == "model" { &self.cfg.model } else { &self.cfg.effort };
+        let sel = items.iter().position(|i| i == current).unwrap_or(0);
+        self.picker = Some(Picker { kind, items, filter: String::new(), sel });
+    }
+
     fn submit(&mut self, popup: &[(&'static str, &'static str)]) {
         if let Some((name, _)) = popup.get(self.popup) {
-            let full = format!("/{name}");
-            if self.editor.text != full && takes_args(name) {
-                self.editor.set(&format!("{full} "));
-                return;
-            }
-            self.editor.set(&full);
+            self.editor.set(&format!("/{name}"));
         }
         self.popup = 0;
         let text = self.editor.submit();
@@ -594,11 +665,18 @@ impl Tui {
         {
             return self.command(name, args);
         }
+        if let Some(cmd) = text.strip_prefix('!').map(str::trim).filter(|c| !c.is_empty()) {
+            return self.shell(cmd.to_string());
+        }
         if self.running.is_some() {
             self.shared.lock().unwrap().queued.push(text);
         } else {
             self.shared.lock().unwrap().user(&text);
-            self.start_turn(Input::text(text));
+            let mut input = text;
+            if !self.shell_context.is_empty() {
+                input = format!("{}\n\n{input}", std::mem::take(&mut self.shell_context).join("\n\n"));
+            }
+            self.start_turn(Input::text(input));
         }
     }
 
@@ -609,6 +687,15 @@ impl Tui {
             "stop" if self.running.is_some() => self.cancel(),
             "stop" => note(self, "Nothing is running."),
             _ if self.running.is_some() => note(self, "Wait for the reply to finish, or press esc to stop it."),
+            "effort" if args.is_empty() => {
+                let items = crate::llm::efforts(&self.cfg.provider).iter().map(|s| s.to_string()).collect();
+                self.open_picker("effort", items);
+            }
+            "model" if args.is_empty() => {
+                let (app, cfg) = (self.app.clone(), self.cfg.clone());
+                let handle = tokio::spawn(async move { app.llm.models(&cfg).await.map(|m| m.join("\n")) });
+                self.running = Some(Running { handle, cancel: CancellationToken::new(), started: Instant::now(), command: Some("Loading models"), pick: Some("model"), shell: None });
+            }
             _ => {
                 self.shared.lock().unwrap().note(&format!("/{name} {args}"), DIM);
                 let label: &'static str = match name {
@@ -617,9 +704,19 @@ impl Tui {
                 };
                 let (app, name, args) = (self.app.clone(), name.to_string(), args.to_string());
                 let handle = tokio::spawn(async move { commands::run(&app, SESSION, &name, &args).await });
-                self.running = Some(Running { handle, cancel: CancellationToken::new(), started: Instant::now(), command: Some(label) });
+                self.running = Some(Running { handle, cancel: CancellationToken::new(), started: Instant::now(), command: Some(label), pick: None, shell: None });
             }
         }
+    }
+
+    /// `!command`: runs in the workspace; the output goes to the agent with the next message.
+    fn shell(&mut self, cmd: String) {
+        if self.running.is_some() {
+            return self.shared.lock().unwrap().note("Wait for the reply to finish, or press esc to stop it.", DIM);
+        }
+        let c = cmd.clone();
+        let handle = tokio::spawn(async move { crate::tools::run("bash", &serde_json::json!({"command": c}), crate::tools::Scope::Full).await });
+        self.running = Some(Running { handle, cancel: CancellationToken::new(), started: Instant::now(), command: Some("Running"), pick: None, shell: Some(cmd) });
     }
 
     fn start_turn(&mut self, input: Input) {
@@ -632,7 +729,7 @@ impl Tui {
         let cancel = CancellationToken::new();
         let (app, c) = (self.app.clone(), cancel.clone());
         let handle = tokio::spawn(async move { agent::turn(&app, SESSION, input, &c, &ch).await });
-        self.running = Some(Running { handle, cancel, started: Instant::now(), command: None });
+        self.running = Some(Running { handle, cancel, started: Instant::now(), command: None, pick: None, shell: None });
     }
 
     fn finish(&mut self, res: Result<String>) {
@@ -644,6 +741,22 @@ impl Tui {
             s.activity = None;
             s.approval = None;
             match (&res, running.command) {
+                (_, Some(_)) if running.shell.is_some() => {
+                    let cmd = running.shell.clone().unwrap_or_default();
+                    let (out, failed) = match &res {
+                        Ok(o) => (o.clone(), false),
+                        Err(e) => (format!("error: {e:#}"), true),
+                    };
+                    s.tool_lines(&format!("$: {cmd}"), &out, failed);
+                    let shown: String = out.chars().take(8000).collect();
+                    self.shell_context.push(format!("[The user ran `{cmd}` in the shell themselves; output:]\n{shown}"));
+                }
+                (Ok(out), Some(_)) if running.pick.is_some() => {
+                    let items: Vec<String> = out.lines().map(str::to_string).collect();
+                    if items.is_empty() {
+                        s.note("The provider listed no models; set one with /model <id>.", DIM);
+                    }
+                }
                 (Ok(out), Some(_)) => {
                     let lines = render::markdown(out);
                     s.block(Kind::Note, lines);
@@ -664,6 +777,12 @@ impl Tui {
             }
             queued
         };
+        if let (Some(kind), Ok(out)) = (running.pick, &res) {
+            let items: Vec<String> = out.lines().map(str::to_string).collect();
+            if !items.is_empty() {
+                self.open_picker(kind, items);
+            }
+        }
         if !next.is_empty() {
             self.start_turn(Input::merge(next.into_iter().map(Input::text).collect()));
         }
@@ -738,7 +857,7 @@ impl Tui {
             .map(|(i, row)| {
                 let prompt = if first + i == 0 { Span::styled(" › ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)) } else { Span::raw("   ") };
                 if placeholder {
-                    let hint = if busy { "Add to this turn…" } else { "Message August, or / for commands" };
+                    let hint = if busy { "Add to this turn…" } else { "Message August · / commands · ! shell" };
                     Line::from(vec![prompt, Span::styled(hint, DIM)])
                 } else {
                     Line::from(vec![prompt, Span::raw(row.to_string())])
@@ -748,9 +867,25 @@ impl Tui {
         let border = Style::new().fg(if busy || approval_open { ACCENT } else { Color::DarkGray });
         let (top, bottom) = self.borders(width, border);
 
-        // Below the box: command suggestions.
+        // Below the box: a picker, or command suggestions.
         let mut below: Vec<Line> = Vec::new();
-        if !popup.is_empty() {
+        if let Some(p) = &self.picker {
+            let current = if p.kind == "model" { &self.cfg.model } else { &self.cfg.effort };
+            let items = p.visible();
+            let title = if p.kind == "model" { "Choose a model" } else { "Choose reasoning effort" };
+            let filter = if p.filter.is_empty() { String::new() } else { format!(" · filter: {}", p.filter) };
+            below.push(Line::from(vec![Span::styled(format!("  {title}"), Style::new().add_modifier(Modifier::BOLD)), Span::styled(filter, DIM)]));
+            let start = (p.sel + 1).saturating_sub(10);
+            for (i, item) in items.iter().enumerate().skip(start).take(10) {
+                let selected = i == p.sel;
+                let (mark, style) = if selected { ("❯ ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)) } else { ("  ", Style::new()) };
+                let check = if *item == current { " ✓" } else { "" };
+                below.push(Line::from(vec![Span::styled(format!("{mark}{item}"), style), Span::styled(check, Style::new().fg(GREEN))]));
+            }
+            if items.is_empty() {
+                below.push(Line::styled("  no match", DIM));
+            }
+        } else if !popup.is_empty() {
             self.popup = self.popup.min(popup.len() - 1);
             let start = (self.popup + 1).saturating_sub(8);
             for (i, (name, desc)) in popup.iter().enumerate().skip(start).take(8) {
@@ -769,7 +904,7 @@ impl Tui {
 
         let skip = live.len() - live_rows;
         let live: Vec<Line> = live.into_iter().skip(skip).collect();
-        let show_cursor = !approval_open;
+        let show_cursor = !approval_open && self.picker.is_none();
         self.ui.term.draw(|f| {
             let area = f.area();
             let w = area.width;
@@ -812,7 +947,9 @@ impl Tui {
             Span::styled("──╮", border),
         ]);
 
-        let hint = if self.shared.lock().unwrap().approval.is_some() {
+        let hint = if self.picker.is_some() {
+            "type to filter · ↑↓ choose · ⏎ select · esc cancel".to_string()
+        } else if self.shared.lock().unwrap().approval.is_some() {
             "y allow · a always · n deny".to_string()
         } else if self.ctrl_c.is_some() {
             "press ctrl+c again to quit".to_string()
