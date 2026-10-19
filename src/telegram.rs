@@ -238,7 +238,7 @@ pub async fn serve(app: Arc<App>, bot: Arc<Bot>) -> Result<()> {
         for u in updates {
             offset = offset.max(u["update_id"].as_i64().unwrap_or(0) + 1);
             if !u["callback_query"].is_null() {
-                on_button(&bot, &u["callback_query"], &allowed).await;
+                on_button(&app, &bot, &u["callback_query"], &allowed).await;
                 continue;
             }
             let m = &u["message"];
@@ -265,6 +265,16 @@ pub async fn serve(app: Arc<App>, bot: Arc<Bot>) -> Result<()> {
                 // These change the conversation, so they wait for the running turn.
                 Some((name @ ("new" | "reset" | "compact"), args)) => {
                     let _ = state.tx.send(Job::Command(name.into(), args.into()));
+                }
+                Some(("resume", _)) => {
+                    let list = agent::archived(&format!("tg-{chat}"), 10);
+                    if list.is_empty() {
+                        bot.api.send(chat, "No earlier conversations yet.").await.ok();
+                    } else {
+                        let rows: Vec<Vec<Value>> = list.iter().map(|a| vec![json!({"text": a.label, "callback_data": format!("res:{}", a.file)})]).collect();
+                        let markup = json!({"reply_markup": {"inline_keyboard": rows}});
+                        bot.api.send_html(chat, "<b>Go back to a conversation</b>", "Go back to a conversation", markup).await.ok();
+                    }
                 }
                 Some((kind @ ("model" | "effort"), "")) => {
                     let (app, bot) = (app.clone(), bot.clone());
@@ -418,7 +428,7 @@ async fn send_picker(app: &App, bot: &Bot, chat: i64, kind: &str) {
     bot.api.send_html(chat, &html, title, json!({"reply_markup": {"inline_keyboard": rows}})).await.ok();
 }
 
-async fn on_button(bot: &Bot, q: &Value, allowed: &[i64]) {
+async fn on_button(app: &App, bot: &Bot, q: &Value, allowed: &[i64]) {
     let id = q["id"].as_str().unwrap_or_default();
     let data = q["data"].as_str().unwrap_or_default();
     let chat = q["message"]["chat"]["id"].as_i64().unwrap_or_default();
@@ -442,6 +452,25 @@ async fn on_button(bot: &Bot, q: &Value, allowed: &[i64]) {
         };
         bot.api.call("answerCallbackQuery", json!({"callback_query_id": id})).await.ok();
         bot.api.edit_html(chat, message, &text, value, json!({})).await.ok();
+        return;
+    }
+    if let Some(file) = data.strip_prefix("res:") {
+        let busy = bot.chats.lock().unwrap().get(&chat).is_some_and(|c| c.inbox.lock().unwrap().busy);
+        if busy {
+            bot.api.call("answerCallbackQuery", json!({"callback_query_id": id, "text": "Wait for the current reply to finish"})).await.ok();
+            return;
+        }
+        let session = format!("tg-{chat}");
+        let text = match agent::restore(&session, file) {
+            Ok(()) => {
+                app.reset(&session);
+                let n = agent::Session::load(&session).map(|s| s.messages.len()).unwrap_or(0);
+                format!("↩️ Back in that conversation ({n} messages). Carry on.")
+            }
+            Err(e) => format!("⚠️ {}", markdown::escape(&format!("{e:#}"))),
+        };
+        bot.api.call("answerCallbackQuery", json!({"callback_query_id": id})).await.ok();
+        bot.api.edit_html(chat, message, &text, &text, json!({})).await.ok();
         return;
     }
     let Some((key, choice)) = data.strip_prefix("ok:").and_then(|d| d.split_once(':')) else { return };

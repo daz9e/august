@@ -373,18 +373,19 @@ struct Running {
     shell: Option<String>,
 }
 
-/// A list to choose from (model, effort), filtered by typing.
+/// A list to choose from (model, effort, conversation), filtered by typing.
 struct Picker {
     kind: &'static str,
-    items: Vec<String>,
+    /// (label, value)
+    items: Vec<(String, String)>,
     filter: String,
     sel: usize,
 }
 
 impl Picker {
-    fn visible(&self) -> Vec<&String> {
+    fn visible(&self) -> Vec<&(String, String)> {
         let f = self.filter.to_lowercase();
-        self.items.iter().filter(|i| i.to_lowercase().contains(&f)).collect()
+        self.items.iter().filter(|(label, _)| label.to_lowercase().contains(&f)).collect()
     }
 }
 
@@ -441,7 +442,7 @@ impl Tui {
     fn banner(&mut self) {
         let count = Session::load(SESSION).map(|s| s.messages.len()).unwrap_or(0);
         let home = config::home().display().to_string().replace(&config::user_home().display().to_string(), "~");
-        let convo = if count == 0 { "new conversation".to_string() } else { format!("continuing a conversation of {count} messages · /new to start over") };
+        let convo = if count == 0 { "new conversation".to_string() } else { format!("continuing a conversation of {count} message{} · /new to start over", if count == 1 { "" } else { "s" }) };
         let mut s = self.shared.lock().unwrap();
         s.out.push(Line::from(vec![
             Span::styled("✻ August", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
@@ -614,7 +615,7 @@ impl Tui {
                 p.sel = 0;
             }
             KeyCode::Enter => {
-                let choice = p.visible().get(p.sel).map(|s| s.to_string());
+                let choice = p.visible().get(p.sel).map(|(_, v)| v.clone());
                 let kind = p.kind;
                 self.picker = None;
                 if let Some(choice) = choice {
@@ -626,6 +627,9 @@ impl Tui {
     }
 
     fn apply_choice(&mut self, kind: &str, choice: &str) {
+        if kind == "resume" {
+            return self.resume(choice);
+        }
         let res = Config::load().and_then(|mut cfg| {
             if kind == "model" {
                 cfg.model = choice.to_string();
@@ -644,10 +648,40 @@ impl Tui {
         }
     }
 
-    fn open_picker(&mut self, kind: &'static str, items: Vec<String>) {
-        let current = if kind == "model" { &self.cfg.model } else { &self.cfg.effort };
-        let sel = items.iter().position(|i| i == current).unwrap_or(0);
+    fn current(&self, kind: &str) -> &str {
+        match kind {
+            "model" => &self.cfg.model,
+            "effort" => &self.cfg.effort,
+            _ => "",
+        }
+    }
+
+    fn open_picker(&mut self, kind: &'static str, items: Vec<(String, String)>) {
+        let sel = items.iter().position(|(_, v)| v == self.current(kind)).unwrap_or(0);
         self.picker = Some(Picker { kind, items, filter: String::new(), sel });
+    }
+
+    /// Switches to an archived conversation and shows where it left off.
+    fn resume(&mut self, file: &str) {
+        let mut s = self.shared.lock().unwrap();
+        if let Err(e) = agent::restore(SESSION, file) {
+            return s.note(&format!("✗ {e:#}"), Style::new().fg(RED));
+        }
+        self.app.reset(SESSION);
+        let session = Session::load(SESSION);
+        let msgs = session.as_ref().map(|s| s.messages.as_slice()).unwrap_or_default();
+        s.note(&format!("Resumed a conversation of {} messages. Where it left off:", msgs.len()), DIM);
+        let texts: Vec<&crate::llm::Message> = msgs.iter().filter(|m| !m.text().is_empty()).collect();
+        for m in texts.iter().skip(texts.len().saturating_sub(2)) {
+            let text = m.text();
+            if m.role == crate::llm::Role::User {
+                let text = text.split_once("] ").filter(|_| text.starts_with('[')).map(|(_, r)| r).unwrap_or(&text);
+                s.user(text);
+            } else {
+                s.block(Kind::Text, render::markdown(&text));
+            }
+        }
+        s.gap();
     }
 
     fn submit(&mut self, popup: &[(&'static str, &'static str)]) {
@@ -688,8 +722,16 @@ impl Tui {
             "stop" => note(self, "Nothing is running."),
             _ if self.running.is_some() => note(self, "Wait for the reply to finish, or press esc to stop it."),
             "effort" if args.is_empty() => {
-                let items = crate::llm::efforts(&self.cfg.provider).iter().map(|s| s.to_string()).collect();
+                let items = crate::llm::efforts(&self.cfg.provider).iter().map(|s| (s.to_string(), s.to_string())).collect();
                 self.open_picker("effort", items);
+            }
+            "resume" => {
+                let items: Vec<(String, String)> = agent::archived(SESSION, 30).into_iter().map(|a| (a.label, a.file)).collect();
+                if items.is_empty() {
+                    note(self, "No earlier conversations yet.");
+                } else {
+                    self.open_picker("resume", items);
+                }
             }
             "model" if args.is_empty() => {
                 let (app, cfg) = (self.app.clone(), self.cfg.clone());
@@ -778,7 +820,7 @@ impl Tui {
             queued
         };
         if let (Some(kind), Ok(out)) = (running.pick, &res) {
-            let items: Vec<String> = out.lines().map(str::to_string).collect();
+            let items: Vec<(String, String)> = out.lines().map(|l| (l.to_string(), l.to_string())).collect();
             if !items.is_empty() {
                 self.open_picker(kind, items);
             }
@@ -870,17 +912,22 @@ impl Tui {
         // Below the box: a picker, or command suggestions.
         let mut below: Vec<Line> = Vec::new();
         if let Some(p) = &self.picker {
-            let current = if p.kind == "model" { &self.cfg.model } else { &self.cfg.effort };
+            let current = self.current(p.kind);
             let items = p.visible();
-            let title = if p.kind == "model" { "Choose a model" } else { "Choose reasoning effort" };
+            let title = match p.kind {
+                "model" => "Choose a model",
+                "effort" => "Choose reasoning effort",
+                _ => "Go back to a conversation",
+            };
             let filter = if p.filter.is_empty() { String::new() } else { format!(" · filter: {}", p.filter) };
             below.push(Line::from(vec![Span::styled(format!("  {title}"), Style::new().add_modifier(Modifier::BOLD)), Span::styled(filter, DIM)]));
             let start = (p.sel + 1).saturating_sub(10);
-            for (i, item) in items.iter().enumerate().skip(start).take(10) {
+            for (i, (label, value)) in items.iter().enumerate().skip(start).take(10) {
                 let selected = i == p.sel;
                 let (mark, style) = if selected { ("❯ ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)) } else { ("  ", Style::new()) };
-                let check = if *item == current { " ✓" } else { "" };
-                below.push(Line::from(vec![Span::styled(format!("{mark}{item}"), style), Span::styled(check, Style::new().fg(GREEN))]));
+                let check = if value == current { " ✓" } else { "" };
+                let label: String = label.chars().take(width.saturating_sub(6)).collect();
+                below.push(Line::from(vec![Span::styled(format!("{mark}{label}"), style), Span::styled(check, Style::new().fg(GREEN))]));
             }
             if items.is_empty() {
                 below.push(Line::styled("  no match", DIM));

@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 pub const LIST: &[(&str, &str)] = &[
     ("new", "Start a new conversation"),
+    ("resume", "Go back to an earlier conversation"),
     ("stop", "Stop the current reply"),
     ("model", "Show or set the model"),
     ("effort", "Show or set reasoning effort"),
@@ -32,6 +33,14 @@ pub async fn run(app: &Arc<App>, session: &str, name: &str, args: &str) -> Resul
             "Started a new conversation.".into()
         }
         "stop" => "Nothing to stop.".into(),
+        "resume" => {
+            let list = agent::archived(session, 10);
+            if list.is_empty() {
+                "No earlier conversations yet.".into()
+            } else {
+                list.iter().map(|a| format!("- {}", a.label)).collect::<Vec<_>>().join("\n")
+            }
+        }
         "model" | "effort" => {
             let mut cfg = Config::load()?;
             if !args.is_empty() {

@@ -173,17 +173,79 @@ impl History<'_> {
     }
 }
 
+fn archive_dir() -> PathBuf {
+    sessions_dir().join("archive")
+}
+
 /// Moves the session to `sessions/archive/`; the next message starts a new one.
+/// A session without messages is just dropped.
 pub fn archive(id: &str) -> Result<bool> {
     let path = session_path(id);
     if !path.exists() {
         return Ok(false);
     }
-    let dir = sessions_dir().join("archive");
-    std::fs::create_dir_all(&dir)?;
+    let lines = std::fs::read_to_string(&path)?.lines().filter(|l| !l.trim().is_empty()).count();
+    if lines <= 1 {
+        std::fs::remove_file(&path)?;
+        return Ok(false);
+    }
+    std::fs::create_dir_all(archive_dir())?;
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    std::fs::rename(&path, dir.join(format!("{id}-{stamp}.jsonl")))?;
+    std::fs::rename(&path, archive_dir().join(format!("{id}-{stamp}.jsonl")))?;
     Ok(true)
+}
+
+/// An archived conversation, for /resume.
+pub struct Archived {
+    /// File name inside `sessions/archive/`.
+    pub file: String,
+    /// "Oct 19 21:40 · first message…"
+    pub label: String,
+}
+
+/// Archived conversations of a session, newest first.
+pub fn archived(id: &str, limit: usize) -> Vec<Archived> {
+    let prefix = format!("{id}-");
+    let mut files: Vec<String> = std::fs::read_dir(archive_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".jsonl") && n.strip_prefix(&prefix).is_some_and(|rest| rest.len() == "20261019-214000.jsonl".len()))
+        .collect();
+    files.sort_unstable_by(|a, b| b.cmp(a));
+    files.truncate(limit);
+    files
+        .into_iter()
+        .map(|file| {
+            let stamp = &file[prefix.len()..file.len() - ".jsonl".len()];
+            let when = chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%d-%H%M%S").map(|t| t.format("%b %d %H:%M").to_string()).unwrap_or_default();
+            let text = std::fs::read_to_string(archive_dir().join(&file)).unwrap_or_default();
+            let first = text
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Message>(l).ok())
+                .find(|m| m.role == Role::User && !m.text().is_empty())
+                .map(|m| m.text())
+                .unwrap_or_default();
+            // Drop the "[2026-10-19 21:40 Mon +02:00] " stamp and keep the first line.
+            let first = first.split_once("] ").filter(|_| first.starts_with('[')).map(|(_, r)| r.to_string()).unwrap_or(first);
+            let mut preview: String = first.lines().next().unwrap_or_default().chars().take(60).collect();
+            if first.chars().count() > 60 {
+                preview.push('…');
+            }
+            Archived { label: format!("{when} · {preview}"), file }
+        })
+        .collect()
+}
+
+/// Makes an archived conversation the current one again (the current one is archived).
+pub fn restore(id: &str, file: &str) -> Result<()> {
+    anyhow::ensure!(file.starts_with(&format!("{id}-")) && !file.contains(['/', '\\']) && file.ends_with(".jsonl"), "not a conversation of this chat");
+    let from = archive_dir().join(file);
+    anyhow::ensure!(from.exists(), "that conversation no longer exists");
+    archive(id)?;
+    std::fs::rename(from, session_path(id))?;
+    Ok(())
 }
 
 // ---------- system prompt ----------
