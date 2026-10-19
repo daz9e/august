@@ -116,20 +116,60 @@ impl Session {
             }
             Err(e) => return Err(e.into()),
         }
+        // A crash between a tool call and its result would leave the API rejecting the history.
+        if let Some(fix) = s.messages.last().and_then(interrupted_results) {
+            s.append(std::slice::from_ref(&fix))?;
+            s.messages.push(fix);
+        }
         Ok(s)
     }
 
     fn append(&self, messages: &[Message]) -> Result<()> {
-        let mut f = std::fs::OpenOptions::new().append(true).create(true).open(session_path(&self.id))?;
-        for m in messages {
-            writeln!(f, "{}", serde_json::to_string(m)?)?;
-        }
-        Ok(())
+        append_to(&session_path(&self.id), messages)
     }
 
     /// User messages typed by a person (not tool results).
     fn user_messages(&self) -> usize {
         self.messages.iter().filter(|m| m.role == Role::User && !m.text().is_empty()).count()
+    }
+}
+
+fn append_to(path: &std::path::Path, messages: &[Message]) -> Result<()> {
+    let mut f = std::fs::OpenOptions::new().append(true).create(true).open(path)?;
+    for m in messages {
+        writeln!(f, "{}", serde_json::to_string(m)?)?;
+    }
+    Ok(())
+}
+
+/// Results for tool calls in `last` that never got one.
+fn interrupted_results(last: &Message) -> Option<Message> {
+    let results: Vec<Block> = last
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            Block::ToolUse { id, .. } if last.role == Role::Assistant => {
+                Some(Block::ToolResult { tool_use_id: id.clone(), content: "[interrupted: August stopped before this finished]".into(), is_error: true })
+            }
+            _ => None,
+        })
+        .collect();
+    (!results.is_empty()).then_some(Message { role: Role::User, content: results })
+}
+
+/// A conversation's messages; with a file, each message is written the moment it exists.
+struct History<'a> {
+    msgs: &'a mut Vec<Message>,
+    file: Option<PathBuf>,
+}
+
+impl History<'_> {
+    fn push(&mut self, m: Message) -> Result<()> {
+        if let Some(f) = &self.file {
+            append_to(f, std::slice::from_ref(&m))?;
+        }
+        self.msgs.push(m);
+        Ok(())
     }
 }
 
@@ -232,11 +272,9 @@ fn user_blocks(input: &Input, prefix: &str) -> Vec<Block> {
 pub async fn turn(app: &Arc<App>, id: &str, input: Input, cancel: &CancellationToken, ch: &dyn Channel) -> Result<String> {
     let cfg = Config::load()?;
     let mut s = Session::load(id)?;
-    let start = s.messages.len();
-    s.messages.push(Message { role: Role::User, content: user_blocks(&input, &format!("[{}] ", stamp())) });
-    let res = run(app, id, &cfg, &s.system, &mut s.messages, Scope::Full, cancel, ch).await;
-    s.append(&s.messages[start..])?;
-    let reply = res?;
+    let mut h = History { msgs: &mut s.messages, file: Some(session_path(id)) };
+    h.push(Message { role: Role::User, content: user_blocks(&input, &format!("[{}] ", stamp())) })?;
+    let reply = run(app, id, &cfg, &s.system, &mut h, Scope::Full, cancel, ch).await?;
 
     if cfg.review_every > 0 && s.user_messages() % cfg.review_every == 0 {
         tokio::spawn(review(app.clone(), id.to_string(), cfg.clone(), s.system.clone(), s.messages.clone()));
@@ -251,14 +289,14 @@ pub async fn turn(app: &Arc<App>, id: &str, input: Input, cancel: &CancellationT
     Ok(reply)
 }
 
-/// The model/tool loop. Appends every message to `msgs`, also when stopped or failing.
+/// The model/tool loop. Every message goes into `h` as it is produced, also when stopped or failing.
 #[allow(clippy::too_many_arguments)]
 async fn run(
     app: &App,
     id: &str,
     cfg: &Config,
     system: &str,
-    msgs: &mut Vec<Message>,
+    h: &mut History<'_>,
     scope: Scope,
     cancel: &CancellationToken,
     ch: &dyn Channel,
@@ -268,7 +306,7 @@ async fn run(
         let mut on_text = |t: &str| ch.text(t);
         let c = tokio::select! {
             _ = cancel.cancelled() => bail!(Cancelled),
-            r = app.llm.complete(cfg, system, msgs, &specs, &mut on_text) => r?,
+            r = app.llm.complete(cfg, system, h.msgs, &specs, &mut on_text) => r?,
         };
         app.record(id, cfg, c.usage);
         for summary in c.message.content.iter().filter_map(llm::activity) {
@@ -285,7 +323,7 @@ async fn run(
             })
             .collect();
         let text = c.message.text();
-        msgs.push(c.message);
+        h.push(c.message)?;
         if calls.is_empty() {
             match c.stop {
                 // A long server-side tool run (web search) paused; let the model continue.
@@ -310,7 +348,7 @@ async fn run(
         for input in ch.steer() {
             results.extend(user_blocks(&input, "[The user sent this while you were working]\n"));
         }
-        msgs.push(Message { role: Role::User, content: results });
+        h.push(Message { role: Role::User, content: results })?;
         if cancel.is_cancelled() {
             bail!(Cancelled);
         }
@@ -392,7 +430,8 @@ Only file tools inside the august home are available. If nothing is worth saving
 async fn review(app: Arc<App>, id: String, cfg: Config, system: String, mut msgs: Vec<Message>) {
     msgs.push(Message::user(REVIEW_PROMPT));
     let cancel = CancellationToken::new();
-    match run(&app, &id, &cfg, &system, &mut msgs, Scope::HomeFilesOnly, &cancel, &Silent).await {
+    let mut h = History { msgs: &mut msgs, file: None };
+    match run(&app, &id, &cfg, &system, &mut h, Scope::HomeFilesOnly, &cancel, &Silent).await {
         Ok(reply) => log(&format!("{id}: review: {}", reply.lines().next().unwrap_or_default())),
         Err(e) => log(&format!("review failed: {e:#}")),
     }
@@ -410,5 +449,32 @@ pub fn log(msg: &str) {
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(config::home().join("august.log")) {
         writeln!(f, "{line}").ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn closes_dangling_tool_calls() {
+        let call = Message {
+            role: Role::Assistant,
+            content: vec![
+                Block::Text { text: "checking".into() },
+                Block::ToolUse { id: "a".into(), name: "bash".into(), input: json!({}) },
+                Block::ToolUse { id: "b".into(), name: "read".into(), input: json!({}) },
+            ],
+        };
+        let fix = interrupted_results(&call).unwrap();
+        assert_eq!(fix.role, Role::User);
+        let ids: Vec<&str> = fix.content.iter().filter_map(|b| match b {
+            Block::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert!(interrupted_results(&Message::user("hi")).is_none());
+        assert!(interrupted_results(&fix).is_none());
     }
 }
