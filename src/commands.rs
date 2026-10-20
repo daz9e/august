@@ -80,7 +80,7 @@ pub async fn run(app: &Arc<App>, session: &str, name: &str, args: &str) -> Resul
             out
         }
         "update" if args == "check" => match crate::update::check().await? {
-            None => format!("Up to date ({}).", crate::update::version()),
+            None => format!("Up to date: {}.", crate::update::version()),
             Some(a) => crate::update::describe(&a),
         },
         "update" => crate::update::update(false).await?,

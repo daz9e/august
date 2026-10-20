@@ -220,7 +220,7 @@ async fn serve(app: Arc<App>) -> Result<()> {
 async fn update_cmd(check: bool) -> Result<()> {
     if check {
         match update::check().await? {
-            None => println!("{GREEN}✓{RESET} Up to date ({}).", update::version()),
+            None => println!("{GREEN}✓{RESET} Up to date: {}.", update::version()),
             Some(a) => println!("{}", update::describe(&a)),
         }
         return Ok(());

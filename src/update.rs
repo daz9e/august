@@ -76,7 +76,7 @@ pub fn describe(a: &Available) -> String {
 /// otherwise only its error tail is reported. Returns what happened, for the user.
 pub async fn update(show_build: bool) -> Result<String> {
     let Some(a) = check().await? else {
-        return Ok(format!("Already up to date ({}).", version()));
+        return Ok(format!("Already up to date: {}.", version()));
     };
     if show_build {
         println!("{}\n\nBuilding (a few minutes the first time)…", describe(&a));
@@ -90,29 +90,48 @@ pub async fn update(show_build: bool) -> Result<String> {
 
 async fn install(sha: &str, show_build: bool) -> Result<()> {
     let root = config::home().join("build");
+    let src = root.join("src");
+    // A path install, not `cargo install --git`: cargo never rechecks git packages in a
+    // reused target dir, so it would keep the old build.
+    if !src.join(".git").exists() {
+        std::fs::create_dir_all(&src)?;
+        run(tokio::process::Command::new("git").arg("-C").arg(&src).arg("init").arg("-q"), false).await?;
+    }
+    let url = format!("https://github.com/{REPO}");
+    run(tokio::process::Command::new("git").arg("-C").arg(&src).args(["fetch", "-q", "--depth", "1", &url, sha]), false).await?;
+    run(tokio::process::Command::new("git").arg("-C").arg(&src).args(["checkout", "-q", "--force", "FETCH_HEAD"]), false).await?;
     let rustup_cargo = config::user_home().join(".cargo/bin/cargo"); // launchd's PATH may lack it
     let cargo = if rustup_cargo.exists() { rustup_cargo.into_os_string() } else { "cargo".into() };
     let mut cmd = tokio::process::Command::new(cargo);
-    cmd.args(["install", "--locked", "--force", "--git", &format!("https://github.com/{REPO}"), "--rev", sha, "--root"])
+    cmd.args(["install", "--locked", "--force", "--path"])
+        .arg(&src)
+        .arg("--root")
         .arg(&root)
         .env("CARGO_TARGET_DIR", root.join("target")) // kept between updates, so rebuilds are incremental
-        .env("AUGUST_COMMIT", sha)
-        .stdin(std::process::Stdio::null());
-    if !show_build {
-        cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    }
-    let out = cmd.output().await.context("cargo is needed to update; install Rust from https://rustup.rs")?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let tail: Vec<&str> = err.lines().rev().take(15).collect::<Vec<_>>().into_iter().rev().collect();
-        bail!("the build failed\n{}", tail.join("\n"));
-    }
+        .env("AUGUST_COMMIT", sha);
+    run(&mut cmd, show_build).await?;
     // Rename over the running binary: the old inode stays valid for this process.
     let exe = std::env::current_exe()?.canonicalize()?;
     let tmp = exe.with_extension("new");
     std::fs::copy(root.join("bin/august"), &tmp)?;
     std::fs::rename(&tmp, &exe).with_context(|| format!("cannot replace {}", exe.display()))?;
     agent::log(&format!("updated to {sha}"));
+    Ok(())
+}
+
+/// Runs a build step; on failure the error carries the tail of its output.
+async fn run(cmd: &mut tokio::process::Command, show_output: bool) -> Result<()> {
+    cmd.stdin(std::process::Stdio::null());
+    if !show_output {
+        cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    }
+    let program = cmd.as_std().get_program().to_owned();
+    let out = cmd.output().await.with_context(|| format!("cannot run {program:?}; updating needs git and cargo (https://rustup.rs)"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let tail: Vec<&str> = err.lines().rev().take(15).collect::<Vec<_>>().into_iter().rev().collect();
+        bail!("{program:?} failed\n{}", tail.join("\n"));
+    }
     Ok(())
 }
 
