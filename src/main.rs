@@ -49,7 +49,7 @@ enum Cmd {
     },
     /// Run the Telegram bot and scheduled jobs in the foreground
     Serve,
-    /// Run `august serve` in the background, starting at login (macOS)
+    /// Run `august serve` in the background and start it by itself (launchd on macOS, systemd on Linux)
     Service {
         #[command(subcommand)]
         action: ServiceAction,
@@ -224,7 +224,7 @@ async fn serve(app: Arc<App>) -> Result<()> {
     if let Some(bot) = &bot {
         tokio::spawn(update::notify(bot.clone()));
     }
-    // launchd stops the service with SIGTERM; background processes live in their own groups.
+    // launchd and systemd stop the service with SIGTERM; background processes live in their own groups.
     tokio::spawn(async {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
         term.recv().await;
@@ -283,8 +283,11 @@ fn service_cmd(action: ServiceAction) -> Result<()> {
     match action {
         ServiceAction::Install => {
             ensure_provider()?;
-            service::install()?;
-            println!("{GREEN}✓{RESET} August now runs in the background and starts at login. Logs: `august logs`");
+            let warning = service::install()?;
+            println!("{GREEN}✓{RESET} August now runs in the background and starts by itself. Logs: `august logs`");
+            if let Some(w) = warning {
+                println!("{RED}!{RESET} {w}");
+            }
         }
         ServiceAction::Uninstall => {
             if service::uninstall()? {

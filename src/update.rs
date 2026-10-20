@@ -196,7 +196,7 @@ async fn build(sha: &str, root: &Path, show_build: bool) -> Result<PathBuf> {
     let url = format!("https://github.com/{REPO}");
     run(tokio::process::Command::new("git").arg("-C").arg(&src).args(["fetch", "-q", "--depth", "1", &url, sha]), false).await?;
     run(tokio::process::Command::new("git").arg("-C").arg(&src).args(["checkout", "-q", "--force", "FETCH_HEAD"]), false).await?;
-    let rustup_cargo = config::user_home().join(".cargo/bin/cargo"); // launchd's PATH may lack it
+    let rustup_cargo = config::user_home().join(".cargo/bin/cargo"); // the service's PATH may lack it
     let cargo = if rustup_cargo.exists() { rustup_cargo.into_os_string() } else { "cargo".into() };
     let mut cmd = tokio::process::Command::new(cargo);
     cmd.args(["install", "--locked", "--force", "--path"])
@@ -211,7 +211,7 @@ async fn build(sha: &str, root: &Path, show_build: bool) -> Result<PathBuf> {
 
 /// Run first thing in `august serve`. After an update the service must stay up for a minute
 /// (`confirm_start`); if it instead keeps dying, put the previous binary back and exit, so
-/// launchd starts that one.
+/// launchd/systemd start that one.
 pub fn guard_start() {
     let pending = config::home().join("update-pending");
     let Ok(text) = std::fs::read_to_string(&pending) else { return };
@@ -261,8 +261,8 @@ async fn run(cmd: &mut tokio::process::Command, show_output: bool) -> Result<()>
 
 /// Restarts whatever runs the old binary and says so.
 fn restart() -> String {
-    // This process is the launchd service: exit shortly (so the reply goes out first); KeepAlive starts the new one.
-    if std::env::var("XPC_SERVICE_NAME").is_ok_and(|n| n == service::LABEL) {
+    // This process is the service: exit shortly (so the reply goes out first); launchd/systemd start the new one.
+    if service::is_self() {
         mark_pending();
         tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(3)).await;

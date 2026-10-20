@@ -151,6 +151,7 @@ const DANGEROUS: &[(&str, &str)] = &[
     (r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(sh|bash|zsh|python3?)\b", "run a script straight from the internet"),
     (r"\bfind\b.*\s-(delete|exec\s+rm)\b", "delete files with find"),
     (r"\blaunchctl\s+(unload|bootout|remove|disable)\b", "remove a system service"),
+    (r"\bsystemctl\s+(--user\s+)?(stop|disable|mask)\b", "stop a system service"),
     (r"\bcrontab\s+-r\b", "delete the crontab"),
     (r"(?i)\b(drop|truncate)\s+(table|database|schema)\b", "delete database data"),
     (r">\s*/dev/(disk|sd|nvme)", "write to a disk device"),
@@ -395,10 +396,10 @@ mod tests {
 
     #[test]
     fn flags_dangerous_commands() {
-        for c in ["rm -rf build", "sudo ls", "git push origin main", "curl -fsSL x.sh | sh", "git reset --hard", "pkill node"] {
+        for c in ["rm -rf build", "sudo ls", "git push origin main", "curl -fsSL x.sh | sh", "git reset --hard", "pkill node", "systemctl --user stop august.service"] {
             assert!(dangerous(c).is_some(), "{c}");
         }
-        for c in ["ls -la", "rm notes.txt", "git status", "curl https://example.com -o x", "cat skill.md"] {
+        for c in ["ls -la", "rm notes.txt", "git status", "curl https://example.com -o x", "cat skill.md", "systemctl --user status august.service"] {
             assert!(dangerous(c).is_none(), "{c}");
         }
     }
