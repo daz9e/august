@@ -1,0 +1,35 @@
+name: Release
+
+# Push a tag matching Cargo.toml's version (v0.2.0) to publish macOS binaries.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Check the tag matches Cargo.toml
+        run: test "$GITHUB_REF_NAME" = "v$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+      - run: cargo test --locked
+      - name: Build
+        env:
+          AUGUST_COMMIT: ${{ github.sha }}
+        run: |
+          mkdir dist
+          for arch in aarch64 x86_64; do
+            cargo build --release --locked --target $arch-apple-darwin
+            cp target/$arch-apple-darwin/release/august dist/august-$arch-macos
+          done
+          cd dist && for f in august-*; do shasum -a 256 $f > $f.sha256; done
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
