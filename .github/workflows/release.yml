@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag matching Cargo.toml's version (v0.2.0) to publish macOS binaries.
+# Push a tag matching Cargo.toml's version (v0.2.0) to publish macOS and Linux binaries.
 on:
   push:
     tags: ['v*']
@@ -9,27 +9,54 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: macos-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+          # musl: static binaries that run on any distribution.
+          - os: ubuntu-latest
+            targets: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            targets: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ matrix.targets }}
       - name: Check the tag matches Cargo.toml
         run: test "$GITHUB_REF_NAME" = "v$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo test --locked
       - name: Build
         env:
           AUGUST_COMMIT: ${{ github.sha }}
         run: |
           mkdir dist
-          for arch in aarch64 x86_64; do
-            cargo build --release --locked --target $arch-apple-darwin
-            cp target/$arch-apple-darwin/release/august dist/august-$arch-macos
+          for target in $(echo "${{ matrix.targets }}" | tr , ' '); do
+            case $target in *darwin) os=macos ;; *linux*) os=linux ;; esac
+            name="august-${target%%-*}-$os"
+            cargo build --release --locked --target $target
+            cp target/$target/release/august dist/$name
+            (cd dist && shasum -a 256 $name > $name.sha256)
           done
-          cd dist && for f in august-*; do shasum -a 256 $f > $f.sha256; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

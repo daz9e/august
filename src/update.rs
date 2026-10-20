@@ -157,10 +157,11 @@ fn replace(exe: &Path, new: &Path) -> Result<()> {
 
 /// Release asset name for this machine, as published by .github/workflows/release.yml.
 fn asset() -> Result<String> {
-    if std::env::consts::OS != "macos" {
-        bail!("release binaries are macOS only; set update.from_source to build from source");
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    if !matches!(os, "macos" | "linux") || !matches!(arch, "aarch64" | "x86_64") {
+        bail!("no release binaries for {os} {arch}; set update.from_source to build from source");
     }
-    Ok(format!("august-{}-macos", std::env::consts::ARCH))
+    Ok(format!("august-{arch}-{os}"))
 }
 
 async fn download(tag: &str, root: &Path) -> Result<PathBuf> {
