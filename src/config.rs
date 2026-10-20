@@ -17,8 +17,25 @@ pub struct Config {
     pub memory: Memory,
     pub telegram: Telegram,
     pub voice: Voice,
+    /// Left out of config.json while it has its default.
+    #[serde(skip_serializing_if = "Update::is_default")]
+    pub update: Update,
     #[serde(skip)]
     pub secrets: Secrets,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Update {
+    /// Follow every commit on master and build it here (needs git and cargo) instead of
+    /// installing release binaries.
+    pub from_source: bool,
+}
+
+impl Update {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,6 +207,7 @@ impl Config {
         let secret = cfg.secrets.slots().into_iter().find(|(name, _)| name.eq_ignore_ascii_case(key)).map(|(_, slot)| *slot = (!raw.is_empty()).then(|| raw.to_string()));
         if secret.is_none() {
             let mut json = serde_json::to_value(&cfg)?;
+            json["update"] = serde_json::to_value(&cfg.update)?; // hidden while default, still settable
             let slot = key.split_once('.').and_then(|(section, field)| json.get_mut(section)?.get_mut(field));
             let Some(slot) = slot else { bail!("unknown setting `{key}`; settings are section.key, see `august config`") };
             *slot = match slot {
@@ -226,6 +244,7 @@ fn migrate_flat(j: &Value) -> Result<Config> {
         memory: Memory { review_every: j["review_every"].as_u64().map(|n| n as usize).unwrap_or(d.memory.review_every) },
         telegram: Telegram { allowed: serde_json::from_value(j["telegram_allowed"].clone()).unwrap_or_default() },
         voice: Voice { model: s("transcribe_model").unwrap_or(d.voice.model) },
+        update: Update::default(),
         secrets: Secrets { anthropic_key: s("anthropic_key"), openai_key: s("openai_key"), telegram_token: s("telegram_token") },
     };
     std::fs::copy(path(), home().join("config.json.old"))?;
@@ -259,7 +278,8 @@ mod tests {
     #[test]
     fn schema_matches_config() {
         let schema: Value = serde_json::from_str(include_str!("../config.schema.json")).unwrap();
-        let cfg = serde_json::to_value(Config::default()).unwrap();
+        let mut cfg = serde_json::to_value(Config::default()).unwrap();
+        cfg["update"] = serde_json::to_value(Update::default()).unwrap(); // not written while default
         let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
         let mut sections = keys(&schema["properties"]);
         sections.retain(|k| k != "$schema");
@@ -272,6 +292,16 @@ mod tests {
                 assert!(props[key]["description"].is_string(), "{section}.{key}");
             }
         }
+    }
+
+    #[test]
+    fn update_section_only_when_set() {
+        let mut cfg = Config::default();
+        assert!(serde_json::to_value(&cfg).unwrap().get("update").is_none());
+        cfg.update.from_source = true;
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(json["update"]["from_source"], true);
+        assert_eq!(serde_json::from_value::<Config>(json).unwrap().update, cfg.update);
     }
 
     #[test]

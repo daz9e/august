@@ -61,7 +61,7 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<ConfigAction>,
     },
-    /// Install the latest version from GitHub (needs cargo)
+    /// Install the latest version from GitHub
     Update {
         /// Only show whether there is a new version
         #[arg(long)]
@@ -91,8 +91,12 @@ enum ServiceAction {
 
 #[tokio::main]
 async fn main() {
+    let cmd = Cli::parse().cmd.unwrap_or(Cmd::Chat);
+    if matches!(cmd, Cmd::Serve) {
+        update::guard_start();
+    }
     let app = App::new();
-    let res = match Cli::parse().cmd.unwrap_or(Cmd::Chat) {
+    let res = match cmd {
         Cmd::Chat => chat(app).await,
         Cmd::Login => login().await,
         Cmd::Status => status().await,
@@ -216,6 +220,7 @@ async fn serve(app: Arc<App>) -> Result<()> {
     let cfg = Config::load()?;
     let bot = cfg.secrets.telegram_token.as_deref().map(telegram::Bot::new);
     tokio::spawn(cron::run(app.clone(), bot.clone()));
+    tokio::spawn(update::confirm_start());
     if let Some(bot) = &bot {
         tokio::spawn(update::notify(bot.clone()));
     }

@@ -50,6 +50,14 @@
       "properties": {
         "model": { "description": "OpenAI model that transcribes voice messages (needs OPENAI_API_KEY in .env).", "type": "string", "default": "gpt-4o-mini-transcribe" }
       }
+    },
+    "update": {
+      "description": "How `august update` gets new versions. Not written to the file while it has its default.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "from_source": { "description": "Follow every commit on master and build it on this machine (needs git and cargo) instead of installing release binaries.", "type": "boolean", "default": false }
+      }
     }
   }
 }
