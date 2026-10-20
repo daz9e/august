@@ -310,17 +310,17 @@ pub async fn complete(
         .iter()
         .map(|t| json!({"type": "function", "name": t.name, "description": t.description, "parameters": t.schema, "strict": false}))
         .collect();
-    if cfg.web_search {
+    if cfg.tools.web_search {
         tools.push(json!({"type": "web_search", "external_web_access": true}));
     }
     let body = json!({
-        "model": cfg.model,
+        "model": cfg.model.name,
         "instructions": system,
         "input": encode(messages),
         "tools": tools,
         "stream": true,
         "store": false,
-        "reasoning": {"effort": cfg.effort},
+        "reasoning": {"effort": cfg.model.effort},
         "include": ["reasoning.encrypted_content"],
     });
 

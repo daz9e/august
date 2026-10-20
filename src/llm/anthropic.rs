@@ -164,11 +164,11 @@ pub async fn complete(
         .iter()
         .map(|t| json!({"name": t.name, "description": t.description, "input_schema": t.schema}))
         .collect();
-    if cfg.web_search {
+    if cfg.tools.web_search {
         tools.push(json!({"type": "web_search_20260209", "name": "web_search"}));
     }
     let mut body = json!({
-        "model": cfg.model,
+        "model": cfg.model.name,
         "max_tokens": 64000,
         "stream": true,
         "system": system,
@@ -178,12 +178,12 @@ pub async fn complete(
         "cache_control": {"type": "ephemeral"},
     });
     // Haiku 4.5 and older models take neither adaptive thinking nor effort.
-    if !cfg.model.contains("haiku-4") {
+    if !cfg.model.name.contains("haiku-4") {
         body["thinking"] = json!({"type": "adaptive"});
-        body["output_config"] = json!({"effort": cfg.effort});
+        body["output_config"] = json!({"effort": cfg.model.effort});
     }
     let mut req = http.post(format!("{API}/messages")).header("x-api-key", key).header("anthropic-version", "2023-06-01");
-    if FALLBACK_MODELS.contains(&cfg.model.as_str()) {
+    if FALLBACK_MODELS.contains(&cfg.model.name.as_str()) {
         body["fallbacks"] = json!("default");
         req = req.header("anthropic-beta", "server-side-fallback-2026-07-01");
     }

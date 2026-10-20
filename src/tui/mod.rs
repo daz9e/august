@@ -446,7 +446,7 @@ impl Tui {
         let mut s = self.shared.lock().unwrap();
         s.out.push(Line::from(vec![
             Span::styled("✻ August", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {} · {}", self.cfg.model, self.cfg.provider), DIM),
+            Span::styled(format!("  {} · {}", self.cfg.model.name, self.cfg.model.provider), DIM),
         ]));
         s.out.push(Line::styled(format!("  {home} · {convo}"), DIM));
         s.last = Kind::Note;
@@ -632,9 +632,9 @@ impl Tui {
         }
         let res = Config::load().and_then(|mut cfg| {
             if kind == "model" {
-                cfg.model = choice.to_string();
+                cfg.model.name = choice.to_string();
             } else {
-                cfg.effort = choice.to_string();
+                cfg.model.effort = choice.to_string();
             }
             cfg.save().map(|_| cfg)
         });
@@ -650,8 +650,8 @@ impl Tui {
 
     fn current(&self, kind: &str) -> &str {
         match kind {
-            "model" => &self.cfg.model,
-            "effort" => &self.cfg.effort,
+            "model" => &self.cfg.model.name,
+            "effort" => &self.cfg.model.effort,
             _ => "",
         }
     }
@@ -722,7 +722,7 @@ impl Tui {
             "stop" => note(self, "Nothing is running."),
             _ if self.running.is_some() => note(self, "Wait for the reply to finish, or press esc to stop it."),
             "effort" if args.is_empty() => {
-                let items = crate::llm::efforts(&self.cfg.provider).iter().map(|s| (s.to_string(), s.to_string())).collect();
+                let items = crate::llm::efforts(&self.cfg.model.provider).iter().map(|s| (s.to_string(), s.to_string())).collect();
                 self.open_picker("effort", items);
             }
             "resume" => {
@@ -976,10 +976,10 @@ impl Tui {
     /// The box's top border carries the status, the bottom one the key hints.
     fn borders(&self, width: usize, border: Style) -> (Line<'static>, Line<'static>) {
         let st = self.app.stats(SESSION);
-        let left = format!(" ✻ {} · {} ", self.cfg.model, self.cfg.effort);
+        let left = format!(" ✻ {} · {} ", self.cfg.model.name, self.cfg.model.effort);
         let mut right = String::new();
         if st.last.context() > 0 {
-            let pct = st.last.context() as f64 * 100.0 / self.cfg.context_tokens.max(1) as f64;
+            let pct = st.last.context() as f64 * 100.0 / self.cfg.session.compact_at.max(1) as f64;
             right += &format!(" {:.1}k context ({pct:.0}%)", st.last.context() as f64 / 1000.0);
             if let Some(c) = st.cost {
                 right += &format!(" · ${c:.2}");

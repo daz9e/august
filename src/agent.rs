@@ -49,7 +49,7 @@ impl App {
         let s = all.entry(session.into()).or_default();
         s.last = u;
         s.total += u;
-        if let Some(c) = llm::cost(&cfg.provider, &cfg.model, &u) {
+        if let Some(c) = llm::cost(&cfg.model.provider, &cfg.model.name, &u) {
             *s.cost.get_or_insert(0.0) += c;
         }
     }
@@ -338,12 +338,12 @@ pub async fn turn(app: &Arc<App>, id: &str, input: Input, cancel: &CancellationT
     h.push(Message { role: Role::User, content: user_blocks(&input, &format!("[{}] ", stamp())) })?;
     let reply = run(app, id, &cfg, &s.system, &mut h, Scope::Full, cancel, ch).await?;
 
-    if cfg.review_every > 0 && s.user_messages() % cfg.review_every == 0 {
+    if cfg.memory.review_every > 0 && s.user_messages() % cfg.memory.review_every == 0 {
         tokio::spawn(review(app.clone(), id.to_string(), cfg.clone(), s.system.clone(), s.messages.clone()));
     }
     let context = app.stats(id).last.context();
-    if context > cfg.context_tokens {
-        log(&format!("{id}: context {context} > {}, compacting", cfg.context_tokens));
+    if context > cfg.session.compact_at {
+        log(&format!("{id}: context {context} > {}, compacting", cfg.session.compact_at));
         if let Err(e) = compact(app, id).await {
             log(&format!("{id}: compaction failed: {e:#}"));
         }
@@ -426,7 +426,7 @@ async fn call(app: &App, id: &str, cfg: &Config, name: &str, input: &Value, scop
             anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
             ch.send_file(&path, input["caption"].as_str().unwrap_or_default()).await
         }
-        "bash" if cfg.approvals && matches!(scope, Scope::Full) => {
+        "bash" if cfg.tools.approvals && matches!(scope, Scope::Full) => {
             let command = input["command"].as_str().unwrap_or_default();
             if let Some(reason) = tools::dangerous(command) {
                 let key = (id.to_string(), reason);

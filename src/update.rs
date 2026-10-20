@@ -167,7 +167,7 @@ pub async fn notify(bot: Arc<Bot>) {
             && std::fs::read_to_string(&mark).ok().as_deref() != Some(a.sha.as_str())
         {
             let text = format!("{}\n\nSend /update to install it.", describe(&a));
-            for user in Config::load().map(|c| c.telegram_allowed).unwrap_or_default() {
+            for user in Config::load().map(|c| c.telegram.allowed).unwrap_or_default() {
                 bot.api.send(user, &text).await.ok();
             }
             std::fs::write(&mark, &a.sha).ok();

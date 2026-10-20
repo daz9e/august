@@ -234,7 +234,7 @@ pub async fn serve(app: Arc<App>, bot: Arc<Bot>) -> Result<()> {
                 continue;
             }
         };
-        let allowed = Config::load().map(|c| c.telegram_allowed).unwrap_or_default();
+        let allowed = Config::load().map(|c| c.telegram.allowed).unwrap_or_default();
         for u in updates {
             offset = offset.max(u["update_id"].as_i64().unwrap_or(0) + 1);
             if !u["callback_query"].is_null() {
@@ -389,11 +389,11 @@ async fn read_message(bot: &Bot, m: &Value) -> Result<Option<Input>> {
 /// Speech to text with the OpenAI API; `None` when no key is configured.
 async fn transcribe(http: &reqwest::Client, path: &Path) -> Result<Option<String>> {
     let cfg = Config::load()?;
-    let Some(key) = cfg.openai_key else { return Ok(None) };
+    let Some(key) = cfg.secrets.openai_key else { return Ok(None) };
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "audio.ogg".into());
     let name = if name.ends_with(".oga") { name.replace(".oga", ".ogg") } else { name };
     let form = reqwest::multipart::Form::new()
-        .text("model", cfg.transcribe_model)
+        .text("model", cfg.voice.model)
         .part("file", reqwest::multipart::Part::bytes(std::fs::read(path)?).file_name(name));
     let resp = http.post("https://api.openai.com/v1/audio/transcriptions").bearer_auth(key).multipart(form).send().await?;
     let status = resp.status();
@@ -416,9 +416,9 @@ async fn send_picker(app: &App, bot: &Bot, chat: i64, kind: &str) {
             Err(e) => return drop(bot.api.send(chat, &format!("⚠️ Could not list models: {e:#}")).await),
         }
     } else {
-        crate::llm::efforts(&cfg.provider).iter().map(|s| s.to_string()).collect()
+        crate::llm::efforts(&cfg.model.provider).iter().map(|s| s.to_string()).collect()
     };
-    let current = if kind == "model" { &cfg.model } else { &cfg.effort };
+    let current = if kind == "model" { &cfg.model.name } else { &cfg.model.effort };
     let button = |i: &String| {
         let label = if i == current { format!("✓ {i}") } else { i.clone() };
         json!({"text": label, "callback_data": format!("set:{kind}:{i}")})
@@ -443,9 +443,9 @@ async fn on_button(app: &App, bot: &Bot, q: &Value, allowed: &[i64]) {
     if let Some((kind, value)) = data.strip_prefix("set:").and_then(|d| d.split_once(':')) {
         let res = Config::load().and_then(|mut cfg| {
             if kind == "model" {
-                cfg.model = value.into();
+                cfg.model.name = value.into();
             } else {
-                cfg.effort = value.into();
+                cfg.model.effort = value.into();
             }
             cfg.save()
         });

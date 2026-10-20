@@ -56,11 +56,28 @@ enum Cmd {
     },
     /// Follow the log
     Logs,
+    /// Show the settings, or change them
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
+    },
     /// Install the latest version from GitHub (needs cargo)
     Update {
         /// Only show whether there is a new version
         #[arg(long)]
         check: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Open config.json in $EDITOR
+    Edit,
+    /// Set `section.key` (e.g. model.effort high) or a secret (e.g. ANTHROPIC_API_KEY sk-...)
+    Set {
+        key: String,
+        #[arg(trailing_var_arg = true)]
+        value: Vec<String>,
     },
 }
 
@@ -83,6 +100,7 @@ async fn main() {
         Cmd::Serve => serve(app).await,
         Cmd::Service { action } => service_cmd(action),
         Cmd::Logs => logs(),
+        Cmd::Config { action } => config_cmd(action),
         Cmd::Update { check } => update_cmd(check).await,
     };
     tools::kill_background();
@@ -134,14 +152,14 @@ impl Channel for Plain {
 }
 
 fn ensure_provider() -> Result<()> {
-    if Config::load()?.provider.is_empty() {
+    if Config::load()?.model.provider.is_empty() {
         bail!("no model provider is set up yet, run `august login`");
     }
     Ok(())
 }
 
 async fn chat(app: Arc<App>) -> Result<()> {
-    if Config::load()?.provider.is_empty() {
+    if Config::load()?.model.provider.is_empty() {
         if !std::io::stdin().is_terminal() {
             ensure_provider()?;
         }
@@ -196,7 +214,7 @@ async fn serve(app: Arc<App>) -> Result<()> {
     agent::VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed);
     ensure_provider()?;
     let cfg = Config::load()?;
-    let bot = cfg.telegram_token.as_deref().map(telegram::Bot::new);
+    let bot = cfg.secrets.telegram_token.as_deref().map(telegram::Bot::new);
     tokio::spawn(cron::run(app.clone(), bot.clone()));
     if let Some(bot) = &bot {
         tokio::spawn(update::notify(bot.clone()));
@@ -215,6 +233,33 @@ async fn serve(app: Arc<App>) -> Result<()> {
             std::future::pending().await
         }
     }
+}
+
+fn config_cmd(action: Option<ConfigAction>) -> Result<()> {
+    match action {
+        None => {
+            println!("{DIM}{}{RESET}\n", config::path().display());
+            print!("{}", Config::show()?);
+        }
+        Some(ConfigAction::Edit) => {
+            if !config::path().exists() {
+                Config::load()?.save()?; // start from the defaults
+            }
+            let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+            // $EDITOR may carry arguments ("code -w").
+            let status = std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(config::path()).status()?;
+            if !status.success() {
+                bail!("{editor} exited with {status}");
+            }
+            Config::load()?;
+            println!("{GREEN}✓{RESET} Saved. The bot picks it up with the next message.");
+        }
+        Some(ConfigAction::Set { key, value }) => {
+            Config::set(&key, &value.join(" "))?;
+            println!("{GREEN}✓{RESET} {key} saved.");
+        }
+    }
+    Ok(())
 }
 
 async fn update_cmd(check: bool) -> Result<()> {
@@ -270,12 +315,12 @@ async fn status() -> Result<()> {
     let off = |s: &str| format!("{DIM}○ {s}{RESET}");
     let row = |k: &str, v: String| println!("  {k:<11}{v}");
     println!("{BOLD}August{RESET}  {DIM}{}{RESET}\n", config::home().display());
-    if cfg.provider.is_empty() {
+    if cfg.model.provider.is_empty() {
         row("Model", off("not set up · `august login`"));
     } else {
-        row("Model", ok(&format!("{} · {} · effort {}", cfg.model, cfg.provider, cfg.effort)));
+        row("Model", ok(&format!("{} · {} · effort {}", cfg.model.name, cfg.model.provider, cfg.model.effort)));
     }
-    row("Anthropic", if cfg.anthropic_key.is_some() { ok("API key saved") } else { off("no API key") });
+    row("Anthropic", if cfg.secrets.anthropic_key.is_some() { ok("API key saved") } else { off("no API key") });
     row(
         "ChatGPT",
         match llm::codex::signed_in() {
@@ -283,15 +328,15 @@ async fn status() -> Result<()> {
             None => off("not signed in"),
         },
     );
-    let telegram = match &cfg.telegram_token {
+    let telegram = match &cfg.secrets.telegram_token {
         Some(token) => match tokio::time::timeout(std::time::Duration::from_secs(5), telegram::username(token)).await {
-            Ok(Ok(name)) => ok(&format!("@{name} · {} allowed user(s)", cfg.telegram_allowed.len())),
+            Ok(Ok(name)) => ok(&format!("@{name} · {} allowed user(s)", cfg.telegram.allowed.len())),
             _ => format!("{RED}●{RESET} token saved, but Telegram did not answer"),
         },
         None => off("not connected"),
     };
     row("Telegram", telegram);
-    row("Voice", if cfg.openai_key.is_some() { ok(&format!("transcription with {}", cfg.transcribe_model)) } else { off("no transcription (add an OpenAI key in `august login`)") });
+    row("Voice", if cfg.secrets.openai_key.is_some() { ok(&format!("transcription with {}", cfg.voice.model)) } else { off("no transcription (add an OpenAI key in `august login`)") });
     row(
         "Service",
         match service::status() {
@@ -308,7 +353,7 @@ async fn status() -> Result<()> {
     };
     row("Version", version);
     let flag = |b: bool| if b { "on" } else { "off" };
-    row("Safety", format!("approvals for dangerous commands {} · web search {}", flag(cfg.approvals), flag(cfg.web_search)));
+    row("Safety", format!("approvals for dangerous commands {} · web search {}", flag(cfg.tools.approvals), flag(cfg.tools.web_search)));
     Ok(())
 }
 
@@ -338,16 +383,16 @@ async fn setup_provider() -> Result<()> {
 async fn setup_anthropic() -> Result<()> {
     let http = llm::http_client();
     let mut cfg = Config::load()?;
-    let key = match &cfg.anthropic_key {
+    let key = match &cfg.secrets.anthropic_key {
         Some(k) if Confirm::with_theme(&theme()).with_prompt("Use the saved Anthropic API key?").default(true).interact()? => k.clone(),
         _ => Password::with_theme(&theme()).with_prompt("Anthropic API key").interact()?.trim().to_string(),
     };
     let models = llm::anthropic::models(&http, &key).await?;
-    cfg.model = pick_model(models, "claude-opus-5-5")?;
-    cfg.anthropic_key = Some(key);
-    cfg.provider = "anthropic".into();
+    cfg.model.name = pick_model(models, "claude-opus-5-5")?;
+    cfg.secrets.anthropic_key = Some(key);
+    cfg.model.provider = "anthropic".into();
     cfg.save()?;
-    println!("{GREEN}✓{RESET} Using {} via Anthropic", cfg.model);
+    println!("{GREEN}✓{RESET} Using {} via Anthropic", cfg.model.name);
     Ok(())
 }
 
@@ -363,18 +408,18 @@ async fn setup_chatgpt() -> Result<()> {
         Vec::new()
     });
     let mut cfg = Config::load()?;
-    let preferred = if cfg.provider == "chatgpt" { cfg.model.clone() } else { String::new() };
-    cfg.model = pick_model(models, &preferred)?;
-    cfg.provider = "chatgpt".into();
+    let preferred = if cfg.model.provider == "chatgpt" { cfg.model.name.clone() } else { String::new() };
+    cfg.model.name = pick_model(models, &preferred)?;
+    cfg.model.provider = "chatgpt".into();
     cfg.save()?;
-    println!("{GREEN}✓{RESET} Using {} via ChatGPT", cfg.model);
+    println!("{GREEN}✓{RESET} Using {} via ChatGPT", cfg.model.name);
     Ok(())
 }
 
 async fn setup_telegram() -> Result<()> {
     let mut cfg = Config::load()?;
     println!("{DIM}Create a bot with @BotFather in Telegram (/newbot) and paste its token.{RESET}");
-    let token = match &cfg.telegram_token {
+    let token = match &cfg.secrets.telegram_token {
         Some(t) if Confirm::with_theme(&theme()).with_prompt("Keep the saved bot token?").default(true).interact()? => t.clone(),
         _ => Password::with_theme(&theme()).with_prompt("Bot token").interact()?.trim().to_string(),
     };
@@ -385,9 +430,9 @@ async fn setup_telegram() -> Result<()> {
     if !Confirm::with_theme(&theme()).with_prompt(format!("Allow {name} (id {id}) to use the bot?")).default(true).interact()? {
         bail!("not allowed, nothing saved");
     }
-    cfg.telegram_token = Some(token);
-    if !cfg.telegram_allowed.contains(&id) {
-        cfg.telegram_allowed.push(id);
+    cfg.secrets.telegram_token = Some(token);
+    if !cfg.telegram.allowed.contains(&id) {
+        cfg.telegram.allowed.push(id);
     }
     cfg.save()?;
     println!("{GREEN}✓{RESET} Telegram connected.");
@@ -404,9 +449,9 @@ async fn setup_voice() -> Result<()> {
     let mut cfg = Config::load()?;
     println!("{DIM}Voice messages are transcribed with the OpenAI API (about $0.003 per minute).{RESET}");
     let key = Password::with_theme(&theme()).with_prompt("OpenAI API key (empty to turn transcription off)").allow_empty_password(true).interact()?;
-    cfg.openai_key = (!key.trim().is_empty()).then(|| key.trim().to_string());
+    cfg.secrets.openai_key = (!key.trim().is_empty()).then(|| key.trim().to_string());
     cfg.save()?;
-    println!("{GREEN}✓{RESET} Voice transcription {}", if cfg.openai_key.is_some() { "on" } else { "off" });
+    println!("{GREEN}✓{RESET} Voice transcription {}", if cfg.secrets.openai_key.is_some() { "on" } else { "off" });
     Ok(())
 }
 
@@ -414,10 +459,10 @@ async fn login() -> Result<()> {
     let cfg = Config::load()?;
     let mark = |on: bool, s: String| if on { format!("{s}  ✓") } else { s };
     let items = [
-        mark(cfg.provider == "chatgpt", "ChatGPT — sign in with your ChatGPT account".into()),
-        mark(cfg.provider == "anthropic", "Anthropic — API key".into()),
-        mark(cfg.telegram_token.is_some(), "Telegram bot".into()),
-        mark(cfg.openai_key.is_some(), "Voice transcription — OpenAI API key".into()),
+        mark(cfg.model.provider == "chatgpt", "ChatGPT — sign in with your ChatGPT account".into()),
+        mark(cfg.model.provider == "anthropic", "Anthropic — API key".into()),
+        mark(cfg.secrets.telegram_token.is_some(), "Telegram bot".into()),
+        mark(cfg.secrets.openai_key.is_some(), "Voice transcription — OpenAI API key".into()),
     ];
     match Select::with_theme(&theme()).with_prompt("Set up").items(&items).default(0).interact()? {
         0 => setup_chatgpt().await?,
@@ -425,7 +470,7 @@ async fn login() -> Result<()> {
         2 => return setup_telegram().await,
         _ => return setup_voice().await,
     }
-    if Config::load()?.telegram_token.is_none() && Confirm::with_theme(&theme()).with_prompt("Connect a Telegram bot too?").default(false).interact()? {
+    if Config::load()?.secrets.telegram_token.is_none() && Confirm::with_theme(&theme()).with_prompt("Connect a Telegram bot too?").default(false).interact()? {
         setup_telegram().await?;
     }
     Ok(())

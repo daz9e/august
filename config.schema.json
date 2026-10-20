@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "August settings (~/.august/config.json)",
+  "description": "API keys and the Telegram bot token are not here; they live in ~/.august/.env.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "description": "Who runs the model; `august login` sets it up.", "enum": ["", "anthropic", "chatgpt"], "default": "" },
+        "name": { "description": "Model id; /model lists what the provider offers.", "type": "string", "default": "" },
+        "effort": { "description": "Reasoning effort. Anthropic also takes xhigh and max.", "enum": ["low", "medium", "high", "xhigh", "max"], "default": "medium" }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "web_search": { "description": "Let the model use the provider's built-in web search.", "type": "boolean", "default": true },
+        "approvals": { "description": "Ask before dangerous shell commands (rm -rf, sudo, git push, ...).", "type": "boolean", "default": true }
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "compact_at": { "description": "Summarize the conversation once a request's context exceeds this many tokens.", "type": "integer", "minimum": 1, "default": 150000 }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "review_every": { "description": "Review the conversation and update memory and skills every N user messages; 0 turns it off.", "type": "integer", "minimum": 0, "default": 10 }
+      }
+    },
+    "telegram": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowed": { "description": "Telegram user ids allowed to talk to the bot.", "type": "array", "items": { "type": "integer" }, "default": [] }
+      }
+    },
+    "voice": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": { "description": "OpenAI model that transcribes voice messages (needs OPENAI_API_KEY in .env).", "type": "string", "default": "gpt-4o-mini-transcribe" }
+      }
+    }
+  }
+}

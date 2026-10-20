@@ -113,7 +113,7 @@ async fn fire(app: &Arc<App>, bot: Option<Arc<Bot>>, job: &Job) -> Result<()> {
         "[Scheduled job \"{}\". Your final reply is sent to the user; reply exactly [SILENT] if there is nothing worth sending.]\n\n{}",
         job.id, job.prompt
     );
-    let chat = job.chat.or_else(|| Config::load().ok()?.telegram_allowed.first().copied());
+    let chat = job.chat.or_else(|| Config::load().ok()?.telegram.allowed.first().copied());
     let cancel = CancellationToken::new();
     // Approvals and files go to the chat the reply goes to.
     let result = match (&bot, chat) {

@@ -14,6 +14,7 @@ pub const LIST: &[(&str, &str)] = &[
     ("effort", "Show or set reasoning effort"),
     ("compact", "Summarize the conversation to free context"),
     ("status", "Model, context and spending"),
+    ("config", "Show or change settings"),
     ("update", "Install the latest version"),
     ("help", "List commands"),
 ];
@@ -46,14 +47,24 @@ pub async fn run(app: &Arc<App>, session: &str, name: &str, args: &str) -> Resul
             let mut cfg = Config::load()?;
             if !args.is_empty() {
                 if name == "model" {
-                    cfg.model = args.into();
+                    cfg.model.name = args.into();
                 } else {
-                    cfg.effort = args.into();
+                    cfg.model.effort = args.into();
                 }
                 cfg.save()?;
             }
-            format!("{} · {} · effort {}", cfg.provider, cfg.model, cfg.effort)
+            format!("{} · {} · effort {}", cfg.model.provider, cfg.model.name, cfg.model.effort)
         }
+        "config" => match args.split_once(char::is_whitespace) {
+            None if args.is_empty() => format!("```json\n{}```\nChange one with /config section.key value.", Config::show()?),
+            // A secret sent in a chat would stay in its history.
+            Some((key, _)) if crate::config::SECRETS.iter().any(|s| s.eq_ignore_ascii_case(key)) => format!("Set {key} in the terminal: `august config set {key} ...`"),
+            Some((key, value)) => {
+                Config::set(key, value.trim())?;
+                format!("{key} saved.")
+            }
+            None => format!("Give a value: /config {args} <value>"),
+        },
         "compact" => {
             agent::compact(app, session).await?;
             "Conversation compacted.".into()
@@ -63,15 +74,15 @@ pub async fn run(app: &Arc<App>, session: &str, name: &str, args: &str) -> Resul
             let s = Session::load(session)?;
             let st = app.stats(session);
             let k = |n: u64| format!("{:.1}k", n as f64 / 1000.0);
-            let mut out = format!("**{}** · {} · effort {}\n", cfg.model, cfg.provider, cfg.effort);
+            let mut out = format!("**{}** · {} · effort {}\n", cfg.model.name, cfg.model.provider, cfg.model.effort);
             out += &format!("August {}\n", crate::update::version());
             out += &format!("Conversation: {} messages\n", s.messages.len());
             if st.last.context() > 0 {
-                out += &format!("Context: {} of {} before compaction\n", k(st.last.context()), k(cfg.context_tokens));
+                out += &format!("Context: {} of {} before compaction\n", k(st.last.context()), k(cfg.session.compact_at));
                 out += &format!("Since start: {} in ({} cached), {} out", k(st.total.context()), k(st.total.cache_read), k(st.total.output));
                 out += &match st.cost {
                     Some(c) => format!(" · ${c:.2}"),
-                    None if cfg.provider == "chatgpt" => " · included in your ChatGPT plan".into(),
+                    None if cfg.model.provider == "chatgpt" => " · included in your ChatGPT plan".into(),
                     None => String::new(),
                 };
             } else {

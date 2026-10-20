@@ -171,9 +171,9 @@ impl Llm {
         tools: &[ToolSpec],
         on_text: OnText<'_>,
     ) -> Result<Completion> {
-        match cfg.provider.as_str() {
+        match cfg.model.provider.as_str() {
             "anthropic" => {
-                let Some(key) = cfg.anthropic_key.as_deref() else {
+                let Some(key) = cfg.secrets.anthropic_key.as_deref() else {
                     bail!("no Anthropic API key, run `august login`");
                 };
                 anthropic::complete(&self.http, key, cfg, system, messages, tools, on_text).await
@@ -188,8 +188,8 @@ impl Llm {
 impl Llm {
     /// Models the configured provider offers.
     pub async fn models(&self, cfg: &Config) -> Result<Vec<String>> {
-        match cfg.provider.as_str() {
-            "anthropic" => anthropic::models(&self.http, cfg.anthropic_key.as_deref().unwrap_or_default()).await,
+        match cfg.model.provider.as_str() {
+            "anthropic" => anthropic::models(&self.http, cfg.secrets.anthropic_key.as_deref().unwrap_or_default()).await,
             "chatgpt" => codex::models(&self.http, &self.codex).await,
             _ => bail!("no provider configured, run `august login`"),
         }
