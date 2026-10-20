@@ -16,7 +16,7 @@ dir="${AUGUST_BIN_DIR:-$HOME/.local/bin}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-echo "Downloading $name…"
+echo "Downloading ${name}…"
 curl -fsSL "$url" -o "$tmp/$name"
 curl -fsSL "$url.sha256" -o "$tmp/$name.sha256"
 (cd "$tmp" && shasum -a 256 -c "$name.sha256" >/dev/null) || { echo "Checksum mismatch; not installing." >&2; exit 1; }
