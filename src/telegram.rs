@@ -303,6 +303,9 @@ pub async fn serve(app: Arc<App>, bot: Arc<Bot>) -> Result<()> {
 }
 
 async fn reply_command(app: &Arc<App>, bot: &Bot, chat: i64, name: &str, args: &str) {
+    if name == "update" && args.is_empty() {
+        bot.api.send(chat, "Checking for updates; a build takes a few minutes…").await.ok();
+    }
     let text = match commands::run(app, &format!("tg-{chat}"), name, args).await {
         Ok(t) => t,
         Err(e) => format!("⚠️ {e:#}"),

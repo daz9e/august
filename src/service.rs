@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use std::path::PathBuf;
 use std::process::Command;
 
-const LABEL: &str = "com.august.agent";
+pub const LABEL: &str = "com.august.agent";
 
 fn plist() -> PathBuf {
     config::user_home().join("Library/LaunchAgents").join(format!("{LABEL}.plist"))

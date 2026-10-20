@@ -14,6 +14,7 @@ pub const LIST: &[(&str, &str)] = &[
     ("effort", "Show or set reasoning effort"),
     ("compact", "Summarize the conversation to free context"),
     ("status", "Model, context and spending"),
+    ("update", "Install the latest version"),
     ("help", "List commands"),
 ];
 
@@ -63,6 +64,7 @@ pub async fn run(app: &Arc<App>, session: &str, name: &str, args: &str) -> Resul
             let st = app.stats(session);
             let k = |n: u64| format!("{:.1}k", n as f64 / 1000.0);
             let mut out = format!("**{}** · {} · effort {}\n", cfg.model, cfg.provider, cfg.effort);
+            out += &format!("August {}\n", crate::update::version());
             out += &format!("Conversation: {} messages\n", s.messages.len());
             if st.last.context() > 0 {
                 out += &format!("Context: {} of {} before compaction\n", k(st.last.context()), k(cfg.context_tokens));
@@ -77,6 +79,11 @@ pub async fn run(app: &Arc<App>, session: &str, name: &str, args: &str) -> Resul
             }
             out
         }
+        "update" if args == "check" => match crate::update::check().await? {
+            None => format!("Up to date ({}).", crate::update::version()),
+            Some(a) => crate::update::describe(&a),
+        },
+        "update" => crate::update::update(false).await?,
         "help" => help(),
         "start" => format!("Hi! I'm August, your personal agent. Write to me, or send photos, files and voice messages.\n\n{}", help()),
         _ => format!("Unknown command /{name}. Try /help."),

@@ -9,6 +9,7 @@ mod service;
 mod telegram;
 mod tools;
 mod tui;
+mod update;
 
 use agent::{App, Cancelled};
 use anyhow::{Result, bail};
@@ -55,6 +56,12 @@ enum Cmd {
     },
     /// Follow the log
     Logs,
+    /// Install the latest version from GitHub (needs cargo)
+    Update {
+        /// Only show whether there is a new version
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -76,6 +83,7 @@ async fn main() {
         Cmd::Serve => serve(app).await,
         Cmd::Service { action } => service_cmd(action),
         Cmd::Logs => logs(),
+        Cmd::Update { check } => update_cmd(check).await,
     };
     tools::kill_background();
     if let Err(e) = res {
@@ -190,6 +198,9 @@ async fn serve(app: Arc<App>) -> Result<()> {
     let cfg = Config::load()?;
     let bot = cfg.telegram_token.as_deref().map(telegram::Bot::new);
     tokio::spawn(cron::run(app.clone(), bot.clone()));
+    if let Some(bot) = &bot {
+        tokio::spawn(update::notify(bot.clone()));
+    }
     // launchd stops the service with SIGTERM; background processes live in their own groups.
     tokio::spawn(async {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
@@ -204,6 +215,18 @@ async fn serve(app: Arc<App>) -> Result<()> {
             std::future::pending().await
         }
     }
+}
+
+async fn update_cmd(check: bool) -> Result<()> {
+    if check {
+        match update::check().await? {
+            None => println!("{GREEN}✓{RESET} Up to date ({}).", update::version()),
+            Some(a) => println!("{}", update::describe(&a)),
+        }
+        return Ok(());
+    }
+    println!("{}", update::update(true).await?);
+    Ok(())
 }
 
 fn service_cmd(action: ServiceAction) -> Result<()> {
@@ -277,6 +300,13 @@ async fn status() -> Result<()> {
             None => off("not installed · `august service install`"),
         },
     );
+    let version = match update::check().await {
+        Ok(None) => ok(&format!("{} · up to date", update::version())),
+        Ok(Some(_)) if update::COMMIT.is_none() => off(&format!("{} · `august update` installs the GitHub version", update::version())),
+        Ok(Some(a)) => format!("{RED}●{RESET} {} · update available ({}) · `august update`", update::version(), &a.sha[..7]),
+        Err(_) => off(&format!("{} · could not check GitHub", update::version())),
+    };
+    row("Version", version);
     let flag = |b: bool| if b { "on" } else { "off" };
     row("Safety", format!("approvals for dangerous commands {} · web search {}", flag(cfg.approvals), flag(cfg.web_search)));
     Ok(())

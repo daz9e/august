@@ -742,6 +742,7 @@ impl Tui {
                 self.shared.lock().unwrap().note(&format!("/{name} {args}"), DIM);
                 let label: &'static str = match name {
                     "compact" => "Compacting the conversation",
+                    "update" => "Updating",
                     _ => "Working",
                 };
                 let (app, name, args) = (self.app.clone(), name.to_string(), args.to_string());
