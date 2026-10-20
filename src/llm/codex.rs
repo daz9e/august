@@ -140,6 +140,9 @@ pub async fn login(http: &reqwest::Client) -> Result<Profile> {
         .await
         .with_context(|| format!("port {CALLBACK_PORT} is busy (is another login running?)"))?;
     println!("Open this link to sign in with ChatGPT:\n\n{url}\n");
+    if std::env::var_os("SSH_CONNECTION").is_some() {
+        println!("The browser redirects to localhost:{CALLBACK_PORT} on this machine; from your computer forward it first: ssh -L {CALLBACK_PORT}:localhost:{CALLBACK_PORT} <this host>\n");
+    }
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     std::process::Command::new(opener)
         .arg(url.as_str())
